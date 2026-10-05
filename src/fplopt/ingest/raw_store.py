@@ -5,12 +5,14 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 TS_FORMAT = "%Y-%m-%dT%H%M%SZ"
 SUFFIX = ".json.gz"
+TS_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{6}Z$")
 
 
 def format_ts(ts: datetime) -> str:
@@ -24,7 +26,12 @@ def parse_ts(text: str) -> datetime:
 
 
 class RawStore:
-    """Writes each response exactly once; existing files are never overwritten."""
+    """Writes each response exactly once; existing files are never overwritten.
+
+    `times()` / `latest()` list single-file snapshots (`<endpoint>/<ts>.json.gz`) only.
+    Grouped runs written with `name=` live in `<endpoint>/<ts>/` directories and are not
+    listed. Files whose names are not timestamps are ignored.
+    """
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
@@ -47,24 +54,33 @@ class RawStore:
             path = directory / f"{name}{SUFFIX}"
         directory.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_bytes(gzip.compress(content, mtime=0))
         try:
+            with open(tmp, "wb") as fh:
+                fh.write(gzip.compress(content, mtime=0))
+                fh.flush()
+                os.fsync(fh.fileno())
             os.link(tmp, path)  # atomic, and raises FileExistsError instead of overwriting
         finally:
-            tmp.unlink()
+            tmp.unlink(missing_ok=True)
         return path
 
-    def times(self, source: str, endpoint: str) -> list[datetime]:
+    def _entries(self, source: str, endpoint: str) -> list[tuple[datetime, Path]]:
         directory = self.root / source / endpoint
         if not directory.is_dir():
             return []
-        return sorted(parse_ts(p.name.removesuffix(SUFFIX)) for p in directory.glob(f"*{SUFFIX}"))
+        entries = []
+        for path in directory.glob(f"*{SUFFIX}"):
+            stem = path.name.removesuffix(SUFFIX)
+            if TS_PATTERN.match(stem):
+                entries.append((parse_ts(stem), path))
+        return sorted(entries)
+
+    def times(self, source: str, endpoint: str) -> list[datetime]:
+        return [ts for ts, _ in self._entries(source, endpoint)]
 
     def latest(self, source: str, endpoint: str) -> Path | None:
-        times = self.times(source, endpoint)
-        if not times:
-            return None
-        return self.root / source / endpoint / f"{format_ts(times[-1])}{SUFFIX}"
+        entries = self._entries(source, endpoint)
+        return entries[-1][1] if entries else None
 
     @staticmethod
     def read_json(path: Path) -> Any:

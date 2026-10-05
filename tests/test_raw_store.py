@@ -54,3 +54,20 @@ def test_timestamps_are_normalised_to_utc():
 def test_naive_timestamp_rejected(tmp_path):
     with pytest.raises(ValueError):
         RawStore(tmp_path).write("fpl", "fixtures", b"[]", datetime(2026, 10, 5))
+
+
+def test_unrecognised_files_are_ignored(tmp_path):
+    store = RawStore(tmp_path)
+    store.write("fpl", "fixtures", b"[]", T0)
+    (tmp_path / "fpl" / "fixtures" / "backup.json.gz").write_bytes(b"")
+    assert store.times("fpl", "fixtures") == [T0]
+    assert store.latest("fpl", "fixtures").name == "2026-10-05T030000Z.json.gz"
+
+
+def test_failed_write_leaves_no_temp_file(tmp_path):
+    store = RawStore(tmp_path)
+    store.write("fpl", "fixtures", b"[]", T0)
+    with pytest.raises(FileExistsError):
+        store.write("fpl", "fixtures", b"[1]", T0)
+    names = [p.name for p in (tmp_path / "fpl" / "fixtures").iterdir()]
+    assert names == ["2026-10-05T030000Z.json.gz"]
