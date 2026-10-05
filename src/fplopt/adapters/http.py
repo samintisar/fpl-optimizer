@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import httpx
-from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
-from tenacity.wait import wait_base
+from tenacity import (
+    RetryCallState,
+    Retrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 USER_AGENT = "fpl-optimizer/0.1 (+https://github.com/samintisar/fpl-optimizer)"
+
+RETRY_AFTER_CAP_S = 120.0
+
+_backoff = wait_exponential_jitter(initial=2, max=60)
 
 
 class InvalidPayload(Exception):
@@ -22,6 +31,16 @@ def _retryable(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code == 429 or exc.response.status_code >= 500
     return False
+
+
+def default_wait(retry_state: RetryCallState) -> float:
+    """Honour a 429's Retry-After (capped); otherwise exponential backoff with jitter."""
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+        retry_after = exc.response.headers.get("Retry-After", "")
+        if retry_after.isdigit():
+            return min(float(retry_after), RETRY_AFTER_CAP_S)
+    return _backoff(retry_state)
 
 
 def make_client(transport: httpx.BaseTransport | None = None) -> httpx.Client:
@@ -39,12 +58,12 @@ def get_json_response(
     params: Mapping[str, str] | None = None,
     *,
     attempts: int = 5,
-    wait: wait_base | None = None,
+    wait: Callable[[RetryCallState], float] | None = None,
 ) -> httpx.Response:
     """GET `url`, retrying transient failures. The returned body is guaranteed to be JSON."""
     for attempt in Retrying(
         stop=stop_after_attempt(attempts),
-        wait=wait if wait is not None else wait_exponential(multiplier=2, max=60),
+        wait=wait if wait is not None else default_wait,
         retry=retry_if_exception(_retryable),
         reraise=True,
     ):
@@ -56,4 +75,4 @@ def get_json_response(
             except ValueError as exc:
                 raise InvalidPayload(f"non-JSON response from {url}") from exc
             return response
-    raise AssertionError("unreachable")
+    raise AssertionError("unreachable: Retrying(reraise=True) always returns or raises")
