@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-models = ["lightgbm", "statsmodels", "scikit-learn", "pymc"]
+models = ["lightgbm", "statsmodels", "scikit-learn", "scipy"]
 optimize = ["highspy", "pulp"]
 bot = ["python-telegram-bot"]
 all = ["fplopt[models,optimize,bot]"]

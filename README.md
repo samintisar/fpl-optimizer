@@ -15,7 +15,7 @@ uv run pytest
 uv run ruff check .
 ```
 
-Extras: `models` (LightGBM, statsmodels, PyMC), `optimize` (HiGHS, PuLP), `bot` (python-telegram-bot).
+Extras: `models` (LightGBM, statsmodels, scikit-learn, scipy), `optimize` (HiGHS, PuLP), `bot` (python-telegram-bot).
 
 ### Environment variables
 

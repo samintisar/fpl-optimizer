@@ -33,8 +33,8 @@ This document is the source of truth for design decisions. Items marked **VERIFY
 | Analytical storage | Immutable `raw/` + Parquet tables queried with DuckDB |
 | User state | SQLite (DuckDB is single-writer; bot + pipeline would clash) |
 | Secrets | `.env` locally, env vars on server; never in the repo |
-| Solver | HiGHS (`highspy`), PuLP as fallback modeling layer |
-| Models | LightGBM (minutes), statsmodels / PyMC (team + player models) |
+| Solver | HiGHS. Models built with PuLP first (simplest to write/debug); the Phase 4 benchmark records model-build time separately from solve time, and if build time dominates, switch to `highspy`'s bulk API |
+| Models | LightGBM (minutes); scipy MLE + closed-form empirical-Bayes shrinkage, statsmodels (team + player models). No MCMC (PyMC) unless a model needs full posteriors |
 
 ### Repo layout
 ```
@@ -200,7 +200,7 @@ Luck moves a season total by roughly ±80–100 points, so across 9 develop+vali
 
 ## 6. Models
 
-Philosophy: **market where it is strong, structure elsewhere.** Betting markets are the best public forecast of team goals and clean sheets; structured Poisson/Bayesian models handle player shares and rare events; GBM handles minutes. **Minutes is the biggest lever** on xP accuracy and gets the most effort. A direct-GBM xP model (OpenFPL-style) is a low-priority challenger.
+Philosophy: **market where it is strong, structure elsewhere.** Betting markets are the best public forecast of team goals and clean sheets; structured Poisson models with empirical-Bayes shrinkage handle player shares and rare events; GBM handles minutes. **Minutes is the biggest lever** on xP accuracy and gets the most effort. A direct-GBM xP model (OpenFPL-style) is a low-priority challenger.
 
 **Store components, not just xP:** P(start), P(60+), Poisson rates, etc. Mean xP for now; full distributions (simulation) later become a small add-on.
 
@@ -430,3 +430,4 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-05 | xP tuned on MSE, not MAE; component metrics are proper scoring rules. | MAE rewards the median and biases xP down. |
 | 2026-10-05 | Chips solved by fixed-chip scenarios; FT value concave; bench weighted by P(needed). | Solver performance; public-tool evidence. |
 | 2026-10-05 | Own thin adapters; no `soccerdata` dependency; own Elo instead of ClubElo. | soccerdata needs a browser + CAPTCHA solving; ClubElo API is down. |
+| 2026-10-05 | Drop PyMC; models use scipy MLE + closed-form shrinkage. PuLP builds the MILP on HiGHS; switch to `highspy` bulk API only if model build time dominates. | Hundreds of walk-forward refits per backtest make MCMC impractical; one modelling layer, decided by measurement. |
