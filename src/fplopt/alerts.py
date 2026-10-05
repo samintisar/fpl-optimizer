@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 import httpx
+
+from fplopt.redact import redact  # importing also installs httpx log redaction
 
 log = logging.getLogger(__name__)
 
@@ -20,21 +23,25 @@ def send_admin_alert(
 ) -> bool:
     """Best effort: never raises, so a failed alert can't hide the original error."""
     if not token or not chat_id:
-        log.warning("telegram alert not configured; message was: %s", text)
+        log.warning("telegram alert not configured; message was: %s", redact(str(text)))
         return False
-    own_client = client is None
-    http = client or httpx.Client(timeout=15.0)
+    http = client
     try:
+        if http is None:
+            http = httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0))
         response = http.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text[:MAX_LEN]},
+            f"https://api.telegram.org/bot{token.strip()}/sendMessage",
+            json={"chat_id": str(chat_id), "text": str(text)[:MAX_LEN]},
         )
         response.raise_for_status()
         return True
-    except httpx.HTTPError as exc:
-        # Only the type name: the exception message would contain the bot token in the URL.
-        log.error("telegram alert failed: %s", type(exc).__name__)
+    except Exception as exc:
+        # Never log the exception message: it can contain the bot token from the URL.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        detail = f" (HTTP {status})" if status else ""
+        log.error("telegram alert failed: %s%s", type(exc).__name__, detail)
         return False
     finally:
-        if own_client:
-            http.close()
+        if client is None and http is not None:
+            with contextlib.suppress(Exception):
+                http.close()

@@ -1,5 +1,3 @@
-import logging
-
 import httpx
 import pytest
 from tenacity import RetryCallState, Retrying, wait_none
@@ -10,7 +8,6 @@ from fplopt.adapters.http import (
     default_wait,
     get_json_response,
     make_client,
-    redact,
 )
 
 URL = "https://example.test/api"
@@ -94,18 +91,3 @@ def test_default_wait_honours_retry_after_on_429():
     assert default_wait(retry_state_for(httpx.Response(429, headers={"Retry-After": "30"}))) == 30
     assert default_wait(retry_state_for(httpx.Response(429, headers={"Retry-After": "999"}))) == 120
     assert 0 < default_wait(retry_state_for(httpx.Response(503))) <= 60
-
-
-def test_redact_masks_query_keys_and_bot_tokens():
-    url = "https://x.test/v4/odds/?apiKey=abc123&regions=uk"
-    assert redact(url) == "https://x.test/v4/odds/?apiKey=REDACTED&regions=uk"
-    assert redact("https://api.telegram.org/bot123:AA-bb_c/sendMessage") == (
-        "https://api.telegram.org/botREDACTED/sendMessage"
-    )
-
-
-def test_httpx_logger_output_is_redacted(caplog):
-    caplog.set_level(logging.INFO)
-    logging.getLogger("httpx").info("HTTP Request: GET %s", "https://x.test/?apiKey=SECRET")
-    assert "SECRET" not in caplog.text
-    assert "apiKey=REDACTED" in caplog.text
