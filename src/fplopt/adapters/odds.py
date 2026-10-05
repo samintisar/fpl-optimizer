@@ -14,6 +14,7 @@ BASE_URL = "https://api.the-odds-api.com/v4"
 SPORT = "soccer_epl"
 MARKETS = ("h2h", "totals")
 REGIONS = ("uk",)
+LOW_CREDIT_WARNING = 50
 
 
 class OddsApiError(Exception):
@@ -39,13 +40,38 @@ class OddsClient:
                     "oddsFormat": "decimal",
                     "dateFormat": "iso",
                 },
+                attempts=3,
             )
         except httpx.HTTPStatusError as exc:
-            raise OddsApiError(f"odds request failed: HTTP {exc.response.status_code}") from None
-        log.info(
-            "odds api credits remaining=%s used=%s last=%s",
-            response.headers.get("x-requests-remaining"),
-            response.headers.get("x-requests-used"),
-            response.headers.get("x-requests-last"),
-        )
-        return response.content
+            failure = f"HTTP {exc.response.status_code} {_error_code(exc.response)}".rstrip()
+        else:
+            _log_credits(response)
+            return response.content
+        # Raised outside the except block so no exception context (whose URL holds the key)
+        # is attached to the error.
+        raise OddsApiError(f"odds request failed: {failure}")
+
+
+def _error_code(response: httpx.Response) -> str:
+    """The API's error_code (e.g. OUT_OF_USAGE_CREDITS), never echoing anything else."""
+    try:
+        code = response.json().get("error_code", "")
+    except (ValueError, AttributeError):
+        return ""
+    return code if isinstance(code, str) and code.isidentifier() else ""
+
+
+def _log_credits(response: httpx.Response) -> None:
+    remaining = response.headers.get("x-requests-remaining")
+    log.info(
+        "odds api credits remaining=%s used=%s last=%s",
+        remaining,
+        response.headers.get("x-requests-used"),
+        response.headers.get("x-requests-last"),
+    )
+    try:
+        low = float(remaining) < LOW_CREDIT_WARNING
+    except (TypeError, ValueError):
+        low = False
+    if low:
+        log.warning("odds api credits low: %s remaining this month", remaining)

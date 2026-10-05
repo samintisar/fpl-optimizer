@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from collections.abc import Callable, Mapping
 
 import httpx
@@ -15,6 +17,25 @@ from tenacity import (
 )
 
 USER_AGENT = "fpl-optimizer/0.1 (+https://github.com/samintisar/fpl-optimizer)"
+
+_SECRET_QUERY = re.compile(r"(?i)\b(apikey|api_key|token)=[^&\s\"']+")
+_BOT_TOKEN = re.compile(r"/bot\d+:[\w-]+")
+
+
+def redact(text: str) -> str:
+    """Mask API keys in query strings and Telegram bot tokens in URL paths."""
+    return _BOT_TOKEN.sub("/botREDACTED", _SECRET_QUERY.sub(r"\1=REDACTED", text))
+
+
+class _RedactSecrets(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact(record.getMessage())
+        record.args = None
+        return True
+
+
+# httpx logs every request URL at INFO; keys must never reach the logs.
+logging.getLogger("httpx").addFilter(_RedactSecrets())
 
 RETRY_AFTER_CAP_S = 120.0
 

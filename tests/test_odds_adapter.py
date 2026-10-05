@@ -1,3 +1,6 @@
+import logging
+import traceback
+
 import httpx
 import pytest
 
@@ -28,7 +31,28 @@ def test_errors_do_not_leak_api_key():
     def handler(request):
         return httpx.Response(401, json={"message": "invalid key"})
 
+    secret_api_key = "SECRET"
     with pytest.raises(OddsApiError) as info:
-        OddsClient(make_client(httpx.MockTransport(handler)), "SECRET").epl_odds()
-    assert "SECRET" not in str(info.value)
-    assert info.value.__cause__ is None
+        OddsClient(make_client(httpx.MockTransport(handler)), secret_api_key).epl_odds()
+    rendered = "".join(traceback.format_exception(info.value))
+    assert "SECRET" not in rendered
+    assert info.value.__context__ is None
+    assert "HTTP 401" in str(info.value)
+
+
+def test_error_includes_api_error_code():
+    def handler(request):
+        return httpx.Response(401, json={"message": "quota", "error_code": "OUT_OF_USAGE_CREDITS"})
+
+    with pytest.raises(OddsApiError, match="HTTP 401 OUT_OF_USAGE_CREDITS"):
+        OddsClient(make_client(httpx.MockTransport(handler)), "KEY").epl_odds()
+
+
+def test_warns_when_credits_low(caplog):
+    def handler(request):
+        return httpx.Response(200, json=[], headers={"x-requests-remaining": "12"})
+
+    caplog.set_level(logging.INFO)
+    OddsClient(make_client(httpx.MockTransport(handler)), "KEY").epl_odds()
+    assert "credits low: 12" in caplog.text
+    assert "KEY" not in caplog.text
