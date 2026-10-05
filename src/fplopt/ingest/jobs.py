@@ -61,19 +61,27 @@ def run_daily(
 def run_tick(
     store: RawStore, fpl: FplSource, odds: OddsSource | None, now: Clock = utc_now
 ) -> bool:
-    """Run every ~15 min: snapshot once inside each pre-deadline window. True if it ran."""
+    """Run every ~15 min. Inside each pre-deadline window, snapshot FPL and odds once each;
+    a source that fails is retried on the next tick. Returns True if anything ran."""
     latest = store.latest("fpl", "bootstrap-static")
     if latest is None:
         log.info("no bootstrap snapshot yet; taking one")
         run_daily(store, fpl, odds, now)
         return True
     deadlines = deadlines_from_bootstrap(store.read_json(latest))
-    deadline = pre_deadline_due(now(), deadlines, store.times("fpl", "bootstrap-static"))
-    if deadline is None:
-        return False
-    log.info("pre-deadline snapshot for deadline %s", deadline.isoformat())
-    run_daily(store, fpl, odds, now)
-    return True
+    current = now()
+    fpl_deadline = pre_deadline_due(current, deadlines, store.times("fpl", "bootstrap-static"))
+    odds_due = (
+        odds is not None
+        and pre_deadline_due(current, deadlines, store.times("odds", "soccer_epl")) is not None
+    )
+    if fpl_deadline is not None:
+        log.info("pre-deadline FPL snapshot for deadline %s", fpl_deadline.isoformat())
+        snapshot_fpl(store, fpl, now)
+    if odds_due:
+        log.info("pre-deadline odds snapshot")
+        snapshot_odds(store, odds, now)
+    return fpl_deadline is not None or odds_due
 
 
 def backfill_element_summaries(
@@ -84,29 +92,48 @@ def backfill_element_summaries(
     sleep: Callable[[float], None] = time.sleep,
     max_consecutive_failures: int = MAX_CONSECUTIVE_FAILURES,
 ) -> int:
-    """Archive element-summary for every current player under one run timestamp."""
+    """Archive element-summary for every current player under one run timestamp.
+
+    Writes `<run>/_manifest.json.gz` (expected, written and failed ids) even when aborted,
+    so incomplete runs are identifiable. The bootstrap it archives counts as a snapshot for
+    the pre-deadline tick, so avoid running this inside a pre-deadline window.
+    """
     run_at = now()
     bootstrap = fpl.bootstrap_static()
     store.write("fpl", "bootstrap-static", bootstrap, run_at)
     ids = [element["id"] for element in json.loads(bootstrap)["elements"]]
+    written: list[int] = []
     failed: list[int] = []
     consecutive = 0
-    for element_id in ids:
-        try:
-            content = fpl.element_summary(element_id)
-            store.write("fpl", "element-summary", content, run_at, name=str(element_id))
-            consecutive = 0
-        except Exception:
-            log.exception("element-summary %s failed", element_id)
-            failed.append(element_id)
-            consecutive += 1
-            if consecutive >= max_consecutive_failures:
-                raise RuntimeError(
-                    f"aborting backfill after {consecutive} consecutive failures "
-                    f"(last element {element_id})"
-                ) from None
-        sleep(pause_s)
+    try:
+        for element_id in ids:
+            try:
+                content = fpl.element_summary(element_id)
+                store.write("fpl", "element-summary", content, run_at, name=str(element_id))
+                written.append(element_id)
+                consecutive = 0
+            except Exception as exc:
+                log.exception("element-summary %s failed", element_id)
+                failed.append(element_id)
+                consecutive += 1
+                if consecutive >= max_consecutive_failures:
+                    raise RuntimeError(
+                        f"aborting backfill after {consecutive} consecutive failures "
+                        f"(last element {element_id}: {type(exc).__name__})"
+                    ) from exc
+            sleep(pause_s)
+    finally:
+        manifest = {
+            "run_at": run_at.isoformat(),
+            "finished_at": now().isoformat(),
+            "expected": ids,
+            "written": written,
+            "failed": failed,
+        }
+        store.write(
+            "fpl", "element-summary", json.dumps(manifest).encode(), run_at, name="_manifest"
+        )
     if failed:
-        raise RuntimeError(f"{len(failed)} of {len(ids)} element summaries failed: {failed[:20]}")
+        raise RuntimeError(f"{len(failed)} of {len(ids)} element summaries failed: {failed}")
     log.info("archived %d element summaries", len(ids))
     return len(ids)
