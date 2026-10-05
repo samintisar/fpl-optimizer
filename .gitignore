@@ -1,0 +1,32 @@
+# Data (immutable raw snapshots + rebuildable Parquet) — never committed
+/raw/
+/data/
+*.parquet
+*.duckdb
+*.sqlite
+*.db
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Notebooks / experiments
+.ipynb_checkpoints/
+mlruns/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

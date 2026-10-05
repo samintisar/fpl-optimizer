@@ -1,0 +1,42 @@
+[project]
+name = "fplopt"
+version = "0.1.0"
+description = "Fantasy Premier League decision optimizer: xP models + MILP planner + Telegram bot"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx",
+    "tenacity",
+    "python-dotenv",
+    "pandas",
+    "pyarrow",
+    "duckdb",
+    "pandera",
+    "rapidfuzz",
+]
+
+[project.optional-dependencies]
+models = ["lightgbm", "statsmodels", "scikit-learn", "pymc"]
+optimize = ["highspy", "pulp"]
+bot = ["python-telegram-bot"]
+all = ["fplopt[models,optimize,bot]"]
+
+[dependency-groups]
+dev = ["pytest", "ruff", "ipykernel"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fplopt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
