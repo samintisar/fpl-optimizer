@@ -63,9 +63,9 @@ data/         (gitignored) Parquet tables, SQLite user state
 | 0 | Snapshot archiver |
 | 1 | Backfill + ID mapping + Parquet tables |
 | 2 | `as_of` layer + leakage tests |
-| 3 | Backtester + baseline xP + greedy policy |
+| 3 | Backtester + baselines + greedy policy |
 | 4 | Optimizer |
-| 5 | Real models |
+| 5 | Real models (market-implied team model first) |
 | 6 | Holdout evaluation |
 | 7 | Telegram bot + go live |
-| 8 | Odds integration, distributions, polish |
+| 8 | Distributions, sensitivity analysis, polish |
