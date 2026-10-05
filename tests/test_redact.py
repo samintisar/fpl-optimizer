@@ -17,7 +17,7 @@ def test_redact_masks_malformed_bot_tokens():
 
 
 def test_httpx_logger_output_is_redacted(caplog):
-    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.INFO, logger="httpx")
     logging.getLogger("httpx").info("HTTP Request: GET %s", "https://x.test/?apiKey=SECRET")
     assert "SECRET" not in caplog.text
     assert "apiKey=REDACTED" in caplog.text
