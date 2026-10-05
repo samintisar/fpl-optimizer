@@ -1207,8 +1207,7 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
         except Exception as exc:
             log.exception("job %r failed", job_name)
             send_admin_alert(
-                f"fplopt {job_name} failed on {socket.gethostname()}: "
-                f"{type(exc).__name__}: {exc}",
+                f"fplopt {job_name} failed on {socket.gethostname()}: {type(exc).__name__}: {exc}",
                 token=settings.telegram_bot_token,
                 chat_id=settings.telegram_admin_chat_id,
             )
