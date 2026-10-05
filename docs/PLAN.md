@@ -11,7 +11,7 @@ This document is the source of truth for design decisions. Items marked **VERIFY
 **Goals**
 - Maximize expected total season points (pure EV; no rank/variance strategy).
 - Recommend, don't automate: top 3 transfer plans + "roll transfer" baseline, captain, bench order, chip timing.
-- Usable this season (2026/27) — but only after the backtest validates it.
+- Usable this season (2026/27) if possible — but only after the holdout validates it (see the go-live gate in §9).
 - Multi-user from day one (everything keyed by `user_id`), single user (me) for now. Possible paid product later.
 
 **Non-goals (for now)**
@@ -70,14 +70,25 @@ fpl-optimizer/
 |---|---|---|
 | FPL `bootstrap-static/` | Prices, positions, status flags, news, ownership, GW deadlines | Daily after price changes (~02:00 UK) + 2h pre-deadline |
 | FPL `fixtures/` | Schedule, kickoffs (as-of fixture lists for blanks/doubles) | Same as above |
-| FPL `event/{gw}/live/`, `element-summary/{id}/` | Per-player GW stats/points | After bonus confirmed |
+| FPL `event/{gw}/live/`, `element-summary/{id}/` | Per-player GW stats/points (incl. CBIT/recoveries/defensive_contribution) | After GW lockdown (09:00 UK the day after the GW's last match) |
 | FPL `entry/{id}/…` | User picks, history, transfers, chips | Pre-deadline, per registered user |
-| Understat | Per-match player + team xG/xA | After each GW |
+| Understat | Per-match player + team xG/xA; per-shot data (minute, xG, penalty flag) | After each GW |
 | The Odds API (free tier first) | Match result, over/under | Daily + pre-deadline |
-| vaastav/Fantasy-Premier-League | Historical FPL per-GW data, 2016/17+ | One-time backfill |
-| football-data.co.uk | Historical match odds | One-time backfill |
+| vaastav/Fantasy-Premier-League | Historical FPL per-GW data, 2016/17+ | One-time backfill, pinned to a commit, copied into `raw/` |
+| football-data.co.uk | Historical match odds — **pre-match columns only, never closing (`…C…`) columns** | One-time backfill |
 
-**Start the snapshot archiver immediately** — every day without it is lost point-in-time data (especially status flags, which don't exist historically).
+FBref is **not** a source: Opta's advanced stats were removed from FBref in January 2026.
+
+**Start the snapshot archiver immediately** — every day without it is lost point-in-time data (especially status flags, which don't exist historically). Phase 0 also backfills 2026/27 GW1–7 per-GW stats from `element-summary/`; status flags and ownership for those GWs are permanently lost.
+
+### Rules config
+- One file per season in `config/scoring/` (e.g. `config/scoring/2026-27`). The 2026/27 file is generated from `bootstrap-static` `game_config` and checked in.
+- 2026/27 (confirmed, unchanged from 2025/26 except BPS):
+  - **Defensive contributions:** DEF 2 pts at ≥10 CBIT (clearances, blocks, interceptions, tackles); MID/FWD 2 pts at ≥12 CBIRT (CBIT + recoveries); GK not eligible.
+  - **Chips:** two sets of WC / FH / TC / BB. Set 1 usable GW1–19, expires at the GW19 deadline; set 2 usable GW20–38. No other chips.
+  - **Free transfers:** bank up to 5. No AFCON top-up in 2026/27 (2025/26 had one).
+  - **BPS changed:** 1 BPS per 3 CBI (was per 2), no −1 for being tackled, GK save BPS restructured.
+  - **GW lockdown:** 09:00 UK the day after the GW's last match.
 
 ### Tables (Parquet)
 - `player_dim` — stable `player_key` ↔ FPL id per season ↔ Understat id. **FPL ids reset every season; never use them as keys.**
@@ -92,12 +103,12 @@ User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, c
 
 ### Backfill rules
 - Backfill from 2016/17.
-- Store raw stat components and **re-score every season under the current season's rules** (scoring config per season in `config/`).
-- Defensive contribution data only exists for recent seasons → separate model trained on that data only.
+- Store raw stat components and **re-score every season under the current season's rules** (scoring config per season in `config/`). Exception: seasons before 2025/26 have no CBIT/recoveries data, so they are re-scored **without** defensive-contribution points.
+- Defensive contribution data exists only from 2025/26 (FPL API), and 2025/26 is the holdout → defcon uses a fixed, untuned in-season model (§6.5).
 - Use Understat for xG throughout (FPL's own xG fields only exist in recent seasons).
 - Weight older seasons lower in training rather than dropping them.
 - Handle quirks: 2019/20 COVID GWs (numbered 39–47), postponed GWs (e.g. 2022/23).
-- Historical `available_at` is approximate (kickoff + fixed delay); only archived snapshots are exact.
+- `available_at` for GW outcomes: from 2026/27, the official lockdown (09:00 UK the day after the GW's last match). Earlier seasons: kickoff + fixed delay (approximate). Only archived snapshots are exact.
 
 ### ID mapping
 - Fuzzy match with `rapidfuzz` + hand-maintained `config/overrides.csv`.
@@ -112,11 +123,11 @@ User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, c
 ## 4. Leakage prevention
 
 - **Single access path:** feature builders take a `deadline` and only read via `as_of(df, deadline)`.
-- **Corrupt-the-future test** (in CI): randomize all data after a deadline, rerun, assert predictions are byte-identical.
+- **Corrupt-the-future test** (in CI): randomize all data after a deadline, rerun, assert predictions are byte-identical. Requires deterministic models: LightGBM with fixed `seed`, `num_threads=1`, `deterministic=True`; fixed seeds everywhere else.
 - Known FPL leaks to guard against:
   - Per-GW outcome fields (minutes, points, bonus) used as same-GW features.
   - Current `bootstrap-static` values (form, status, totals) used for past dates.
-  - Closing odds for matches kicking off after the deadline → use odds as of deadline.
+  - Closing odds for matches kicking off after the deadline → use odds as of deadline (historically: football-data pre-match columns only).
   - Final fixture list instead of as-of fixture list (rescheduled doubles/blanks).
   - Current positions/prices instead of as-of values.
   - Models/scalers/priors/hyperparameters fit on the full season → refit walk-forward.
@@ -131,8 +142,18 @@ User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, c
 - Replays a season GW by GW. At each deadline it sees only `as_of(deadline)` data, builds xP, runs the optimizer, executes the recommended GW decisions, and scores them with actual outcomes (re-scored under current rules).
 - **Starts from any state:** squad, purchase prices, bank, FTs, chips remaining, current GW. This supports both GW1 starts and mid-season opt-ins.
 - Historical real-manager squads aren't available from the API for past seasons → generate start states from **template squads** (most-owned) and **random valid squads** at various GWs.
-- Chips included from the start, using the current season's chip rules for all seasons.
+- Chips included from the start. Develop/validate seasons use the current season's chip rules (two sets, GW19 expiry). The holdout and live season use their own native rules (2025/26 includes the AFCON free-transfer top-up).
 - Recommended plan = best plan (backtest executes plan #1).
+- **Decision policy is pluggable.** Phase 3 ships a **greedy policy**: best single transfer if its horizon xP gain exceeds a threshold, else roll; captain = highest xP starter; no chips. The Phase 4 optimizer replaces it and must beat it.
+
+### Scoring the backtest
+| Seasons | Scored under | Compared against |
+|---|---|---|
+| Develop / validate (2016/17–2024/25) | Current rules, no defcon points | Baseline xP + greedy policy, previous model versions |
+| Holdout (2025/26) | 2025/26 native rules | Above + average manager |
+| Live (2026/27) | 2026/27 rules | Above + average manager |
+
+The average-manager benchmark is used only where the rules match; older seasons' averages were scored under different rules and chips.
 
 ### Splits
 | Split | Seasons |
@@ -148,11 +169,11 @@ User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, c
   - goals/assists/CS: log loss, calibration curves
   - xP: RMSE / MAE per player-GW
   - team model: compare implied probabilities to odds
-- Season points vs **average manager** (`average_entry_score` from API) and vs previous model versions.
-- Log every experiment (MLflow or a CSV). The more variants tried, the more the best backtest score is inflated.
+- Season points per the scoring table above (`average_entry_score` from the API for the average manager).
+- Log every experiment to a CSV (`experiments.csv`: timestamp, git sha, config, metrics). The more variants tried, the more the best backtest score is inflated.
 
 ### Baseline
-- xP = rolling average of points. Every model must beat it.
+- xP = rolling average of points, decisions by the greedy policy. Every model must beat it.
 
 ---
 
@@ -172,10 +193,11 @@ log λ_away = base            + attack[away] − defence[home]
 - Validate against odds-implied probabilities. When odds are available, consider blending.
 
 ### 6.2 Player shares
-- Goal share = player xG/90 ÷ team xG/90 **while he's on the pitch**; same for xA → assists.
-- Shrinkage toward position prior: `share = (xG_i + k·prior_pos) / (team_xG_on_i + k)`.
-- Separate penalty term: P(penalty taker) × team penalties per match.
-- E[goals] = λ_team × goal_share × E[fraction of match on pitch].
+- Goal share = player **npxG**/90 ÷ team npxG/90 **while he's on the pitch**; same for xA → assists. Non-penalty xG avoids double-counting with the penalty term.
+- "Team npxG while on the pitch" is built from Understat per-shot data (shot minute vs the player's minutes).
+- Shrinkage toward position prior: `share = (npxG_i + k·prior_pos) / (team_npxG_on_i + k)`.
+- Separate penalty term: P(penalty taker) × team penalties per match × conversion rate.
+- E[goals] = λ_team(non-penalty) × goal_share × E[fraction of match on pitch] + penalty term.
 
 ### 6.3 Minutes model (LightGBM)
 Hurdle structure:
@@ -190,8 +212,12 @@ Candidate features: recent starts/minutes, days rest, midweek European/cup match
 - Apply **per-user** P(start) overrides (`/override`). Only overridden players are recomputed per user.
 
 ### 6.5 Other components
-- **Bonus:** per-player rate initially; BPS-based model later.
-- **Defensive contributions:** Poisson/NB on CBIT(+recoveries) per 90 → P(threshold reached | minutes). Trained on recent seasons only.
+- **Bonus:** per-player rate initially; BPS-based model later. BPS rules changed in 2026/27 (fewer CBI points, no tackled penalty, GK saves restructured), so weight recent data heavily and treat older-season bonus as a known source of drift.
+- **Defensive contributions — fixed in-season model, never tuned:**
+  - Rate = player's CBIT (DEF) or CBIRT (MID/FWD) per 90, shrunk toward the position mean with a prior weight `k` fixed up front: `rate = (actions_i + k·pos_mean) / (minutes_i/90 + k)`.
+  - Both the player's actions and the position mean come from the **current season only**, as of the deadline.
+  - P(threshold reached | minutes) from a negative binomial with that rate scaled by expected minutes and a dispersion also fixed up front.
+  - Identical in the holdout and live. Weak early in a season by design. No defcon term before 2025/26.
 - **Saves (GK):** Poisson on saves vs opponent shots/xG.
 - **Cards / own goals / penalty misses:** small per-player rates.
 
@@ -222,9 +248,11 @@ lineup ≤ squad; Σ lineup = 11; valid formation (1 GK, 3–5 DEF, 2–5 MID, 1
 Σ captain = 1; captain ≤ lineup
 bank[t] = bank[t-1] + Σ sell_price·sell − Σ buy_price·buy ≥ 0
 Σ buy[i,t] ≤ ft[t] + hits[t]                 # waived under wildcard / free hit
-ft[t+1] ≤ ft[t] − (Σ buy − hits) + 1;  1 ≤ ft ≤ cap
-Σ_t chip[t] ≤ chips_remaining; ≤ 1 chip per GW
+ft[t+1] ≤ ft[t] − (Σ buy − hits) + 1;  1 ≤ ft ≤ cap        # cap = 5 (from config)
+Σ_{t ∈ half h} chip_c[t] ≤ available[c, h]   for each chip c, half h   # h1 = GW1–19, h2 = GW20–38
+≤ 1 chip per GW
 ```
+Chip availability is per chip **and per half**: a set-1 chip not used by the GW19 deadline is lost, never carried into GW20+. A horizon spanning GW19→20 sees both halves' availability. WC/FH effects on banked FTs follow the season's rules config.
 Binary products (e.g. captain × triple captain) linearized with auxiliary variables.
 
 ### Objective
@@ -249,6 +277,7 @@ max Σ_t decay^t · [ Σ xP·lineup + xP·captain + Σ_k w_k·xP·bench_k + chip
 - **Selling prices:** user's real selling prices for owned players (purchase price + half the rise, rounded down to £0.1m); buy = sell for players bought within the plan.
 - **Pruning:** owned players + top-N by xP per position.
 - **Top 3 plans:** solve → add no-good cut excluding that GW's transfer set → re-solve (×2). Plus the "roll transfer" plan as baseline; show each plan's xP gain vs roll over the horizon.
+- **Solve budget:** tuning backtests run with a MIP time limit and gap tolerance (start: 10 s, 0.5%); final runs use tighter settings. Record solve time and final gap per GW.
 - **VERIFY:** solve times with chips over 6 GWs; benchmark early.
 
 ---
@@ -281,15 +310,17 @@ max Σ_t decay^t · [ Σ xP·lineup + xP·captain + Σ_k w_k·xP·bench_k + chip
 
 | # | Phase | Done when |
 |---|---|---|
-| 0 | Snapshot archiver (Ubuntu cron + GH Actions backup) | Daily bootstrap/fixtures/odds snapshots landing in `raw/` |
-| 1 | Backfill + ID mapping + Parquet tables | All seasons 2016/17+ built from raw; mapping validation passes |
+| 0 | Snapshot archiver (Ubuntu cron + GH Actions backup) + 2026/27 GW1–7 stats backfill | Daily bootstrap/fixtures/odds snapshots landing in `raw/` |
+| 1 | Backfill + ID mapping + Parquet tables + rules config | All seasons 2016/17+ built from raw; mapping validation passes; `config/scoring/` per season |
 | 2 | `as_of` layer + leakage tests | Corrupt-the-future test passes |
-| 3 | Backtester + baseline xP | Simulated seasons from arbitrary states; baseline score vs average manager |
-| 4 | Optimizer (transfers, captain, bench, chips, top-3) | Backtest runs end-to-end with optimizer; solve times acceptable |
+| 3 | Backtester + baseline xP + greedy policy | Simulated seasons from arbitrary states; baseline + greedy scored per §5 |
+| 4 | Optimizer (transfers, captain, bench, chips, top-3) | Backtest runs end-to-end with optimizer; beats greedy policy; solve times acceptable |
 | 5 | Real models (team, shares, minutes, components) | Beat baseline on component metrics in validation |
 | 6 | Holdout evaluation | Single run on 2025/26; result recorded |
 | 7 | Telegram bot + go live | `/register`, `/plan`, alerts working for my team |
 | 8 | Odds integration, distributions, polish | Odds evaluated (free first, paid props only if backtest justifies) |
+
+**Go-live gate:** no recommendations are used live until Phase 6 is recorded and the model beats the baseline + greedy policy on the holdout, even if that pushes go-live past 2026/27.
 
 ---
 
@@ -304,9 +335,27 @@ max Σ_t decay^t · [ Σ xP·lineup + xP·captain + Σ_k w_k·xP·bench_k + chip
 
 ## 11. Open items to VERIFY
 
-- 2026/27 rules: chip allocation, free-transfer banking cap, defensive contribution thresholds, any scoring changes.
 - vaastav field snapshot timing (ownership, transfers, value).
-- FBref advanced-stat availability (Understat is the primary xG source regardless).
 - The Odds API free-tier coverage (EPL markets; player props likely paid).
+- football-data.co.uk pre-match odds collection time relative to FPL deadlines (and which columns are closing odds per season).
+- A source for 2025/26 per-GW `average_entry_score` (that season is no longer in the live API; check vaastav or other archives).
 - Free-transfer reconstruction rules from public transfer history (WC/FH effects on FTs).
 - Solver performance with chips over a 6-GW horizon.
+
+**Resolved (2026-10-05):**
+- 2026/27 rules → see §3 *Rules config*. Scoring and defcon unchanged from 2025/26; two chip sets with GW19 expiry; FT cap 5; BPS changed; lockdown 09:00 UK next day.
+- FBref → advanced stats removed January 2026; dropped as a source.
+
+---
+
+## 12. Decision log
+
+| Date | Decision | Why |
+|---|---|---|
+| 2026-10-05 | No live recommendations until the Phase 6 holdout passes, even if go-live slips past this season. Archiver runs now. | Keep validation honest; archived data is needed either way. |
+| 2026-10-05 | Defensive contributions use a fixed, untuned in-season model; no defcon term before 2025/26. | Free CBIT data exists only from 2025/26 (= holdout); FBref lost Opta data. |
+| 2026-10-05 | Pre-2025/26 seasons re-scored under current rules minus defcon; average-manager benchmark only for holdout and live seasons. | Historical averages were scored under different rules and chips. |
+| 2026-10-05 | Goal shares use npxG; penalties modelled separately. | Full xG double-counts penalties. |
+| 2026-10-05 | Phase 3 includes a greedy decision policy. | The backtester needs a decision-maker before the optimizer exists. |
+| 2026-10-05 | Chip availability tracked per chip per half (GW19 expiry). | 2026/27 chip rules. |
+| 2026-10-05 | Experiment log is a CSV, not MLflow. | YAGNI for a single developer. |

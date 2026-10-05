@@ -63,7 +63,7 @@ data/         (gitignored) Parquet tables, SQLite user state
 | 0 | Snapshot archiver |
 | 1 | Backfill + ID mapping + Parquet tables |
 | 2 | `as_of` layer + leakage tests |
-| 3 | Backtester + baseline xP |
+| 3 | Backtester + baseline xP + greedy policy |
 | 4 | Optimizer |
 | 5 | Real models |
 | 6 | Holdout evaluation |
