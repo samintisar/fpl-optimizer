@@ -516,6 +516,7 @@ ROLL_VS_GREEDY = ["--a", "roll:rolling", "--b", "greedy:rolling"]
         (["run", "--seasons", "2023", "--horizon", "0"], "horizon >= 1"),
         (["compare", "--seasons", "2023", "--a", "roll:rolling", "--b", "roll:rolling"], "same"),
         (["compare", "--seasons", "2023", *ROLL_VS_GREEDY, "--k", "0"], "must be >= 1"),
+        (["compare", "--seasons", "2023", *ROLL_VS_GREEDY, "--stride", "0"], "must be >= 1"),
         (["compare", "--seasons", "2023", "--a", "greedy:x", "--b", "roll:rolling"], "unknown xP"),
     ],
 )
@@ -596,19 +597,26 @@ def test_backtest_compare_end_to_end(backtest, tmp_path, capsys):
     assert set(gws["season"]) == {2022, 2023}
     paired = pd.read_parquet(out / "paired.parquet")
     decisions = pd.read_parquet(out / "per_decision.parquet")
-    assert len(paired) == len(decisions) == 2 * 2 * 7  # seasons x starts x GWs 12-18
-    assert decisions["k"].max() == 2
+    assert len(paired) == 2 * 2 * 7  # seasons x starts x GWs 12-18
+    # Non-overlapping k = 2 windows by default: decisions at GWs 12, 14, 16, 18.
+    assert len(decisions) == 2 * 2 * 4
+    assert sorted(set(decisions["gw_index"])) == [12, 14, 16, 18]
+    assert decisions["k"].tolist() == [2, 2, 2, 1] * 4 and (decisions["stride"] == 2).all()
     summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
     assert summary["policy_a"] == "greedy(ep_next,t=1.0)"
     assert summary["continuation"] == "roll(rolling)"
     comparisons = summary["summary"]["comparisons"]
     methods = {(c["method"], c["metric"]) for c in comparisons}
-    assert methods == {(m, x) for m in ("full_run", "per_decision") for x in ("realized", "xg")}
+    assert methods == {
+        (m, x) for m in ("full_run", "per_decision") for x in ("realized", "realized@xg", "xg")
+    }
     (full,) = [c for c in comparisons if (c["method"], c["metric"]) == ("full_run", "realized")]
     cells = paired.groupby(["season", "gw_index"])["diff"].mean()
     assert full["mean"] == pytest.approx(cells.mean())
     printed = capsys.readouterr().out
-    for text in ("Paired differences A - B", "per-decision (k=2)", "full run", "Per season"):
+    for text in ("Paired differences A - B", "per-decision (k=2, stride=2)", "full run"):
+        assert text in printed
+    for text in ("Per season", "80% CI", "realized@xg", "per-decision total (k=2)"):
         assert text in printed
     assert "2022-23" in printed and "2023-24" in printed
     (logged,) = _experiments(log)
@@ -616,7 +624,21 @@ def test_backtest_compare_end_to_end(backtest, tmp_path, capsys):
     config = json.loads(logged["config"])
     assert config["policies"] == ["greedy:ep_next", "greedy:rolling"]
     assert config["continuation"] == "roll:rolling" and config["k"] == 2
-    assert len(json.loads(logged["metrics"])["comparisons"]) == 4
+    assert config["stride"] == 2 and config["ci"] == 0.8
+    assert len(json.loads(logged["metrics"])["comparisons"]) == 6
+
+
+def test_backtest_compare_stride_one_evaluates_every_gw(backtest, tmp_path):
+    import pandas as pd
+
+    out, log = tmp_path / "out", tmp_path / "experiments.csv"
+    argv = ["compare", "--seasons", "2023", *ROLL_VS_GREEDY, "--starts", "random@12"]
+    argv += ["--k", "3", "--stride", "1", "--n-boot", "20"]
+    assert backtest(*argv, "--out", str(out), "--experiments", str(log))[0] == 0
+    decisions = pd.read_parquet(out / "per_decision.parquet")
+    assert decisions["gw_index"].tolist() == list(range(12, 19))  # the league has 18 GWs
+    assert decisions["k"].tolist() == [3] * 5 + [2, 1]
+    assert json.loads(_experiments(log)[0]["config"])["stride"] == 1
 
 
 def test_backtest_compare_without_per_decision(backtest, tmp_path):

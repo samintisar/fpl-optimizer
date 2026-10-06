@@ -7,15 +7,23 @@ Season totals are too noisy to compare policies directly, so every comparison is
   one `Caches` (xP per (model, deadline), outcomes per (season, gw, rules)).
 - `paired_full_run`: per (season, start, GW) the difference of two policies' net points
   (realized and xG-scored).
-- `per_decision`: states come from a reference policy's own trajectory. At each GW t both
-  arms start from that state; arm A plays A's decision at t, arm B plays B's, and both then
-  follow the same continuation policy (same xP) for k − 1 GWs (truncated at the season's
-  end). Each arm's score is its net points over t..t+k−1 (hits at t included).
+- `per_decision`: states come from a reference policy's own trajectory. At a decision GW t
+  both arms start from that state; arm A plays A's decision at t, arm B plays B's, and both
+  then follow the same continuation policy (same xP) for k − 1 GWs (truncated at the
+  season's end). Each arm's score is its net points over t..t+k−1 (hits at t included).
+  Decision GWs are every `stride`-th GW of the reference run (default stride = k), so the
+  windows don't overlap and tile the run: windows sharing outcomes would make neighbouring
+  differences dependent and the bootstrap too optimistic (stride 1 = every GW, a
+  diagnostic).
 - `block_bootstrap`: average the paired differences over start states per (season,
-  gw_index), then resample circular moving blocks of GWs within each season, all seasons
-  together; mean, percentile CI and one-sided p (share of bootstrap means ≤ 0; H1: A > B).
+  gw_index), then resample circular moving blocks of those cells within each season, all
+  seasons together; mean, percentile CI (default 80% two-sided, i.e. one-sided α = 0.10,
+  the go-live gate's level) and one-sided p (share of bootstrap means ≤ 0; H1: A > B).
 - `summarize`: season totals per policy (mean over starts) and the paired differences with
-  CIs, realized and xG-scored. `log_experiment` appends a run to `results/experiments.csv`.
+  CIs: realized, realized on the xG metric's sample (`realized@xg`) and xG-scored. Block
+  lengths are in GWs: a per-decision cell spans `stride` GWs, so its blocks are
+  ceil(block_length / stride) cells (4 GWs = one k = 4 window). `log_experiment` appends a
+  run to `results/experiments.csv`.
 
 Start specs: `template@1` (the template squad at gw_index 1), `random:5@1` (random squads
 with seeds 0-4 at gw_index 1), `random:3@20`. A refused start state is skipped with a
@@ -45,6 +53,7 @@ from fplopt.backtest.rules import Rules, backtest_rules
 from fplopt.backtest.simulator import (
     GW_COLUMNS,
     Caches,
+    HoldoutError,
     decide_step,
     run_gameweeks,
     season_schedule,
@@ -53,7 +62,7 @@ from fplopt.backtest.simulator import (
 from fplopt.backtest.start_states import StartStateError, random_state, template_state
 from fplopt.backtest.state import SquadState
 from fplopt.features.store import DataStore
-from fplopt.seasons import season_label
+from fplopt.seasons import HOLDOUT_SEASONS, season_label
 
 log = logging.getLogger(__name__)
 
@@ -64,11 +73,13 @@ __all__ = (
     "Summary",
     "block_bootstrap",
     "build_start_states",
+    "json_safe",
     "log_experiment",
     "paired_full_run",
     "parse_start_specs",
     "per_decision",
     "run_grid",
+    "season_points",
     "summarize",
 )
 
@@ -173,6 +184,15 @@ def build_start_states(
 # --- full runs --------------------------------------------------------------------------------
 
 
+def _refuse_holdout(seasons: Sequence[int]) -> None:
+    holdout = sorted(set(seasons) & HOLDOUT_SEASONS)
+    if holdout:
+        raise HoldoutError(
+            f"{', '.join(map(season_label, holdout))} is a holdout season; backtests refuse "
+            "it until Phase 6"
+        )
+
+
 def _unique_names(policies: Sequence[Policy]) -> None:
     names = [p.name for p in policies]
     if len(set(names)) != len(names):
@@ -194,7 +214,10 @@ def run_grid(
     """Every policy from every start state of every season (one `simulate` each), as one
     frame: `season, start_id, policy` + the `SeasonRun.gws` columns (net_points, points,
     hit_points, xg_points, xg_net_points, n_transfers, captain_regret, xi_regret, ...).
-    One `Caches` is shared by all runs. Holdout seasons raise (`HoldoutError`)."""
+    One `Caches` is shared by all runs. Holdout seasons raise (`HoldoutError`) before
+    anything runs."""
+    seasons = list(seasons)
+    _refuse_holdout(seasons)
     _unique_names(policies)
     specs = _specs(start_specs)
     caches = Caches() if caches is None else caches
@@ -250,6 +273,7 @@ PER_DECISION_COLUMNS = (
     ("gw", "int64"),
     ("gw_index", "int64"),
     ("k", "int64"),
+    ("stride", "int64"),
     ("same_decision", "bool"),
     ("transfers_a", "int64"),
     ("transfers_b", "int64"),
@@ -277,19 +301,29 @@ def per_decision(
     policy_b: Policy,
     continuation: Policy,
     k: int = 4,
+    *,
+    stride: int | None = None,
     reference: str = "b",
     caches: Caches | None = None,
     rules_fn: RulesFn = backtest_rules,
 ) -> pd.DataFrame:
-    """Per-decision paired differences (module docstring), one row per (season, start_id,
-    gw_index) of the reference trajectory: `k` = the window length actually scored
-    (shorter at the season's end), `same_decision` (A and B decided the same at t, so the
-    arms are identical and diff = 0), each arm's transfers at t, its net points and xG net
-    points over the window, and the differences A − B."""
+    """Per-decision paired differences (module docstring), one row per decision GW of the
+    reference trajectory: its GWs i = 0, stride, 2·stride, ... per (season, start_id), with
+    `stride` defaulting to `k` (non-overlapping windows that tile the run; 1 = every GW).
+    Columns: `k` = the window length actually scored (shorter at the season's end),
+    `stride`, `same_decision` (A and B decided the same at t, so the arms are identical and
+    diff = 0), each arm's transfers at t, its net points and xG net points over the window,
+    and the differences A − B. Holdout seasons raise (`HoldoutError`) before anything
+    runs."""
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
+    stride = k if stride is None else stride
+    if stride < 1:
+        raise ValueError(f"stride must be >= 1, got {stride}")
     if reference not in ("a", "b"):
         raise ValueError(f"reference must be 'a' or 'b', got {reference!r}")
+    seasons = list(seasons)
+    _refuse_holdout(seasons)
     specs = _specs(start_specs)
     caches = Caches() if caches is None else caches
     ref_policy = policy_a if reference == "a" else policy_b
@@ -300,7 +334,8 @@ def per_decision(
             ref = simulate(store, rules, ref_policy, start, caches=caches)
             schedule = season_schedule(store, season, start.gw_index).iloc[: len(ref.gws)]
             first_row = len(rows)
-            for i, state in enumerate(ref.states):
+            for i in range(0, len(ref.states), stride):
+                state = ref.states[i]
                 window = schedule.iloc[i : i + k]
                 deadline = window["deadline_time"].iloc[0]
                 arms = {}
@@ -334,6 +369,7 @@ def per_decision(
                         "gw": int(window["gw"].iloc[0]),
                         "gw_index": int(window["gw_index"].iloc[0]),
                         "k": len(window),
+                        "stride": stride,
                         "same_decision": same,
                         "transfers_a": n_a,
                         "transfers_b": n_b,
@@ -351,7 +387,7 @@ def per_decision(
                 start_id,
                 policy_a.name,
                 policy_b.name,
-                len(ref.states),
+                len(rows) - first_row,
                 sum(1 for r in rows[first_row:] if not r["same_decision"]),
             )
     columns = [name for name, _ in PER_DECISION_COLUMNS]
@@ -363,8 +399,10 @@ def per_decision(
 
 @dataclass(frozen=True)
 class BootstrapResult:
-    """Mean paired difference per GW, its percentile CI, the one-sided p-value (share of
-    bootstrap means ≤ 0) and the sample: seasons and (season, gw_index) cells."""
+    """The mean paired difference per (season, gw_index) cell — per GW for full-run
+    differences, per decision window (up to k GWs) for per-decision ones — its percentile
+    CI, the one-sided p-value (share of bootstrap means ≤ 0) and the sample: seasons and
+    cells (`n_gws`: GWs for full runs, decision windows for per-decision)."""
 
     mean: float
     ci_low: float
@@ -390,16 +428,18 @@ def block_bootstrap(
     block_length: int = 4,
     n_boot: int = 2000,
     seed: int = 0,
-    ci: float = 0.9,
+    ci: float = 0.8,
 ) -> BootstrapResult:
     """GW-block bootstrap clustered by season of the mean of `value` (PLAN §5).
 
     Rows with a null `value` are dropped; the rest are averaged over start states per
-    (season, gw_index), giving one series per season ordered by gw_index. Each bootstrap
+    (season, gw_index), giving one series of cells per season ordered by gw_index (a cell is
+    a GW for full-run differences, a decision window for per-decision ones). Each bootstrap
     replicate rebuilds every season's series from circular blocks of `block_length`
-    consecutive GWs of that season (blocks never cross seasons; a season keeps its length)
-    and takes the mean over all seasons' GWs. Returns the observed mean, the `ci` percentile
-    interval of the replicate means and p = share of replicate means ≤ 0."""
+    consecutive cells of that season (blocks never cross seasons; a season keeps its length)
+    and takes the mean over all seasons' cells. Returns the observed mean, the `ci`
+    percentile interval of the replicate means (default 80% two-sided, whose lower bound is
+    the one-sided α = 0.10 bound) and p = share of replicate means ≤ 0."""
     if block_length < 1 or n_boot < 1 or not 0 < ci < 1:
         raise ValueError("need block_length >= 1, n_boot >= 1 and 0 < ci < 1")
     data = diffs[["season", "gw_index", value]].copy()
@@ -439,11 +479,17 @@ def block_bootstrap(
 @dataclass(frozen=True)
 class Summary:
     """`season_totals`: per (season, policy) the means over start states of the season's
-    net points (`total`), xG net points (`xg_total`, null if any GW's is), GWs played,
-    transfers and hit points, and the mean captain/XI regret per GW. `policies`: the same
-    averaged over seasons. `comparisons`: per (a, b, method, metric) the bootstrap result of
-    the per-GW difference plus `season_diff` (the mean difference per season, summed over
-    GWs)."""
+    net points (`total`), xG net points (`xg_total`, null if any start's run has a null GW),
+    GWs played, transfers and hit points, and the mean captain/XI regret per GW.
+    `policies`: the same averaged over seasons (`n_seasons`), except `xg_total`, averaged
+    over the `xg_seasons` seasons where every policy's `xg_total` is non-null, so policies
+    are compared on the same seasons. `comparisons`: per (a, b, method, metric) the
+    bootstrap result (`block_bootstrap`; mean per GW for `full_run`, per decision window for
+    `per_decision`) plus `season_diff`, the difference in season points (Σ over the season's
+    cells of the start-averaged difference, mean over seasons; windows that overlap,
+    stride < k, are weighted stride/k so each GW counts about once). Metrics: `realized`,
+    `realized@xg` (realized on the rows whose xG difference is non-null, i.e. the xG
+    metric's sample, for the same-sign check) and `xg`."""
 
     season_totals: pd.DataFrame
     policies: pd.DataFrame
@@ -485,16 +531,59 @@ def _season_totals(results: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index()
 
 
+def _stride(diffs: pd.DataFrame) -> int:
+    """GWs between consecutive cells: 1 for GW rows (and per-decision frames without a
+    `stride` column, which evaluated every GW), else the frame's single stride."""
+    if "stride" not in diffs.columns or diffs.empty:
+        return 1
+    strides = diffs["stride"].unique()
+    if len(strides) != 1:
+        raise ValueError(f"per-decision frame mixes strides {sorted(strides)}")
+    return int(strides[0])
+
+
+def _season_weights(diffs: pd.DataFrame, stride: int) -> pd.Series:
+    """Per row, the weight that turns its difference into season points: 1 for GW rows and
+    non-overlapping windows, stride/k for windows that overlap (stride < k)."""
+    if "k" not in diffs.columns:
+        return pd.Series(1.0, index=diffs.index)
+    return (stride / diffs["k"].astype("float64")).clip(upper=1.0)
+
+
+def season_points(diffs: pd.DataFrame, column: str = "diff") -> pd.Series:
+    """Per season, the difference in season points of a `paired_full_run` or `per_decision`
+    frame: Σ over the season's (season, gw_index) cells of the start-averaged `column`
+    (nulls dropped), with overlapping per-decision windows (stride < k) weighted stride/k
+    so each GW counts about once."""
+    valid = diffs[diffs[column].notna()]
+    weighted = pd.to_numeric(valid[column]).astype("float64") * _season_weights(
+        valid, _stride(diffs)
+    )
+    cells = weighted.groupby([valid["season"], valid["gw_index"]]).mean()
+    return cells.groupby(level=0).sum().rename_axis("season")
+
+
 def _comparison(
-    diffs: pd.DataFrame, a: str, b: str, method: str, **bootstrap: Any
+    diffs: pd.DataFrame,
+    a: str,
+    b: str,
+    method: str,
+    *,
+    block_length: int,
+    **bootstrap: Any,
 ) -> list[dict[str, Any]]:
+    stride = _stride(diffs)
+    cell_block = -(-block_length // stride)  # block_length is in GWs
     rows = []
-    for metric, column in (("realized", "diff"), ("xg", "diff_xg")):
-        result = block_bootstrap(diffs, value=column, **bootstrap)
-        valid = diffs[diffs[column].notna()]
-        cells = valid.groupby(["season", "gw_index"])[column].mean().astype("float64")
-        n_seasons = cells.index.get_level_values("season").nunique()
-        season_diff = float(cells.sum() / n_seasons) if n_seasons else float("nan")
+    on_xg = diffs[diffs["diff_xg"].notna()]
+    for metric, frame, column in (
+        ("realized", diffs, "diff"),
+        ("realized@xg", on_xg, "diff"),
+        ("xg", diffs, "diff_xg"),
+    ):
+        result = block_bootstrap(frame, value=column, block_length=cell_block, **bootstrap)
+        per_season = season_points(frame, column)
+        season_diff = float(per_season.mean()) if len(per_season) else float("nan")
         rows.append(
             {"a": a, "b": b, "method": method, "metric": metric}
             | result.to_dict()
@@ -511,11 +600,12 @@ def summarize(
     block_length: int = 4,
     n_boot: int = 2000,
     seed: int = 0,
-    ci: float = 0.9,
+    ci: float = 0.8,
 ) -> Summary:
     """Season totals per policy (mean over starts) from `run_grid` results, and for each
-    (a, b) in `pairs` the full-run paired difference, plus each `per_decision` frame's, both
-    realized and xG-scored, with block-bootstrap CIs (`block_bootstrap` parameters)."""
+    (a, b) in `pairs` the full-run paired difference, plus each `per_decision` frame's:
+    realized, realized on the xG sample and xG-scored, with block-bootstrap CIs
+    (`block_bootstrap` parameters, `block_length` in GWs; `Summary` describes the columns)."""
     bootstrap = {"block_length": block_length, "n_boot": n_boot, "seed": seed, "ci": ci}
     season_totals = _season_totals(results)
     policies = (
@@ -525,6 +615,10 @@ def summarize(
         .reset_index()
         .assign(n_seasons=season_totals.groupby("policy", sort=True)["season"].nunique().values)
     )
+    xg = season_totals.pivot(index="season", columns="policy", values="xg_total")
+    common = xg[xg.notna().all(axis=1)]
+    policies["xg_total"] = policies["policy"].map(common.mean()).astype("float64")
+    policies["xg_seasons"] = len(common)
     comparisons: list[dict[str, Any]] = []
     for a, b in pairs:
         a, b = _name(a), _name(b)
@@ -564,6 +658,24 @@ def git_sha() -> str:
     return result.stdout.strip() or "unknown"
 
 
+def json_safe(value: Any) -> Any:
+    """`value` with numpy scalars as Python numbers and NaN/inf as None, recursively (for
+    strict JSON)."""
+    if isinstance(value, dict):
+        return {key: json_safe(v) for key, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [json_safe(v) for v in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
+def _dumps(value: Any) -> str:
+    return json.dumps(json_safe(value), sort_keys=True, default=str, allow_nan=False)
+
+
 def log_experiment(
     path: Path | str,
     command: str,
@@ -572,8 +684,8 @@ def log_experiment(
     n_variants: int,
 ) -> None:
     """Append one row (`EXPERIMENT_COLUMNS`: UTC timestamp, git sha, command, config and
-    metrics as JSON, n_variants) to the CSV at `path`, writing the header if the file is
-    new or empty."""
+    metrics as strict JSON (NaN as null, numpy scalars as numbers), n_variants) to the CSV
+    at `path` with LF line endings, writing the header if the file is new or empty."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     new = not path.exists() or path.stat().st_size == 0
@@ -581,12 +693,12 @@ def log_experiment(
         "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
         "git_sha": git_sha(),
         "command": command,
-        "config": json.dumps(config, sort_keys=True, default=str),
-        "metrics": json.dumps(metrics, sort_keys=True, default=str),
+        "config": _dumps(config),
+        "metrics": _dumps(metrics),
         "n_variants": int(n_variants),
     }
     with path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(EXPERIMENT_COLUMNS))
+        writer = csv.DictWriter(handle, fieldnames=list(EXPERIMENT_COLUMNS), lineterminator="\n")
         if new:
             writer.writeheader()
         writer.writerow(row)

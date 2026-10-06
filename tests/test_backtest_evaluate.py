@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 from synthetic_season import synthetic_tables
 
+from fplopt.backtest import evaluate
 from fplopt.backtest.evaluate import (
     EXPERIMENT_COLUMNS,
     StartSpec,
@@ -25,7 +26,8 @@ from fplopt.backtest.evaluate import (
 )
 from fplopt.backtest.policies import GreedyPolicy, RollPolicy
 from fplopt.backtest.rules import backtest_rules
-from fplopt.backtest.simulator import Caches, HoldoutError, simulate
+from fplopt.backtest.simulator import Caches, HoldoutError, season_schedule, simulate
+from fplopt.features.leakcheck import corrupt_future
 from fplopt.features.store import DataStore
 
 SEASON = 2023
@@ -131,6 +133,21 @@ def test_run_grid_refuses_holdout_seasons():
         run_grid(DataStore(tables=tables), [2025], "random@1", [ROLL])
 
 
+def refuse_start_states(*args, **kwargs):
+    raise AssertionError("start states built before the holdout check")
+
+
+def test_holdout_seasons_are_refused_before_anything_runs(league, monkeypatch):
+    """A holdout season anywhere in the list fails up front, even after a valid season and
+    on a store without its data."""
+    _, store, _ = league
+    monkeypatch.setattr(evaluate, "build_start_states", refuse_start_states)
+    with pytest.raises(HoldoutError, match="2025-26 is a holdout season"):
+        run_grid(store, iter([SEASON, 2025]), "random@30", [ROLL])
+    with pytest.raises(HoldoutError, match="2025-26 is a holdout season"):
+        per_decision(store, [SEASON, 2025], "random@30", GREEDY, ROLL, ROLL)
+
+
 def test_run_grid_needs_unique_policy_names(league):
     _, store, _ = league
     with pytest.raises(ValueError, match="unique"):
@@ -179,7 +196,9 @@ def test_paired_full_run_xg_diff_is_null_if_either_arm_is():
 
 def test_per_decision_with_identical_policies_is_all_zero(league):
     _, store, caches = league
-    out = per_decision(store, [SEASON], "random@30", GREEDY, GREEDY, ROLL, k=3, caches=caches)
+    out = per_decision(
+        store, [SEASON], "random@30", GREEDY, GREEDY, ROLL, k=3, stride=1, caches=caches
+    )
     assert len(out) == 9
     assert out["same_decision"].all()
     assert (out["diff"] == 0).all() and (out["diff_xg"] == 0).all()
@@ -191,7 +210,9 @@ def test_per_decision_arms_differ_only_in_the_decision_at_t(league):
     its window points are the roll run's; arm A only adds A's transfers at t."""
     _, store, caches = league
     k = 4
-    out = per_decision(store, [SEASON], "template@1", GREEDY, ROLL, ROLL, k=k, caches=caches)
+    out = per_decision(
+        store, [SEASON], "template@1", GREEDY, ROLL, ROLL, k=k, stride=1, caches=caches
+    )
     (_, start), *_ = build_start_states(store, SEASON, "template@1", RULES)
     ref = simulate(store, RULES, ROLL, start, caches=caches)
     net = ref.gws["net_points"].to_numpy()
@@ -215,12 +236,76 @@ def test_per_decision_arms_differ_only_in_the_decision_at_t(league):
     assert out_a["points_a"].tolist() == greedy_run.gws["net_points"].tolist()
 
 
+@pytest.fixture(scope="module")
+def every_gw(league):
+    """Per-decision greedy vs roll from template@1 and random@30 at every GW (stride 1)."""
+    _, store, caches = league
+    starts = "template@1,random@30"
+    return per_decision(store, [SEASON], starts, GREEDY, ROLL, ROLL, stride=1, caches=caches)
+
+
+def test_per_decision_windows_tile_the_run_without_overlap(league, every_gw):
+    """Default stride = k: decisions at the reference run's GWs 0, k, 2k, ... per start, so
+    the windows don't overlap and cover every GW once; each row equals the every-GW row of
+    the same decision GW."""
+    _, store, caches = league
+    out = per_decision(store, [SEASON], "template@1,random@30", GREEDY, ROLL, ROLL, caches=caches)
+    assert (out["stride"] == 4).all() and (every_gw["stride"] == 1).all()
+    for start_id, first in (("template@1", 1), ("random0@30", 30)):
+        part = out[out["start_id"] == start_id]
+        assert part["gw_index"].tolist() == list(range(first, 39, 4))
+        covered = [g for r in part.itertuples() for g in range(r.gw_index, r.gw_index + r.k)]
+        assert covered == list(range(first, 39))
+    assert out.loc[out["start_id"] == "template@1", "k"].tolist() == [4] * 9 + [2]
+    assert out.loc[out["start_id"] == "random0@30", "k"].tolist() == [4, 4, 1]
+    same = every_gw.merge(out[["start_id", "gw_index"]], on=["start_id", "gw_index"])
+    columns = [c for c in out.columns if c != "stride"]
+    pd.testing.assert_frame_equal(out[columns], same[columns])
+
+
+def test_per_decision_stride_two(league, every_gw):
+    _, store, caches = league
+    out = per_decision(store, [SEASON], "random@30", GREEDY, ROLL, ROLL, stride=2, caches=caches)
+    assert out["gw_index"].tolist() == [30, 32, 34, 36, 38]
+    assert out["k"].tolist() == [4, 4, 4, 3, 1]
+    expected = every_gw[every_gw["gw_index"].isin(out["gw_index"])]
+    expected = expected[expected["start_id"] == "random0@30"].reset_index(drop=True)
+    pd.testing.assert_frame_equal(out.drop(columns="stride"), expected.drop(columns="stride"))
+
+
+def test_per_decision_decisions_do_not_depend_on_data_after_the_deadline(league):
+    """Corrupt every row available at or after GW t's deadline: windows starting at or
+    before t keep their decisions (the reference states and each arm's decision at its
+    start only see earlier data); windows that end before t keep everything."""
+    tables, store, caches = league
+    t = 13
+    deadline = season_schedule(store, SEASON, t)["deadline_time"].iloc[0]
+    clean = per_decision(store, [SEASON], "template@1", GREEDY, ROLL, ROLL, caches=caches)
+    # Seed 3 leaves some (corrupted) GW13 outcome rows, so the reference run goes on past t
+    # and the window starting at t is evaluated (other seeds can empty GW13 and stop it).
+    altered = DataStore(tables=corrupt_future(tables, deadline, seed=3))
+    out = per_decision(altered, [SEASON], "template@1", GREEDY, ROLL, ROLL)
+    decision = ["season", "start_id", "gw", "gw_index", "stride", "same_decision"]
+    decision += ["transfers_a", "transfers_b"]
+    early = out["gw_index"] <= t
+    assert out.loc[early, "gw_index"].tolist() == [1, 5, 9, 13]
+    pd.testing.assert_frame_equal(
+        out.loc[early, decision], clean.loc[clean["gw_index"] <= t, decision]
+    )
+    assert (~clean.loc[clean["gw_index"] <= t, "same_decision"]).any()  # not vacuous
+    done = clean["gw_index"] + clean["k"] - 1 < t
+    assert done.sum() == 3
+    pd.testing.assert_frame_equal(out[done], clean[done])
+
+
 def test_per_decision_checks_its_arguments(league):
     _, store, _ = league
     with pytest.raises(ValueError, match="k must"):
         per_decision(store, [SEASON], "random@30", ROLL, ROLL, ROLL, k=0)
     with pytest.raises(ValueError, match="reference"):
         per_decision(store, [SEASON], "random@30", ROLL, ROLL, ROLL, reference="c")
+    with pytest.raises(ValueError, match="stride must"):
+        per_decision(store, [SEASON], "random@30", ROLL, ROLL, ROLL, stride=0)
 
 
 # --- bootstrap --------------------------------------------------------------------------------
@@ -281,6 +366,51 @@ def test_bootstrap_averages_over_starts_and_drops_nulls():
     assert np.isnan(empty.mean) and empty.n_gws == 0
 
 
+def no_effect_diffs(rng, n_seasons, window, gws=38):
+    """A/A data: iid N(0, 1) per-GW effects summed over non-overlapping windows of `window`
+    GWs (the last one shorter), one row per window per season; window 1 = full-run GWs."""
+    rows = []
+    for season in range(n_seasons):
+        effects = rng.normal(0, 1, gws)
+        for start in range(0, gws, window):
+            rows.append((season, start + 1, effects[start : start + window].sum()))
+    return pd.DataFrame(rows, columns=["season", "gw_index", "diff"])
+
+
+def rejection_rate(n_seasons, window, block_length, n_rep=400, n_boot=400):
+    rng = np.random.default_rng(n_seasons * 100 + window)
+    rejected = 0
+    for rep in range(n_rep):
+        diffs = no_effect_diffs(rng, n_seasons, window)
+        result = block_bootstrap(diffs, block_length=block_length, n_boot=n_boot, seed=rep)
+        rejected += result.p_one_sided < 0.10
+    return rejected / n_rep
+
+
+@pytest.mark.parametrize(
+    ("design", "n_seasons", "window", "block_length", "limit"),
+    [
+        ("per-decision", 4, 4, 1, 0.16),
+        ("per-decision", 1, 4, 1, 0.20),
+        ("full-run", 4, 1, 4, 0.16),
+        ("full-run", 1, 1, 4, 0.16),
+    ],
+)
+def test_bootstrap_size_under_no_effect(design, n_seasons, window, block_length, limit):
+    """A/A placebo: with no effect, p < 0.10 should happen about 10% of the time. The
+    designs are what `summarize` bootstraps: per-decision k = 4 windows (stride 4, so a
+    4-GW block is one window) and full-run GWs (4-GW blocks).
+
+    Measured 2026-10-06 with 2000 replicates and n_boot 2000 (SE ~0.007-0.009):
+    per-decision (block 1 window) 0.141 for 1 season, 0.122 for 4, 0.122 for 9;
+    full run (block 4 GWs) 0.131 / 0.124 / 0.122. Blocks of 4 *windows* (16 GWs) would give
+    0.182 / 0.167 / 0.163: with ~10 windows a season, the circular block bootstrap
+    understates the variance by about (n − b)/(n − 1). One season is anti-conservative
+    (percentile bootstrap on ~10 cells)."""
+    rate = rejection_rate(n_seasons, window, block_length)
+    assert 0.04 <= rate <= limit, f"{design}, {n_seasons} season(s): size {rate:.3f}"
+
+
 def test_bootstrap_ci_level():
     rng = np.random.default_rng(5)
     diffs = diffs_frame({2021: list(rng.normal(0, 5, 38)), 2022: list(rng.normal(0, 5, 38))})
@@ -303,12 +433,11 @@ def test_summarize(league, grid):
     assert totals.loc[ROLL.name, "n_transfers"] == 0
     assert set(summary.policies["policy"]) == {ROLL.name, GREEDY.name}
     comparisons = summary.comparisons
-    assert len(comparisons) == 4
+    assert len(comparisons) == 6
     assert set(zip(comparisons["method"], comparisons["metric"], strict=True)) == {
-        ("full_run", "realized"),
-        ("full_run", "xg"),
-        ("per_decision", "realized"),
-        ("per_decision", "xg"),
+        (method, metric)
+        for method in ("full_run", "per_decision")
+        for metric in ("realized", "realized@xg", "xg")
     }
     full = comparisons[
         (comparisons["method"] == "full_run") & (comparisons["metric"] == "realized")
@@ -317,6 +446,103 @@ def test_summarize(league, grid):
     assert full["mean"].iloc[0] == pytest.approx(expected.mean)
     assert full["ci_low"].iloc[0] == pytest.approx(expected.ci_low)
     json.dumps(summary.to_dict())
+
+
+def test_default_ci_is_80_percent():
+    """Two-sided 80% = the one-sided α = 0.10 bound of the go-live gate."""
+    rng = np.random.default_rng(6)
+    diffs = diffs_frame({2021: list(rng.normal(0, 5, 38)), 2022: list(rng.normal(0, 5, 38))})
+    assert block_bootstrap(diffs) == block_bootstrap(diffs, ci=0.8)
+
+
+def decision_frame(rows, stride):
+    """A per-decision-like frame: (season, gw_index, k, diff, diff_xg) per row."""
+    frame = pd.DataFrame(rows, columns=["season", "gw_index", "k", "diff", "diff_xg"])
+    return frame.assign(start_id="s", policy_a="a", policy_b="b", stride=stride).astype(
+        {"diff_xg": "Float64"}
+    )
+
+
+def tiny_results():
+    """A two-policy, two-season grid: policy a has a null xG GW in 2021, b in 2022."""
+    rows = []
+    for season in (2021, 2022, 2023):
+        for policy in ("a", "b"):
+            for gw in (1, 2):
+                null = (policy, season, gw) in {("a", 2021, 2), ("b", 2022, 1)}
+                rows.append(
+                    {
+                        "season": season,
+                        "start_id": "s",
+                        "policy": policy,
+                        "gw": gw,
+                        "gw_index": gw,
+                        "net_points": 10 * gw + (policy == "a"),
+                        "xg_net_points": None if null else 10.0 * gw + (season - 2020),
+                        "n_transfers": 0,
+                        "hit_points": 0,
+                        "captain_regret": 0,
+                        "xi_regret": 0,
+                    }
+                )
+    return pd.DataFrame(rows).astype({"xg_net_points": "Float64"})
+
+
+def test_summarize_per_decision_season_points_and_xg_sample():
+    """Non-overlapping windows: season_diff = Σ window diffs per season / seasons. Overlapping
+    (stride 1): each window's diff is divided by its k. `realized@xg` uses only the rows
+    with an xG difference, the same sample as `xg`; per-decision blocks are in GWs."""
+    results = tiny_results()
+    tiling = decision_frame(
+        [
+            (2021, 1, 4, 8, 2.0),
+            (2021, 5, 4, -4, None),
+            (2021, 9, 2, 2, 1.0),
+            (2022, 1, 4, 6, 3.0),
+            (2022, 5, 4, 0, 1.0),
+        ],
+        stride=4,
+    )
+    summary = summarize(results, per_decision_diffs=tiling, n_boot=50)
+    rows = summary.comparisons.set_index("metric")
+    assert rows.loc["realized", "season_diff"] == pytest.approx((8 - 4 + 2 + 6 + 0) / 2)
+    assert rows.loc["realized", "mean"] == pytest.approx(12 / 5)
+    assert rows.loc["realized@xg", "season_diff"] == pytest.approx((8 + 2 + 6 + 0) / 2)
+    assert rows.loc["realized@xg", "n_gws"] == rows.loc["xg", "n_gws"] == 4
+    assert rows.loc["xg", "season_diff"] == pytest.approx((2 + 1 + 3 + 1) / 2)
+    expected = block_bootstrap(tiling, block_length=1, n_boot=50)  # 4 GWs = 1 window
+    assert rows.loc["realized", "ci_low"] == pytest.approx(expected.ci_low)
+    overlapping = decision_frame(
+        [(2021, 1, 2, 4, 1.0), (2021, 2, 2, 6, 1.0), (2021, 3, 1, 3, 1.0)], stride=1
+    )
+    summary = summarize(results, per_decision_diffs=overlapping, n_boot=50)
+    rows = summary.comparisons.set_index("metric")
+    assert rows.loc["realized", "season_diff"] == pytest.approx(4 / 2 + 6 / 2 + 3 / 1)
+    assert rows.loc["realized", "mean"] == pytest.approx(13 / 3)
+    expected = block_bootstrap(overlapping, block_length=4, n_boot=50)
+    assert rows.loc["realized", "ci_low"] == pytest.approx(expected.ci_low)
+
+
+def test_summarize_full_run_realized_on_the_xg_sample():
+    results = tiny_results()
+    summary = summarize(results, [("a", "b")], n_boot=50)
+    rows = summary.comparisons.set_index("metric")
+    assert rows.loc["realized", "n_gws"] == 6
+    assert rows.loc["realized@xg", "n_gws"] == rows.loc["xg", "n_gws"] == 4
+    assert rows.loc["realized@xg", "season_diff"] == pytest.approx(4 / 3)  # 1 per GW
+
+
+def test_policy_xg_means_use_the_seasons_common_to_all_policies():
+    """a's 2021 xG total is null and b's 2022: both policies' xG means are over 2023 only,
+    and `xg_seasons` says so; realized means are over every season."""
+    summary = summarize(tiny_results(), n_boot=10)
+    totals = summary.season_totals.set_index(["season", "policy"])
+    assert pd.isna(totals.loc[(2021, "a"), "xg_total"])
+    assert pd.isna(totals.loc[(2022, "b"), "xg_total"])
+    policies = summary.policies.set_index("policy")
+    assert policies.loc["a", "xg_total"] == policies.loc["b", "xg_total"] == pytest.approx(36.0)
+    assert (policies["xg_seasons"] == 1).all() and (policies["n_seasons"] == 3).all()
+    assert policies.loc["a", "total"] == pytest.approx(32.0)
 
 
 def test_log_experiment_appends_with_one_header(tmp_path):
@@ -332,3 +558,29 @@ def test_log_experiment_appends_with_one_header(tmp_path):
     assert json.loads(rows[1]["metrics"]) == {"diff": -2}
     assert [r["n_variants"] for r in rows] == ["1", "3"]
     assert rows[0]["git_sha"] and rows[0]["timestamp"]
+    assert b"\r" not in path.read_bytes()
+
+
+def test_log_experiment_writes_strict_json_numbers(tmp_path):
+    """NaN/inf become null and numpy scalars numbers (not strings)."""
+    path = tmp_path / "experiments.csv"
+    metrics = {
+        "mean": np.float64(1.5),
+        "n": np.int64(3),
+        "missing": float("nan"),
+        "rows": [{"p": np.float32(0.25), "ci": [np.float64("nan"), float("inf")]}],
+        "flag": np.bool_(True),
+    }
+    log_experiment(path, "cmd", {"k": np.int64(4), "path": tmp_path}, metrics, np.int64(2))
+    with path.open(encoding="utf-8", newline="") as handle:
+        (row,) = list(csv.DictReader(handle))
+    assert "NaN" not in row["metrics"] and "Infinity" not in row["metrics"]
+    assert json.loads(row["metrics"]) == {
+        "flag": True,
+        "mean": 1.5,
+        "missing": None,
+        "n": 3,
+        "rows": [{"ci": [None, None], "p": 0.25}],
+    }
+    assert json.loads(row["config"]) == {"k": 4, "path": str(tmp_path)}
+    assert row["n_variants"] == "2"

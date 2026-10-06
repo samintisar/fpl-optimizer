@@ -126,6 +126,9 @@ POLICY_PARAMS: dict[str, dict[str, type]] = {
 }
 DEFAULT_STARTS = "template@1,random:5@1,random:3@20"
 DEFAULT_EXPERIMENTS = Path("results/experiments.csv")
+# Two-sided bootstrap CI level: its lower bound is the one-sided α = 0.10 bound of the
+# go-live gate (PLAN §9).
+CI_LEVEL = 0.8
 _SEASON_ITEM = re.compile(r"(\d{4})(?:-(\d{4}|\d{2}))?")
 
 
@@ -298,8 +301,10 @@ def validate_backtest(
     if args.command == "compare":
         if args.a == args.b:
             parser.error(f"--a and --b are the same policy ({args.a})")
-        if args.k < 1 or args.block_length < 1 or args.n_boot < 1:
-            parser.error("--k, --block-length and --n-boot must be >= 1")
+        if args.stride is None:
+            args.stride = args.k  # non-overlapping per-decision windows
+        if min(args.k, args.stride, args.block_length, args.n_boot) < 1:
+            parser.error("--k, --stride, --block-length and --n-boot must be >= 1")
     try:
         args.start_specs = parse_start_specs(args.starts)
     except ValueError as exc:
@@ -348,9 +353,11 @@ def _backtest_config(args: argparse.Namespace, out: Path) -> dict[str, Any]:
             "per_decision": args.per_decision,
             "continuation": str(args.continuation) if args.per_decision else None,
             "k": args.k,
+            "stride": args.stride,
             "block_length": args.block_length,
             "n_boot": args.n_boot,
             "seed": args.seed,
+            "ci": CI_LEVEL,
         }
     return config
 
@@ -478,7 +485,12 @@ def season_table(totals: pd.DataFrame) -> str:
 
 def overall_table(totals: pd.DataFrame) -> str:
     """Per (policy, start GW), means over seasons of `season_totals_by_start`; the xG mean
-    over the seasons where it is defined (counted in `xG seasons`)."""
+    over the seasons where every policy's xG mean (for that start GW) is defined, counted in
+    `xG seasons`, so policies are compared on the same seasons."""
+    xg_seasons = {}
+    for start_gw, part in totals.groupby("start_gw"):
+        wide = part.pivot(index="season", columns="policy", values="xg_mean")
+        xg_seasons[start_gw] = set(wide.index[wide.notna().all(axis=1)])
     groups = totals.groupby(["policy", "start_gw"], sort=True)
     headers = ["policy", "from GW", "seasons", "template", "mean", "xG mean", "xG seasons"]
     headers += ["transfers", "capt regret", "XI regret"]
@@ -489,8 +501,8 @@ def overall_table(totals: pd.DataFrame) -> str:
             str(len(part)),
             _num(part["template"].mean()),
             _num(part["mean"].mean()),
-            _num(part["xg_mean"].mean()),
-            str(int(part["xg_mean"].notna().sum())),
+            _num(part.loc[part["season"].isin(xg_seasons[start_gw]), "xg_mean"].mean()),
+            str(len(xg_seasons[start_gw])),
             _num(part["n_transfers"].mean()),
             _num(part["captain_regret"].mean(), 2),
             _num(part["xi_regret"].mean(), 2),
@@ -500,13 +512,17 @@ def overall_table(totals: pd.DataFrame) -> str:
     return text_table(headers, rows, left=2)
 
 
-def comparison_table(summary: Summary, k: int) -> str:
+def comparison_table(summary: Summary, k: int, stride: int, ci: float = CI_LEVEL) -> str:
     """The paired comparisons of `summarize`: mean difference (per GW for the full run, per
-    k-GW decision window for per-decision), 90% CI, one-sided p, sample, per-season diff."""
-    headers = ["method", "metric", "mean diff", "90% CI", "p", "seasons", "GWs", "per season"]
+    k-GW decision window for per-decision), `ci` CI, one-sided p, sample (seasons and cells:
+    GWs or decision windows), difference in season points."""
+    headers = ["method", "metric", "mean diff", f"{ci:.0%} CI", "p", "seasons", "cells"]
+    headers += ["per season"]
     rows = []
     for r in summary.comparisons.itertuples(index=False):
-        method = f"per-decision (k={k})" if r.method == "per_decision" else "full run"
+        method = "full run"
+        if r.method == "per_decision":
+            method = f"per-decision (k={k}, stride={stride})"
         rows.append(
             [
                 method,
@@ -531,13 +547,17 @@ def _per_season(diffs: pd.DataFrame, column: str) -> pd.DataFrame:
 
 def per_season_diff_table(paired: pd.DataFrame, decisions: pd.DataFrame | None, k: int) -> str:
     """Per season: the full-run difference (season total and per GW realized, per GW xG) and
-    the per-decision difference per decision window (realized, xG) with the share of GWs at
-    which A and B decided differently."""
+    the per-decision difference (season points — `season_points` — and per decision window,
+    realized; xG per window) with the share of decisions at which A and B differed."""
+    from fplopt.backtest.evaluate import season_points
+
     full = _per_season(paired, "diff")
     full_xg = _per_season(paired, "diff_xg")["mean"]
     headers = ["season", "full run total", "per GW", "xG per GW"]
     if decisions is not None:
-        headers += [f"per-decision (k={k})", "xG", "decisions differ"]
+        headers += [f"per-decision total (k={k})", "per window", "xG per window"]
+        headers += ["decisions differ"]
+        dec_total = season_points(decisions, "diff")
         dec = _per_season(decisions, "diff")["mean"]
         dec_xg = _per_season(decisions, "diff_xg")["mean"]
         differ = 1 - decisions.groupby("season")["same_decision"].mean()
@@ -552,6 +572,7 @@ def per_season_diff_table(paired: pd.DataFrame, decisions: pd.DataFrame | None, 
         if decisions is not None:
             share = differ.get(season)
             row += [
+                _num(dec_total.get(season), 1, True),
                 _num(dec.get(season), 3, True),
                 _num(dec_xg.get(season), 3, True),
                 "-" if share is None else f"{share:.0%}",
@@ -655,7 +676,15 @@ def _backtest_compare(c: Context) -> object:
     decisions = None
     if continuation is not None:
         decisions = per_decision(
-            store, args.seasons, args.start_specs, a, b, continuation, k=args.k, caches=caches
+            store,
+            args.seasons,
+            args.start_specs,
+            a,
+            b,
+            continuation,
+            k=args.k,
+            stride=args.stride,
+            caches=caches,
         )
     summary = summarize(
         results,
@@ -664,6 +693,7 @@ def _backtest_compare(c: Context) -> object:
         block_length=args.block_length,
         n_boot=args.n_boot,
         seed=args.seed,
+        ci=CI_LEVEL,
     )
     runtime = time.perf_counter() - began
     totals = season_totals_by_start(results, args.start_specs)
@@ -691,10 +721,13 @@ def _backtest_compare(c: Context) -> object:
         f"{args.starts}{cont} ({runtime:.0f}s)\n\n"
         f"{TOTALS_TITLE}\n{season_table(totals)}\n\n"
         f"Overall (means over seasons)\n{overall_table(totals)}\n\n"
-        "Paired differences A - B (full run: mean per GW; per-decision: mean per decision "
-        f"window; 90% CI from a GW-block bootstrap by season, block {args.block_length}, "
-        f"{args.n_boot} resamples; p one-sided, H1: A > B)\n"
-        f"{comparison_table(summary, args.k)}\n\nPer season (A - B)\n"
+        f"Paired differences A - B (full run: mean per GW; per-decision: mean per {args.k}-GW "
+        f"decision window, a decision every {args.stride} GWs; {CI_LEVEL:.0%} CI, two-sided "
+        f"(lower bound = one-sided alpha {(1 - CI_LEVEL) / 2:.2f}), from a GW-block bootstrap "
+        f"by season, blocks of {args.block_length} GWs, {args.n_boot} resamples; p "
+        "one-sided, H1: A > B; realized@xg = realized points on the xG metric's sample; "
+        "cells = GWs or decision windows; per season = difference in season points)\n"
+        f"{comparison_table(summary, args.k, args.stride)}\n\nPer season (A - B)\n"
         f"{per_season_diff_table(paired, decisions, args.k)}\n\nWritten to {out}",
         flush=True,
     )
@@ -812,6 +845,13 @@ def _add_backtest_parsers(groups: Any) -> None:
         help="per-decision continuation policy (default roll:rolling)",
     )
     compare.add_argument("--k", type=int, default=4, help="per-decision window in GWs (4)")
+    compare.add_argument(
+        "--stride",
+        type=int,
+        default=None,
+        help="GWs between per-decision windows (default k: windows don't overlap; 1 = every "
+        "GW, a diagnostic)",
+    )
     compare.add_argument(
         "--per-decision",
         action=argparse.BooleanOptionalAction,
