@@ -13,7 +13,8 @@ from synthetic_raw import (
     season_fixtures,
 )
 
-from fplopt.build import build
+from fplopt.build import BUILDERS, build
+from fplopt.build.common import write_table
 from fplopt.build.players import (
     PlayerMatchError,
     assemble_player_match,
@@ -49,7 +50,14 @@ def current_history(fixtures):
 
 
 def build_players(world):
-    build(["fixture", "gameweek", "player_match", "player_season", "player_dim"], world.ctx)
+    """fixture … player_dim. Written directly, not via `build()`, which would also run the
+    `understat` builder after player_match / player_dim: these worlds have no Understat."""
+    build(["fixture", "gameweek"], world.ctx)
+    for name in ("player_match", "player_season", "player_dim"):
+        builder = BUILDERS[name]
+        df = builder.run(world.ctx)
+        write_table(df, name, builder.schema, world.ctx.data_dir, builder.sort_by)
+        world.ctx.forget(name)
     return world.ctx.table("player_match")
 
 

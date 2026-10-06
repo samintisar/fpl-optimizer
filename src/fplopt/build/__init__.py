@@ -4,6 +4,10 @@
 them in (`fplopt build TABLE|all`). A builder's `run(ctx)` returns the table and `build()`
 validates it against `schema` and writes `data/<name>.parquet` sorted by `sort_by`. A builder
 with `schema=None` writes its own output(s) and returns a frame only for logging.
+
+Rebuilding `player_match` or `player_dim` writes them without their Understat columns, so
+`build()` then also runs `understat` (which fills them) and `team_match` (built from
+`player_match`), and logs that it did.
 """
 
 from __future__ import annotations
@@ -75,6 +79,11 @@ ORDER: list[str] = [
 ]
 
 
+# Tables whose rebuild clears columns the `understat` builder fills, and what then reruns.
+UNDERSTAT_TARGETS = ("player_match", "player_dim")
+UNDERSTAT_AND_DEPENDENTS = ("understat", "team_match")
+
+
 def _resolve(names: Iterable[str]) -> list[str]:
     requested = set()
     for name in names:
@@ -84,6 +93,15 @@ def _resolve(names: Iterable[str]) -> list[str]:
             requested.add(name)
         else:
             raise ValueError(f"unknown table {name!r}; valid: {', '.join(['all', *ORDER])}")
+    if requested.intersection(UNDERSTAT_TARGETS):
+        added = [name for name in UNDERSTAT_AND_DEPENDENTS if name not in requested]
+        if added:
+            log.info(
+                "also rebuilding %s: rebuilding %s clears the Understat columns",
+                ", ".join(added),
+                " and ".join(name for name in UNDERSTAT_TARGETS if name in requested),
+            )
+            requested.update(added)
     return [name for name in ORDER if name in requested]
 
 

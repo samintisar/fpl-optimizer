@@ -44,7 +44,7 @@ season without such a run has no rows if none of its fixtures is finished, else 
   columns but every value is a 0 placeholder). CBIT/recoveries/tackles where the source has
   them (2016-17 … 2018-19, 2025-26 →), `defensive_contribution` 2025-26 →; null elsewhere.
 - Understat columns `us_*` are null here; the `understat` builder fills them and rewrites the
-  table (so rebuilding player_match alone clears them until `understat` runs again).
+  table (`build()` reruns it whenever player_match or player_dim is rebuilt).
 
 Checks: placeholder zeros — no (season, GW) with goals where every non-null value of an
 optional stat column (`OPTIONAL_STATS`) is 0 (measured on raw/ 2026-10-06: the only such

@@ -436,3 +436,15 @@ def test_understat_team_rows_fail_on_goal_mismatch():
         understat_team_rows(raw.assign(scored=raw["scored"] + 1), sides, resolver)
     with pytest.raises(UnderstatMappingError, match="match no fixture"):
         understat_team_rows(raw.assign(date="2023-01-01 15:00:00"), sides, resolver)
+
+
+def test_rebuilding_player_match_alone_reruns_understat(world, caplog):
+    two_seasons(world)
+    build([*ALL, "team_match"], world.ctx)
+    caplog.set_level("INFO", logger="fplopt.build")
+    paths = build(["player_match"], world.ctx)
+    assert [p.stem for p in paths] == ["player_match", "understat", "team_match"]
+    assert "also rebuilding understat, team_match" in caplog.text
+    assert world.ctx.table("player_match")["us_minutes"].notna().all()
+    build(["player_dim"], world.ctx)
+    assert world.ctx.table("player_dim")["understat_id"].notna().all()
