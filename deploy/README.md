@@ -27,7 +27,7 @@ Runs as your normal user with systemd **user** timers. Raw data lands in `~/fpl-
    ```
    `ODDS_API_KEY` is optional (free tier at the-odds-api.com, 500 credits/month); without it odds are skipped.
    `FPLOPT_RAW_DIR` is optional (default `raw`, relative to the repo).
-4. Smoke test:
+4. First daily run, by hand. On a fresh server this is more than a smoke test: besides fixtures, bootstrap, odds and the football-data CSV, it archives `event/{gw}/live/` for every GW finalised so far and does a full element-summary run (about 700 requests, ~5 minutes). Run it **outside** the 2 hours before a deadline: its bootstrap snapshot counts as that window's pre-deadline snapshot, so the tick would skip it.
    ```bash
    .venv/bin/fplopt snapshot daily && ls raw/fpl/bootstrap-static
    ```
@@ -44,12 +44,11 @@ Runs as your normal user with systemd **user** timers. Raw data lands in `~/fpl-
    sudo loginctl enable-linger "$USER"   # keep timers running when logged out
    ```
    If a unit fails for any reason, including a broken venv where the CLI can't even start, `fplopt-failure@.service` sends a Telegram message. A job failure the CLI already alerted on will therefore alert twice. That's intentional.
-7. One-off backfill of this season's per-GW stats (issue #13, ~5 minutes). Run it **outside** the 2 hours before a deadline (its bootstrap snapshot counts as that window's snapshot):
+7. Optional: element-summary by hand (issue #13, ~5 minutes). On a fresh server step 4 already did a full run, and the daily job keeps it fresh (see below), so this is only for forcing a new run, e.g. after step 4's run failed, without waiting for the next daily run. Same deadline caveat as step 4:
    ```bash
    .venv/bin/fplopt backfill element-summary
    ```
    Each run writes `raw/fpl/element-summary/<timestamp>/_manifest.json.gz` listing expected, written and failed players.
-   After this, the daily job keeps it fresh (see below), so it's only needed by hand on a new server.
 
 ## Operating
 
@@ -104,7 +103,7 @@ The working directory matters: the CLI loads `.env` from it (Telegram alerts) an
 | Job | Size / time | Writes | Check |
 |---|---|---|---|
 | `football-data` | 11 small CSVs, ~15 s | `raw/football-data/E0/{1617…2627}/<ts>.csv.gz` | `ls raw/football-data/E0` shows 11 seasons |
-| `vaastav` | ~3.4k files at the pinned commit, ~10 min | `raw/vaastav/data/<run>/…csv.gz` + `_manifest.json.gz` | manifest `failed` is empty (below) |
+| `vaastav` | ~3,000 files at the pinned commit, ~10 min | `raw/vaastav/data/<run>/…csv.gz` + `_manifest.json.gz` | manifest `failed` is empty (below) |
 | `fplcache` | ~7,950 snapshots, ~0.9 GB streamed, ~10–20 min | `raw/fplcache/bootstrap-static/<snapshot time>.json.xz` + `raw/fplcache/runs/<run>.json.gz` | run manifest `failed` is empty and `error` is null |
 
 ```bash
@@ -128,7 +127,14 @@ All three are safe to re-run. football-data and vaastav write a new timestamped 
 .venv/bin/fplopt rules export 2025-26 --out /tmp/fplopt-scoring
 ```
 
-Then, from the repo root on the dev machine: `scp 'fplopt-server:/tmp/fplopt-scoring/*.json' config/scoring/` and commit them. Each file records the snapshot it came from (`source.path`, `source.snapshot_at`).
+Then, from the repo root on the dev machine, copy them back and commit them:
+
+```bash
+mkdir -p config/scoring
+scp 'fplopt-server:/tmp/fplopt-scoring/*.json' config/scoring/
+```
+
+Each file records the snapshot it came from (`source.path`, `source.snapshot_at`).
 
 ## Copy raw/ to the dev machine
 
