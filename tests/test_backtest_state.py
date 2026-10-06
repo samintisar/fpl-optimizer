@@ -275,7 +275,7 @@ def test_freehit_reverts_squad_and_bank():
     assert nxt.holdings == state.holdings and nxt.bank == state.bank
     assert nxt.freehit_backup is None and nxt.freehit_bank is None
     assert nxt.chips_used == ((3, 8),)
-    assert nxt.free_transfers == 3
+    assert nxt.free_transfers == 2  # chip_week_ft "retain" (2026/27, verified #9)
 
 
 def test_freehit_backup_holds_deadline_prices_and_is_refreshed_later():

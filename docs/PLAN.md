@@ -91,7 +91,7 @@ fpl-optimizer/
 - 2026/27 (confirmed against the live API, unchanged from 2025/26 except BPS):
   - **Defensive contributions:** DEF 2 pts at ≥10 CBIT (clearances, blocks, interceptions, tackles); MID/FWD 2 pts at ≥12 CBIRT (CBIT + recoveries); GK not eligible.
   - **Chips:** two sets. Set 1: Bench Boost and Triple Captain GW1–19, Wildcard and Free Hit **GW2–19**; expires at the GW19 deadline. Set 2: all four GW20–38. Free Hit cannot be played in consecutive GWs (per 2025/26 rules; VERIFY still applies).
-  - **Free transfers:** bank up to 5 (`max_extra_free_transfers` = 4). No AFCON top-up in 2026/27 (2025/26 had one; not in the API — see above).
+  - **Free transfers:** bank up to 5 (`max_extra_free_transfers` = 4). No AFCON top-up in 2026/27 (2025/26 had one; not in the API — see above). A Wildcard/Free Hit GW keeps the banked FTs but adds **no** +1 (verified 2026-10-06, #9: all 795 sampled top-800 2026/27 histories fit; the +1 variant is contradicted by 27 of them).
   - **BPS changed:** 1 BPS per 3 CBI (was per 2), no −1 for being tackled, GK save BPS restructured.
   - **GW lockdown:** 09:00 UK the day after the GW's last match.
 
@@ -430,12 +430,13 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 
 ## 11. Open items to VERIFY
 
-- Free-transfer reconstruction rules from public transfer history, including whether a WC/FH GW grants the +1 FT in 2026/27, and the 2025/26 AFCON top-up (GW and amount; absent from the API).
+- Free-transfer reconstruction rules from public transfer history, and the 2025/26 AFCON top-up (GW and amount; absent from the API). (WC/FH effect resolved below.)
 - Free Hit consecutive-GW restriction in 2026/27.
 - FPL-Core-Insights components reproduce FPL CBIT/CBIRT (2026/27 GW1–5) before setting defcon `k`, `r`.
 - Solver performance with chip scenarios over a 6-GW horizon.
 
 **Resolved (2026-10-06):**
+- WC/FH GW effect on banked FTs (2026/27): FTs kept, no +1 → §3 *Rules config*, `chip_week_ft: retain` (#9).
 - vaastav per-GW `selected` / `transfers` / `value` timing → §4 (#6).
 
 **Resolved (2026-10-05):**

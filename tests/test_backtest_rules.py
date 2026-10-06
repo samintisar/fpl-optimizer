@@ -49,7 +49,7 @@ def test_2026_27_squad_transfers_and_chips():
     assert rules.sell_on_fee == 0.5
     assert rules.max_free_transfers == 5
     assert rules.hit_cost == 4
-    assert rules.chip_week_ft == "retain_plus_one"
+    assert rules.chip_week_ft == "retain"
     assert rules.freehit_consecutive is False
     assert rules.ft_topups == ()
     windows = {(c.name, c.start, c.stop) for c in rules.chips}
