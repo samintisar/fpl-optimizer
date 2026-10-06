@@ -36,6 +36,10 @@ packages = ["src/fplopt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Real-data tests read data/ (build it with `fplopt build all`) and take minutes: deselected
+# by default, run with `uv run pytest -m realdata` (a later -m overrides this one).
+addopts = ["-m", "not realdata"]
+markers = ["realdata: runs on the real data/ tables (skipped if absent); run with -m realdata"]
 
 [tool.ruff]
 line-length = 100

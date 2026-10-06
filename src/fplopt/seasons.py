@@ -9,6 +9,10 @@ from typing import Any
 
 _LABEL = re.compile(r"(\d{4})-(\d{2})")
 
+# The 2025/26 holdout (PLAN §9): no outcome statistics, tuning or leakage-check deadlines
+# from it until Phase 6.
+HOLDOUT_SEASONS = frozenset({2025})
+
 
 def season_label(start_year: int) -> str:
     """2026 -> '2026-27' (vaastav folders, config file names)."""
