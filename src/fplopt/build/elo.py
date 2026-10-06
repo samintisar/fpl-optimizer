@@ -18,11 +18,13 @@ Model (World-Football-Elo style; constants below, to be tuned in Phase 5):
 Pre-season rows: one per club of each season (promoted clubs and clubs of the current season
 that have not played yet included), `rating_before = rating_after` = the seeded or
 carried-over season-start rating, fixture fields (`fixture_key`, `kickoff_time`,
-`opponent_team_key`, `is_home`, `expected_score`) null. `event_time = available_at` = 1 June
-of the season's start year (promotion settled, schedule published; PLAN §4), or the previous
-season's last result if that is later (2019/20 ended in July 2020): always before the
-season's first match. Without them a club promoted after a long absence (Brighton 2017: no
-match in the data since 2005) has no rating before its first match.
+`opponent_team_key`, `is_home`, `expected_score`) null. `event_time = available_at` =
+`schedule_available_at` (as for the season's schedule): 1 June of the season's start year
+(promotion settled, schedule published; PLAN §4), or the lockdown after the previous
+season's last match if that is later (2019/20 ended in July 2020), so never at a deadline of
+the previous season; always before the season's first match. Without them a club promoted
+after a long absence (Brighton 2017: no match in the data since 2005) has no rating before
+its first match.
 
 Inputs: football-data `Date, HomeTeam, AwayTeam, FTHG, FTAG` of every season (season from
 the folder code), teams via `TeamResolver.football_data`. From 2016/17 each match is joined
@@ -50,7 +52,13 @@ from datetime import date
 import pandas as pd
 import pandera.pandas as pa
 
-from fplopt.build.common import UK, UTC_US, BuildContext, schedule_published_at
+from fplopt.build.common import (
+    UK,
+    UTC_US,
+    BuildContext,
+    schedule_available_at,
+    schedule_published_at,
+)
 from fplopt.build.fixtures import FIRST_SEASON, football_data_results
 from fplopt.build.teams import TeamResolver
 
@@ -115,7 +123,7 @@ def elo_ratings(
         )
     ratings: dict[int, float] = {}
     previous: set[int] | None = None
-    last_result: pd.Timestamp | None = None
+    last_kickoff: pd.Timestamp | None = None
     out = []
     pre_season = []
     for season in sorted(clubs):
@@ -129,9 +137,8 @@ def elo_ratings(
             )
             for club in sorted(current - previous):
                 ratings[club] = seed
-        start = schedule_published_at(season)
-        if last_result is not None:
-            start = max(start, last_result)
+        # Known like the season's schedule (the club list reveals promotion/relegation).
+        start = schedule_available_at(season, last_kickoff)
         pre_season += [(club, season, ratings[club], start) for club in sorted(current)]
         rows = ordered[ordered["season"] == season]
         for m in rows.itertuples(index=False):
@@ -146,7 +153,7 @@ def elo_ratings(
             out.append((home, *common, away, True, before_h, ratings[home], e_home))
             out.append((away, *common, home, False, before_a, ratings[away], 1.0 - e_home))
         if len(rows):
-            last_result = pd.Timestamp(rows["kickoff_time"].max()) + RESULT_DELAY
+            last_kickoff = pd.Timestamp(rows["kickoff_time"].max())
         previous = current
     played = pd.DataFrame(out, columns=COLUMNS[:9]).astype(DTYPES)
     played["event_time"] = played["kickoff_time"]

@@ -200,7 +200,7 @@ def test_pre_season_rows_carry_the_season_start_rating():
 
 def test_pre_season_rows_wait_for_the_previous_season_to_end():
     """A season that ends after 1 June (2019/20 ended in July 2020) delays the next season's
-    start ratings until its last result is in."""
+    start ratings until its last GW has locked (as for the schedule)."""
     rows = [
         ("2010-08-14T14:00", 1, 2, 1, 0),
         ("2011-07-20T18:00", 2, 1, 2, 0),  # same season, played after 1 June 2011
@@ -210,7 +210,8 @@ def test_pre_season_rows_wait_for_the_previous_season_to_end():
     validate_table(out, "team_rating", SCHEMA)
     pre = out[out["kickoff_time"].isna() & (out["season"] == 2011)]
     assert len(pre) == 2
-    assert (pre["available_at"] == utc("2011-07-20T20:00")).all()
+    # Last kickoff 20 July 19:00 BST -> lockdown 21 July 09:00 BST.
+    assert (pre["available_at"] == utc("2011-07-21T08:00")).all()
     assert (pre["event_time"] == pre["available_at"]).all()
 
 

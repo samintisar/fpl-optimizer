@@ -3,7 +3,8 @@ for the as-of store, the leakage harness and the tests (Phase 2 plan, Task 1).
 
 Kinds (how `available_at` is set and how as-of reads treat the table):
 - `static`: reference data with nothing time-dependent (`available_at` = epoch).
-- `schedule`: known from publication (`available_at` = 1 June of the season's start year);
+- `schedule`: known from publication (`available_at` = 1 June of the season's start year, or
+  the lockdown after the previous season's last kickoff if later: `schedule_available_at`);
   historically only the final version exists (PLAN §3, §4).
 - `event`: one row per thing that happened (or state at a deadline), each with its own
   `available_at`; as-of reads keep rows with `available_at < deadline`.

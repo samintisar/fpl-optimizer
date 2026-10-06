@@ -13,8 +13,10 @@ from fplopt.build.fixtures import (
     assemble_gameweek_results,
     assemble_gameweeks,
     attach_football_data,
+    check_published_after_previous_season,
     fixtures_from_merged_gw,
     last_bootstrap_per_season,
+    schedule_from_fixture,
 )
 
 
@@ -236,6 +238,56 @@ def test_assemble_gameweeks_sources_and_bootstrap_event_without_fixtures():
     assert (results["available_at"] == out["lockdown_time"]).all()
 
 
+def restart_fixtures():
+    """2019/20 ending in July 2020 (GW47) and 2020/21 starting in September."""
+    return pd.DataFrame(
+        {
+            "fixture_key": [2019001, 2019002, 2020001, 2020002],
+            "season": [2019, 2019, 2020, 2020],
+            "gw": pd.array([39, 47, 1, 2], dtype="Int64"),
+            "gw_index": pd.array([30, 38, 1, 2], dtype="Int64"),
+            "kickoff_time": [
+                utc("2020-06-17T17:00"),
+                utc("2020-07-26T15:00"),
+                utc("2020-09-12T11:30"),
+                utc("2020-09-19T11:30"),
+            ],
+            "home_team_key": [1, 3, 1, 3],
+            "away_team_key": [2, 4, 2, 4],
+        }
+    )
+
+
+def test_next_season_schedule_waits_for_the_previous_season_to_lock():
+    """At 2019/20 GW39 (June 2020) the 2020/21 schedule must not be visible: it reveals
+    promotion and relegation. Known from max(1 June, the previous season's last lockdown)."""
+    fixture = restart_fixtures()
+    gameweek = assemble_gameweeks(fixture, {}, {}).set_index(["season", "gw"])
+    restart_end = utc("2020-07-27T08:00")  # lockdown after 26 July 2020 (BST)
+    assert gameweek.loc[(2019, 39), "available_at"] == utc("2019-06-01")
+    assert gameweek.loc[(2020, 1), "available_at"] == restart_end
+    assert gameweek.loc[(2020, 2), "available_at"] == restart_end
+    schedule = schedule_from_fixture(fixture).set_index("fixture_key")
+    assert schedule.loc[2019001, "available_at"] == utc("2019-06-01")
+    assert (schedule.loc[[2020001, 2020002], "available_at"] == restart_end).all()
+    last_2019_deadline = gameweek.loc[(2019, 47), "deadline_time"]
+    assert (gameweek.loc[2020, "available_at"] > last_2019_deadline).all()
+
+
+def test_rows_published_before_the_previous_season_ends_fail_the_check():
+    gameweek = assemble_gameweeks(restart_fixtures(), {}, {})
+    schedule = schedule_from_fixture(restart_fixtures())
+    check_published_after_previous_season(schedule, gameweek)  # passes
+    check_published_after_previous_season(gameweek, gameweek)
+    early = schedule.assign(
+        available_at=schedule["season"]
+        .map({2019: utc("2019-06-01"), 2020: utc("2020-06-01")})
+        .astype(schedule["available_at"].dtype)
+    )
+    with pytest.raises(ValueError, match="1 row"):
+        check_published_after_previous_season(early.iloc[[0, 1, 2]], gameweek)
+
+
 def test_last_bootstrap_per_season_uses_payload_season_not_timestamp(world):
     fx21, fx22 = season_fixtures(2021), season_fixtures(2022)
     world.add_fplcache_bootstrap(datetime(2022, 5, 1, tzinfo=UTC), bootstrap(2021, fx21))
@@ -305,7 +357,7 @@ RESULT_COLUMNS = {"home_goals", "away_goals", "finished", "fd_date"}
 def test_schedule_is_the_fixture_list_without_results(world):
     world.add_vaastav_season(2023)
     world.add_current_season()
-    build(["fixture", "schedule"], world.ctx)
+    build(["fixture", "gameweek", "schedule"], world.ctx)
 
     schedule = world.ctx.table("schedule")
     assert list(schedule.columns) == [

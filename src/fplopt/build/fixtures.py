@@ -30,13 +30,16 @@ gameweek: GWs that have fixtures. Deadlines from the newest bootstrap of each se
 else first kickoff − 90 min ('approx': 2016-17, 2017-18, 2019-20). Measured leads (first
 kickoff − deadline): 2018-19 always 60 min, 2020-21 … 2026-27 90 min (one 240-min GW in
 2024-25); so 'approx' is at or before the true deadline — conservative for as-of reads.
-A schedule: `event_time` = the deadline, `available_at` = publication (1 June of the
-season's start year, PLAN §4; the final deadlines leak rescheduling — accepted, PLAN §3).
+A schedule: `event_time` = the deadline, `available_at` = `schedule_available_at`: 1 June of
+the season's start year (publication, PLAN §4) or, if later, the lockdown after the previous
+season's last kickoff (2020/21: 2020-07-27, after 2019/20's July restart), so a season's
+rows are never visible at a deadline of the previous one (checked: the build fails
+otherwise). The final deadlines leak rescheduling — accepted, PLAN §3.
 
 schedule: one row per `fixture` row with its scheduling columns only (no results), from the
 final fixture list (`schedule_source='final'`); `event_time` = kickoff (2100-01-01 when
-unscheduled), `available_at` = publication. The as-of fallback where no `fixture_snapshot`
-of the season precedes a deadline.
+unscheduled), `available_at` as for `gameweek` (same check). The as-of fallback where no
+`fixture_snapshot` of the season precedes a deadline.
 
 fixture_snapshot: every own `raw/fpl/fixtures` snapshot (2026-10-05 →; fplcache has
 bootstrap only), one row per fixture and snapshot, no scores; `gw` / `kickoff_time` null for
@@ -75,7 +78,7 @@ from fplopt.build.common import (
     latest_complete_run,
     lockdown_times,
     read_raw_csv,
-    schedule_published,
+    schedule_available,
 )
 from fplopt.build.teams import TeamResolver
 from fplopt.ingest.raw_store import RawStore
@@ -566,6 +569,35 @@ def build_fixture(ctx: BuildContext) -> pd.DataFrame:
     return assemble_fixtures(raw, football_data_results(ctx, resolver))
 
 
+# --- schedule availability ---------------------------------------------------------------
+
+
+def last_kickoffs(seasons: pd.Series, df: pd.DataFrame) -> dict[int, pd.Timestamp]:
+    """Per season its last kickoff (`last_kickoff` column if present, else `kickoff_time`)."""
+    column = "last_kickoff" if "last_kickoff" in df.columns else "kickoff_time"
+    last = df[column].groupby(seasons.astype("int64")).max().dropna()
+    return {int(season): pd.Timestamp(kickoff) for season, kickoff in last.items()}
+
+
+def published_too_early(df: pd.DataFrame, gameweek: pd.DataFrame) -> pd.Series:
+    """Rows of a schedule-kind table (season, available_at) of season S that are available
+    at or before the last deadline of season S - 1 (when `gameweek` has S - 1)."""
+    last_deadline = gameweek.groupby("season")["deadline_time"].max()
+    previous = df["season"].astype("int64").sub(1).map(last_deadline)
+    return previous.notna() & (df["available_at"] <= previous)
+
+
+def check_published_after_previous_season(df: pd.DataFrame, gameweek: pd.DataFrame) -> None:
+    """Fail if a row of season S is available by the last deadline of season S - 1: the
+    next season's schedule would be visible while the previous one is still being played."""
+    early = published_too_early(df, gameweek)
+    if early.any():
+        raise ValueError(
+            f"{int(early.sum())} row(s) available before the previous season's last deadline:"
+            f"\n{df.loc[early, ['season', 'available_at']].drop_duplicates().head(10)}"
+        )
+
+
 # --- gameweek ----------------------------------------------------------------------------
 
 GAMEWEEK_COLUMNS = [
@@ -618,6 +650,10 @@ GAMEWEEK_SCHEMA = pa.DataFrameSchema(
         pa.Check(lambda df: df["first_kickoff"] <= df["last_kickoff"], error="kickoff order"),
         pa.Check(lambda df: df["lockdown_time"] > df["last_kickoff"], error="lockdown order"),
         pa.Check(lambda df: df["available_at"] < df["event_time"], error="published by deadline"),
+        pa.Check(
+            lambda df: ~published_too_early(df, df),
+            error="published after the previous season's last deadline",
+        ),
     ],
     strict=True,
     ordered=True,
@@ -702,7 +738,7 @@ def assemble_gameweeks(
     df["deadline_source"] = df["deadline_source"].astype(str)
     df["lockdown_time"] = lockdown_times(df["last_kickoff"])
     df["event_time"] = df["deadline_time"]
-    df["available_at"] = schedule_published(df["season"])
+    df["available_at"] = schedule_available(df["season"], last_kickoffs(df["season"], df))
     return df[GAMEWEEK_COLUMNS]
 
 
@@ -835,12 +871,14 @@ def schedule_from_fixture(fixture: pd.DataFrame) -> pd.DataFrame:
     df = fixture[SCHEDULE_COLUMNS[:7]].copy()
     df["schedule_source"] = "final"
     df["event_time"] = df["kickoff_time"].fillna(UNSCHEDULED_AT).astype(UTC_US)
-    df["available_at"] = schedule_published(df["season"])
+    df["available_at"] = schedule_available(df["season"], last_kickoffs(fixture["season"], df))
     return df[SCHEDULE_COLUMNS].reset_index(drop=True)
 
 
 def build_schedule(ctx: BuildContext) -> pd.DataFrame:
-    return schedule_from_fixture(ctx.table("fixture"))
+    schedule = schedule_from_fixture(ctx.table("fixture"))
+    check_published_after_previous_season(schedule, ctx.table("gameweek"))
+    return schedule
 
 
 # --- fixture_snapshot --------------------------------------------------------------------
