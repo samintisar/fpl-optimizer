@@ -5,12 +5,13 @@ from __future__ import annotations
 import random
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
-from types import MappingProxyType
+from dataclasses import replace
 
 import pandas as pd
 import pytest
 
+from fplopt.backtest.gw_score import Lineup
+from fplopt.backtest.rules import load_rules
 from fplopt.backtest.state import (
     Decision,
     Holding,
@@ -26,61 +27,9 @@ from fplopt.backtest.state import (
     squad_value,
 )
 
-# --- local stand-ins for Task 2's Rules / ChipWindow / Lineup ------------------------------
-
-
-@dataclass(frozen=True)
-class ChipWindow:
-    chip_id: int
-    name: str
-    start: int
-    stop: int
-
-
-# The 2026/27 windows (config/scoring/2026-27.json): set 1 to GW19, set 2 from GW20;
-# Wildcard and Free Hit set 1 start at GW2.
-CHIPS = (
-    ChipWindow(1, "wildcard", 2, 19),
-    ChipWindow(2, "wildcard", 20, 38),
-    ChipWindow(3, "freehit", 2, 19),
-    ChipWindow(4, "bboost", 1, 19),
-    ChipWindow(5, "3xc", 1, 19),
-    ChipWindow(6, "freehit", 20, 38),
-    ChipWindow(7, "bboost", 20, 38),
-    ChipWindow(8, "3xc", 20, 38),
-)
-
-
-def _ro(d: dict[int, int]) -> Mapping[int, int]:
-    return MappingProxyType(d)
-
-
-@dataclass(frozen=True)
-class Rules:
-    squad_select: Mapping[int, int] = field(default_factory=lambda: _ro({1: 2, 2: 5, 3: 5, 4: 3}))
-    play_min: Mapping[int, int] = field(default_factory=lambda: _ro({1: 1, 2: 3, 3: 2, 4: 1}))
-    play_max: Mapping[int, int] = field(default_factory=lambda: _ro({1: 1, 2: 5, 3: 5, 4: 3}))
-    squad_play: int = 11
-    team_limit: int = 3
-    budget: int = 1000
-    sell_on_fee: float = 0.5
-    max_free_transfers: int = 5
-    hit_cost: int = 4
-    chips: tuple[ChipWindow, ...] = CHIPS
-    chip_week_ft: str = "retain_plus_one"
-    freehit_consecutive: bool = False
-    ft_topups: tuple[tuple[int, int], ...] = ()
-
-
-@dataclass(frozen=True)
-class Lineup:
-    starters: tuple[int, ...]
-    bench: tuple[int, ...]
-    captain: int
-    vice: int
-
-
-RULES = Rules()
+# The 2026/27 rules (config/scoring/2026-27.json): squad 2/5/5/3, 5 banked FTs, hit 4; chip
+# windows set 1 to GW19 (Wildcard and Free Hit from GW2), set 2 from GW20.
+RULES = load_rules("2026-27")
 
 # --- hand-made pool -----------------------------------------------------------------------
 # key = club * 100 + element_type * 10 + i; 8 clubs, each with 2 GK, 5 DEF, 5 MID, 3 FWD.
@@ -524,11 +473,11 @@ def _valid_lineup() -> Lineup:
         (lambda lu: replace(lu, bench=lu.bench[:3]), "3 bench players"),
         (
             lambda lu: replace(lu, bench=(lu.bench[0], lu.bench[1], lu.bench[2], lu.starters[5])),
-            "twice",
+            "duplicate",
         ),
-        (lambda lu: replace(lu, bench=(lu.bench[0], lu.bench[1], lu.bench[2], 999)), "not in"),
+        (lambda lu: replace(lu, bench=(lu.bench[0], lu.bench[1], lu.bench[2], 999)), "no position"),
         (lambda lu: replace(lu, bench=(lu.bench[1], lu.bench[0], *lu.bench[2:])), "goalkeeper"),
-        (lambda lu: replace(lu, vice=lu.captain), "same player"),
+        (lambda lu: replace(lu, vice=lu.captain), "must differ"),
         (lambda lu: replace(lu, captain=lu.bench[1]), "captain .* not a starter"),
         (lambda lu: replace(lu, vice=lu.bench[1]), "vice .* not a starter"),
     ],
@@ -570,7 +519,7 @@ def test_formation_limits():
                 mids[0],
                 mids[1],
             ),
-            "element_type 2",
+            "formation",
         ),
         # 0 FWD
         (
@@ -580,7 +529,7 @@ def test_formation_limits():
                 defs[0],
                 defs[1],
             ),
-            "element_type 4",
+            "formation",
         ),
         # 2 GK
         (
@@ -590,7 +539,7 @@ def test_formation_limits():
                 defs[0],
                 defs[1],
             ),
-            "goalkeeper|element_type 1",
+            "goalkeeper|formation",
         ),
     ]
     for lineup, message in bad:
@@ -673,7 +622,7 @@ def test_random_sequences_preserve_invariants(seed, chip_week_ft):
             assert nxt.holdings == gw_state.holdings and nxt.bank == gw_state.bank
         ids = [cid for cid, _ in nxt.chips_used]
         assert len(ids) == len(set(ids))
-        windows = {c.chip_id: c for c in CHIPS}
+        windows = {c.chip_id: c for c in RULES.chips}
         assert all(windows[cid].start <= g <= windows[cid].stop for cid, g in nxt.chips_used)
         assert len({g for _, g in nxt.chips_used}) == len(nxt.chips_used)
         state = nxt

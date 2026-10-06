@@ -31,8 +31,6 @@ FPL rules implemented here (values come from the rules config, PLAN §3):
 Pure: no I/O, no pandas beyond reading the pool frame. States are frozen and updated with
 `dataclasses.replace`.
 
-`RulesLike` / `LineupLike` are the attributes of `fplopt.backtest.rules.Rules` and
-`fplopt.backtest.gw_score.Lineup` this module needs (Task 2 defines the real types).
 """
 
 from __future__ import annotations
@@ -42,70 +40,19 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from fractions import Fraction
-from typing import TYPE_CHECKING, NamedTuple, Protocol
+from typing import TYPE_CHECKING, NamedTuple
+
+from fplopt.backtest.gw_score import InvalidLineup, Lineup, validate_lineup
 
 if TYPE_CHECKING:
     import pandas as pd
+
+    from fplopt.backtest.rules import Rules
 
 GOALKEEPER = 1
 TRANSFER_CHIPS = frozenset({"wildcard", "freehit"})
 POOL_COLUMNS = ("player_key", "element_type", "team_key", "price")
 CHIP_WEEK_FT = ("retain_plus_one", "retain")
-
-
-class ChipWindowLike(Protocol):
-    @property
-    def chip_id(self) -> int: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def start(self) -> int: ...
-    @property
-    def stop(self) -> int: ...
-
-
-class RulesLike(Protocol):
-    """The squad, transfer and chip attributes of `Rules` used here."""
-
-    @property
-    def squad_select(self) -> Mapping[int, int]: ...
-    @property
-    def play_min(self) -> Mapping[int, int]: ...
-    @property
-    def play_max(self) -> Mapping[int, int]: ...
-    @property
-    def squad_play(self) -> int: ...
-    @property
-    def team_limit(self) -> int: ...
-    @property
-    def budget(self) -> int: ...
-    @property
-    def sell_on_fee(self) -> float: ...
-    @property
-    def max_free_transfers(self) -> int: ...
-    @property
-    def hit_cost(self) -> int: ...
-    @property
-    def chips(self) -> tuple[ChipWindowLike, ...]: ...
-    @property
-    def chip_week_ft(self) -> str: ...
-    @property
-    def freehit_consecutive(self) -> bool: ...
-    @property
-    def ft_topups(self) -> tuple[tuple[int, int], ...]: ...
-
-
-class LineupLike(Protocol):
-    """11 starters, 4 bench players in autosub order (bench[0] the GK), captain, vice."""
-
-    @property
-    def starters(self) -> tuple[int, ...]: ...
-    @property
-    def bench(self) -> tuple[int, ...]: ...
-    @property
-    def captain(self) -> int: ...
-    @property
-    def vice(self) -> int: ...
 
 
 class InvalidDecision(ValueError):
@@ -172,7 +119,7 @@ class Decision:
     squad, and an optional chip name (`wildcard`, `freehit`, `bboost`, `3xc`)."""
 
     transfers: tuple[Transfer, ...]
-    lineup: LineupLike
+    lineup: Lineup
     chip: str | None = None
 
 
@@ -250,7 +197,7 @@ def _refreshed(holding: Holding, players: Mapping[int, _PoolPlayer]) -> Holding:
 # --- chips --------------------------------------------------------------------------------
 
 
-def chip_available(state: SquadState, name: str, rules: RulesLike) -> bool:
+def chip_available(state: SquadState, name: str, rules: Rules) -> bool:
     """Whether chip `name` can be played at `state.gw_index` (window open and unused, no chip
     already played this GW, Free Hit not right after a Free Hit unless allowed)."""
     try:
@@ -260,7 +207,7 @@ def chip_available(state: SquadState, name: str, rules: RulesLike) -> bool:
     return True
 
 
-def _chip_window(state: SquadState, name: str, rules: RulesLike) -> int:
+def _chip_window(state: SquadState, name: str, rules: Rules) -> int:
     """The `chip_id` of the open, unused window for `name`, or InvalidDecision."""
     names = {c.chip_id: c.name for c in rules.chips}
     if name not in names.values():
@@ -288,7 +235,7 @@ def _chip_window(state: SquadState, name: str, rules: RulesLike) -> int:
 
 
 def apply_decision(
-    state: SquadState, decision: Decision, pool: pd.DataFrame, rules: RulesLike
+    state: SquadState, decision: Decision, pool: pd.DataFrame, rules: Rules
 ) -> tuple[SquadState, TransferRecord]:
     """Validate and execute a decision; return the squad that plays this GW and a record.
 
@@ -376,7 +323,7 @@ def apply_decision(
 
 
 def next_state(
-    gw_state: SquadState, record: TransferRecord, rules: RulesLike, next_gw_index: int
+    gw_state: SquadState, record: TransferRecord, rules: Rules, next_gw_index: int
 ) -> SquadState:
     """The state at the next deadline: accrue FTs, record the chip, revert a Free Hit.
 
@@ -430,38 +377,12 @@ def next_state(
 # --- lineup -----------------------------------------------------------------------------
 
 
-def _validate_lineup(lineup: LineupLike, positions: Mapping[int, int], rules: RulesLike) -> None:
-    """Lineup rules for a squad (`positions`: player_key → element_type): `squad_play`
-    starters and the rest of the squad on the bench, every squad player exactly once,
-    bench[0] a goalkeeper, formation within `play_min`/`play_max` per position, captain
-    and vice distinct starters. Raises InvalidDecision."""
-    starters, bench = tuple(lineup.starters), tuple(lineup.bench)
-    if len(starters) != rules.squad_play:
-        raise InvalidDecision(f"lineup has {len(starters)} starters, need {rules.squad_play}")
-    if len(bench) != len(positions) - rules.squad_play:
-        raise InvalidDecision(
-            f"lineup has {len(bench)} bench players, need {len(positions) - rules.squad_play}"
-        )
-    everyone = starters + bench
-    if len(set(everyone)) != len(everyone):
-        raise InvalidDecision(f"player twice in the lineup: {_duplicates(everyone)}")
-    if set(everyone) != set(positions):
-        extra = sorted(set(everyone) - set(positions))
-        raise InvalidDecision(f"lineup players not in the squad: {extra}")
-    if positions[bench[0]] != GOALKEEPER:
-        raise InvalidDecision(f"first bench slot {bench[0]} is not a goalkeeper")
-    counts = Counter(positions[k] for k in starters)
-    for et in sorted(set(rules.play_min) | set(rules.play_max)):
-        lo, hi = rules.play_min.get(et, 0), rules.play_max.get(et, rules.squad_play)
-        if not lo <= counts.get(et, 0) <= hi:
-            raise InvalidDecision(
-                f"formation has {counts.get(et, 0)} of element_type {et}, need {lo}-{hi}"
-            )
-    if lineup.captain == lineup.vice:
-        raise InvalidDecision("captain and vice are the same player")
-    for role, key in (("captain", lineup.captain), ("vice", lineup.vice)):
-        if key not in starters:
-            raise InvalidDecision(f"{role} {key} is not a starter")
+def _validate_lineup(lineup: Lineup, positions: Mapping[int, int], rules: Rules) -> None:
+    """`gw_score.validate_lineup` for the post-transfer squad, as an InvalidDecision."""
+    try:
+        validate_lineup(lineup, positions, rules)
+    except InvalidLineup as exc:
+        raise InvalidDecision(f"invalid lineup: {exc}") from exc
 
 
 # --- helpers ------------------------------------------------------------------------------
