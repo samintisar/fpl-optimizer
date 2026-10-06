@@ -483,33 +483,70 @@ def load_tables(
     return out
 
 
-def sample_deadlines(
-    tables: Mapping[str, pd.DataFrame], n: int, seed: int = 0
-) -> list[pd.Timestamp]:
-    """n GW deadlines spread over the data, deterministic for a seed: the candidates are
-    the deadlines outside HOLDOUT_SEASONS up to the first one after the newest result
-    (`player_match`), split into n consecutive chunks with one random deadline per chunk;
-    the last chunk always contributes the newest candidate (the live decision)."""
+# (season, gw) always checked when present: the 2019/20 COVID restart (GW39) and its last
+# GW (GW47, next season's schedule not yet known), 2021/22 GW18 (COVID postponements) and
+# 2022/23 GW8 (after the cancelled GW7).
+EDGE_GAMEWEEKS = ((2019, 39), (2019, 47), (2021, 18), (2022, 8))
+
+
+def _candidates(tables: Mapping[str, pd.DataFrame]) -> list[pd.Timestamp]:
+    """GW deadlines outside HOLDOUT_SEASONS up to the first one after the newest result
+    (`player_match`): the newest is the live decision. Sorted."""
     gameweeks = tables["gameweek"]
     newest = tables["player_match"][AVAILABLE].max()
     deadlines = gameweeks.loc[~gameweeks["season"].isin(HOLDOUT_SEASONS), "deadline_time"]
     upcoming = deadlines[deadlines > newest]
     if len(upcoming):
         deadlines = deadlines[deadlines <= upcoming.min()]
-    candidates = sorted(pd.Timestamp(d) for d in deadlines.unique())
-    if n <= 0 or not candidates:
+    return sorted(pd.Timestamp(d) for d in deadlines.unique())
+
+
+def edge_deadlines(tables: Mapping[str, pd.DataFrame]) -> list[pd.Timestamp]:
+    """Deadlines every check includes (among the candidates, see `sample_deadlines`): each
+    season's GW1, EDGE_GAMEWEEKS, the first deadline after player snapshot coverage starts
+    (the pool and player_gw availability switch source there) and the newest candidate."""
+    candidates = _candidates(tables)
+    if not candidates:
         return []
-    rng = np.random.default_rng(seed)
-    chunks = np.array_split(np.arange(len(candidates)), min(n, len(candidates)))
-    picked = [candidates[int(rng.choice(chunk))] for chunk in chunks[:-1]]
-    return [*picked, candidates[-1]]
+    gameweeks = tables["gameweek"]
+    by_gw = gameweeks.set_index(["season", "gw"])["deadline_time"].to_dict()
+    seasons = sorted(set(gameweeks.loc[gameweeks["deadline_time"].isin(candidates), "season"]))
+    wanted = [(int(season), 1) for season in seasons] + list(EDGE_GAMEWEEKS)
+    picked = {pd.Timestamp(by_gw[gw]) for gw in wanted if gw in by_gw}
+    snapshots = tables.get("player_snapshot")
+    if snapshots is not None and len(snapshots):
+        start = snapshots["snapshot_at"].min()
+        after = [d for d in candidates if d > start]
+        if after:
+            picked.add(after[0])
+    picked.add(candidates[-1])
+    return sorted(picked & set(candidates))
+
+
+def sample_deadlines(
+    tables: Mapping[str, pd.DataFrame], n: int, seed: int = 0
+) -> list[pd.Timestamp]:
+    """`edge_deadlines` plus n more GW deadlines spread over the data, deterministic for a
+    seed. Candidates are the deadlines outside HOLDOUT_SEASONS up to the first one after the
+    newest result (`player_match`); the non-edge ones are split into n consecutive chunks
+    with one random deadline per chunk. Sorted."""
+    candidates = _candidates(tables)
+    edges = edge_deadlines(tables)
+    rest = [d for d in candidates if d not in set(edges)]
+    picked = []
+    if n > 0 and rest:
+        rng = np.random.default_rng(seed)
+        chunks = np.array_split(np.arange(len(rest)), min(n, len(rest)))
+        picked = [rest[int(rng.choice(chunk))] for chunk in chunks]
+    return sorted([*edges, *picked])
 
 
 def run_leakage_check(
     data_dir: Path | str, n_deadlines: int = DEFAULT_DEADLINES, seed: int = 0
 ) -> list[pd.Timestamp]:
-    """`fplopt check leakage`: check the registered features on `data_dir` at n sampled
-    deadlines; raises LeakageError listing the leaks. Returns the deadlines checked."""
+    """`fplopt check leakage`: check the registered features on `data_dir` at the edge
+    deadlines plus n sampled ones (`sample_deadlines`); raises LeakageError listing the
+    leaks. Returns the deadlines checked."""
     started = time.perf_counter()
     tables = load_tables(data_dir)
     deadlines = sample_deadlines(tables, n_deadlines, seed)

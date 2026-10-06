@@ -15,6 +15,7 @@ from fplopt.features.leakcheck import (
     Leak,
     check_leakage,
     corrupt_future,
+    edge_deadlines,
     feature_fingerprint,
     load_tables,
     run_leakage_check,
@@ -344,6 +345,28 @@ def test_registered_features_do_not_leak_on_the_synthetic_world(built):
 # --- deadline sampling -------------------------------------------------------------------
 
 
+def test_edge_deadlines_are_always_checked(built):
+    """Every season's GW1, the fixed edge GWs present in the data, the first deadline after
+    snapshot coverage starts and the newest (live) deadline."""
+    tables = dict(built)
+    gameweeks = tables["gameweek"]
+    # Pretend 2023 is 2021/22 (GW18 is an edge) and give 2024 a snapshot-coverage start
+    # just after its GW5 deadline.
+    tables["gameweek"] = gameweeks.assign(season=gameweeks["season"].replace({2023: 2021}))
+    snaps = tables["player_snapshot"]
+    start = deadline_of(built, 2024, 5) + pd.Timedelta(minutes=1)
+    tables["player_snapshot"] = snaps.assign(snapshot_at=start.as_unit("us"))
+    by = tables["gameweek"].set_index(["season", "gw"])["deadline_time"]
+    edges = edge_deadlines(tables)
+    newest = tables["player_match"]["available_at"].max()
+    live = gameweeks.loc[gameweeks["deadline_time"] > newest, "deadline_time"].min()
+    expected = [by[(2021, 1)], by[(2021, 18)], by[(2024, 1)], by[(2024, 6)], by[(2026, 1)], live]
+    assert edges == sorted(expected)
+    for n, seed in ((0, 0), (5, 0), (5, 1)):
+        picked = sample_deadlines(tables, n, seed=seed)
+        assert set(edges) <= set(picked) and len(picked) == len(edges) + n
+
+
 def test_sample_deadlines_spreads_over_seasons_and_skips_the_holdout(built):
     tables = dict(built)
     gameweeks = tables["gameweek"]
@@ -353,7 +376,9 @@ def test_sample_deadlines_spreads_over_seasons_and_skips_the_holdout(built):
     tables["gameweek"] = pd.concat([gameweeks, holdout], ignore_index=True)
     picked = sample_deadlines(tables, 6, seed=0)
     assert picked == sample_deadlines(tables, 6, seed=0)
-    assert len(picked) == 6 and picked == sorted(picked)
+    assert picked != sample_deadlines(tables, 6, seed=1)
+    edges = edge_deadlines(tables)
+    assert len(picked) == len(edges) + 6 and picked == sorted(picked)
     by_deadline = tables["gameweek"].set_index("deadline_time")["season"]
     seasons = [by_deadline[d] for d in picked]
     assert not set(seasons) & HOLDOUT_SEASONS
@@ -366,7 +391,7 @@ def test_sample_deadlines_spreads_over_seasons_and_skips_the_holdout(built):
 
 # --- real data ---------------------------------------------------------------------------
 
-REAL_DEADLINES = [
+REAL_DEADLINES = [  # mid-season deadlines, checked with the edges (`edge_deadlines`)
     (2016, 1),
     (2017, 1),  # Brighton and Huddersfield promoted: Elo from pre-season rows
     (2018, 20),
@@ -385,8 +410,13 @@ def test_registered_features_do_not_leak_on_the_real_data():
     if not (DATA_DIR / "player_snapshot.parquet").exists():
         pytest.skip("data/ not built (run `uv run fplopt build all`)")
     tables = load_tables(DATA_DIR)
-    deadlines = [deadline_of(tables, season, gw) for season, gw in REAL_DEADLINES]
+    edges = edge_deadlines(tables)
+    fixed = [deadline_of(tables, season, gw) for season, gw in REAL_DEADLINES]
+    deadlines = sorted(set(edges) | set(fixed))
     assert not {s for s, _ in REAL_DEADLINES} & HOLDOUT_SEASONS
+    by = tables["gameweek"].set_index(["season", "gw"])["deadline_time"]
+    for season_gw in [(2019, 39), (2019, 47), (2021, 18), (2022, 8), (2016, 1), (2026, 1)]:
+        assert by[season_gw] in edges, season_gw
     start = time.perf_counter()
     leaks = check_leakage(tables, deadlines, seed=0)
     elapsed = time.perf_counter() - start
@@ -403,8 +433,10 @@ def test_load_tables_reads_every_registered_table(tmp_path, built):
 
 
 def test_leakage_check_with_no_eligible_deadlines_fails(tmp_path, built):
-    """Checking nothing must not report a pass."""
+    """Checking nothing must not report a pass (here: every season is the holdout)."""
     for name, df in built.items():
+        if name == "gameweek":
+            df = df.assign(season=2025)
         df.to_parquet(tmp_path / f"{name}.parquet")
     with pytest.raises(ValueError, match="no eligible deadlines"):
         run_leakage_check(tmp_path, n_deadlines=0)

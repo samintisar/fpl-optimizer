@@ -7,7 +7,8 @@ bootstrap), `fplopt build TABLE|all` (raw/ -> data/<table>.parquet; no network),
 `fplopt check freshness [--max-age-hours H]` (fails if the newest bootstrap snapshot is
 missing or older than H hours, default 36: a dead-man's switch for the timers),
 `fplopt check leakage [--deadlines N] [--seed S]` (the corrupt-the-future check of every
-registered feature on data/ at N sampled deadlines, default 12, outside the holdout). Every job
+registered feature on data/ at a fixed list of edge deadlines plus N sampled ones, default 12,
+outside the holdout). Every job
 gets a `Context`; failures are logged and alerted to Telegram, and the exit code is 1.
 After a successful `snapshot daily|tick`, HEALTHCHECK_PING_URL (if set) gets a best-effort
 GET, for an external dead-man's switch that also notices the server being down.
@@ -153,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=12,
         metavar="N",
-        help="leakage only: number of GW deadlines to check (default 12)",
+        help="leakage only: random GW deadlines to check besides the fixed edges (default 12)",
     )
     check.add_argument(
         "--seed", type=int, default=0, metavar="S", help="leakage only: corruption seed"

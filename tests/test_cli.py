@@ -295,6 +295,8 @@ def test_check_leakage_failure_alerts_and_returns_one(tmp_path, monkeypatch):
 
 
 def test_check_leakage_end_to_end_on_synthetic_tables(tmp_path, built, caplog, monkeypatch):
+    from fplopt.features import leakcheck
+
     alerts = []
     monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
     data_dir = tmp_path / "data"
@@ -304,7 +306,8 @@ def test_check_leakage_end_to_end_on_synthetic_tables(tmp_path, built, caplog, m
     settings = replace(make_settings(tmp_path), data_dir=data_dir)
     with caplog.at_level(logging.INFO):
         assert cli.main(["check", "leakage", "--deadlines", "3"], settings=settings) == 0
-    assert "leakage check passed: 3 deadline(s)" in caplog.text
+    n = len(leakcheck.sample_deadlines(built, 3))  # the edges + 3 random deadlines
+    assert n > 3 and f"leakage check passed: {n} deadline(s)" in caplog.text
     # A missing table fails the job.
     (data_dir / "player_match.parquet").unlink()
     assert cli.main(["check", "leakage"], settings=settings) == 1

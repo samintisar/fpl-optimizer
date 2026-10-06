@@ -11,7 +11,7 @@
 - `uv run fplopt check freshness [--max-age-hours 36]` — fails (and alerts) if the newest bootstrap snapshot is missing or too old
 - `uv run fplopt backfill football-data|vaastav|fplcache` — one-off historical backfills into `raw/` (run on the server, see `deploy/README.md`)
 - `uv run fplopt rules export <season>` (e.g. `2026-27`, `--out` default `config/scoring`) — rules config from an archived bootstrap
-- `uv run fplopt check leakage [--deadlines 12]` — corrupt-the-future check of every feature on real `data/` (~3 min); `uv run pytest -m realdata` runs the same on 10 fixed deadlines (plain `pytest` skips it)
+- `uv run fplopt check leakage [--deadlines 12]` — corrupt-the-future check of every feature on real `data/` at a fixed edge list (every season's GW1, 2019/20 GW39/GW47, 2021/22 GW18, 2022/23 GW8, first deadline with snapshots, the live deadline) plus N random deadlines (~7 min); `uv run pytest -m realdata` runs the same edges plus 10 fixed deadlines (~7 min; plain `pytest` skips it)
 - `uv run fplopt build all` (or `build <table>`) — rebuild `data/*.parquet` from `raw/` (~1.5 min; needs a local `raw/` copy, see `deploy/README.md`). Club names across sources live in `config/teams.csv`; Understat mapping overrides in `config/overrides.csv`.
 
 ## Invariants (do not break)
