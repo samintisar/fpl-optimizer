@@ -17,6 +17,7 @@ from fplopt.features.leakcheck import (
     corrupt_future,
     feature_fingerprint,
     load_tables,
+    run_leakage_check,
     sample_deadlines,
     truncate_future,
 )
@@ -344,3 +345,11 @@ def test_load_tables_reads_every_registered_table(tmp_path, built):
     loaded = load_tables(tmp_path)
     assert set(loaded) == set(TABLES)
     pd.testing.assert_frame_equal(loaded["gameweek"], built["gameweek"])
+
+
+def test_leakage_check_with_no_eligible_deadlines_fails(tmp_path, built):
+    """Checking nothing must not report a pass."""
+    for name, df in built.items():
+        df.to_parquet(tmp_path / f"{name}.parquet")
+    with pytest.raises(ValueError, match="no eligible deadlines"):
+        run_leakage_check(tmp_path, n_deadlines=0)

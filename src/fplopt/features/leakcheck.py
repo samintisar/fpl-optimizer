@@ -489,11 +489,14 @@ def run_leakage_check(
     started = time.perf_counter()
     tables = load_tables(data_dir)
     deadlines = sample_deadlines(tables, n_deadlines, seed)
+    if not deadlines:
+        # Checking nothing must not read as a pass.
+        raise ValueError("no eligible deadlines: the leakage check was not performed")
     log.info(
         "leakage check: %d deadline(s) from %s to %s, %d feature(s), seed %d",
         len(deadlines),
-        deadlines[0] if deadlines else "-",
-        deadlines[-1] if deadlines else "-",
+        deadlines[0],
+        deadlines[-1],
         len(FEATURES),
         seed,
     )
