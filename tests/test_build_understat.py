@@ -149,7 +149,15 @@ def two_seasons(world, *, skip_player=None):
     return fx23, fx24
 
 
-ALL = ["fixture", "gameweek", "player_season", "player_dim", "player_match", "understat"]
+ALL = [
+    "fixture",
+    "gameweek",
+    "player_match",
+    "player_gw",
+    "player_season",
+    "player_dim",
+    "understat",
+]
 
 
 def add_understat_season(world, season, fixtures, folder):
@@ -173,6 +181,7 @@ def test_placeholder_zero_fpl_columns_are_null_in_player_and_team_match(world):
     merged["expected_goals_conceded"] = 1.1 * late
     world.add_vaastav_season(2022, fixtures=fx, merged=merged)
     add_understat_season(world, 2022, fx, "2022-23")
+    world.write_player_snapshot()
     build([*ALL, "team_match"], world.ctx)
 
     pm = world.ctx.table("player_match")
@@ -188,6 +197,7 @@ def test_placeholder_zero_fpl_columns_are_null_in_player_and_team_match(world):
 
 def test_understat_build_end_to_end(world):
     two_seasons(world)
+    world.write_player_snapshot()
     build([*ALL, "team_match"], world.ctx)
 
     upm = world.ctx.table("understat_player_match")
@@ -228,6 +238,7 @@ def test_understat_build_end_to_end(world):
 
 def test_unmapped_player_in_covered_season_fails(world):
     two_seasons(world, skip_player=7)
+    world.write_player_snapshot()
     with pytest.raises(UnderstatMappingError, match="1 FPL player"):
         build(ALL, world.ctx)
 
@@ -242,6 +253,7 @@ def test_override_exempts_a_player_without_understat(world, tmp_path):
     )
     world.ctx.config_dir = config
     two_seasons(world, skip_player=7)
+    world.write_player_snapshot()
     build(ALL, world.ctx)
     assert 100007 not in set(world.ctx.table("understat_map")["player_key"].dropna())
 
@@ -417,6 +429,7 @@ def test_understat_team_rows_fail_on_goal_mismatch():
 
 def test_rebuilding_player_match_alone_reruns_understat(world, caplog):
     two_seasons(world)
+    world.write_player_snapshot()
     build([*ALL, "team_match"], world.ctx)
     caplog.set_level("INFO", logger="fplopt.build")
     paths = build(["player_match"], world.ctx)

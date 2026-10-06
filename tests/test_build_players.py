@@ -18,8 +18,12 @@ from fplopt.build.common import write_table
 from fplopt.build.players import (
     PlayerMatchError,
     assemble_player_match,
+    first_visible_rows,
     match_rows,
     player_dim_from_seasons,
+    player_gw_ownership_table,
+    registration_available_at,
+    registration_stints,
 )
 from fplopt.build.teams import TeamResolver, team_dim_from_config
 
@@ -54,7 +58,8 @@ def build_players(world):
     """fixture … player_dim. Written directly, not via `build()`, which would also run the
     `understat` builder after player_match / player_dim: these worlds have no Understat."""
     build(["fixture", "gameweek"], world.ctx)
-    for name in ("player_match", "player_season", "player_dim"):
+    world.write_player_snapshot()
+    for name in ("player_match", "player_gw", "player_season", "player_dim"):
         builder = BUILDERS[name]
         df = builder.run(world.ctx)
         write_table(df, name, builder.schema, world.ctx.data_dir, builder.sort_by)
@@ -135,13 +140,17 @@ def test_player_tables_end_to_end(world):
         2025: 21,
         2026: 21,
     }
-    # event_time = deadline of the GW of the player's first player_match row that season,
-    # available_at an hour earlier (registration is known before that deadline); a player
+    # event_time = deadline of the player's first visible player_gw row that season,
+    # available_at = that row's (an hour before the deadline for players registered at
+    # launch; a later signing without snapshots is visible from the next GW); a player
     # without rows: the time of the bootstrap that lists him.
     deadline = world.ctx.table("gameweek").set_index(["season", "gw"])["deadline_time"]
     ps = player_season.set_index(["season", "player_key"])
     assert ps.loc[(2025, 100021), "event_time"] == deadline[(2025, 10)]
-    assert ps.loc[(2025, 100021), "available_at"] == deadline[(2025, 10)] - HOUR
+    assert ps.loc[(2025, 100021), "available_at"] == deadline[(2025, 10)]
+    signing = world.ctx.table("player_gw").set_index(["player_key", "season", "gw"])
+    assert signing.loc[(100021, 2025, 10), "available_at"] == deadline[(2025, 10)]
+    assert signing.loc[(100021, 2025, 11), "available_at"] == deadline[(2025, 11)] - HOUR
     listed = ps.loc[(2026, 100022)]
     assert listed["available_at"] == listed["event_time"] == pd.Timestamp(LATER_AT).as_unit("us")
     regular = ps.drop([(2025, 100021), (2026, 100022)])
@@ -350,6 +359,7 @@ def double_gw_world(world, *, conflict: bool = False):
 
 def test_player_gw_one_row_per_gw_and_double(world):
     double_gw_world(world)
+    world.write_player_snapshot()
     build(["fixture", "gameweek", "player_gw", "player_gw_ownership"], world.ctx)
 
     gw = world.ctx.table("player_gw")
@@ -400,6 +410,149 @@ def test_player_gw_one_row_per_gw_and_double(world):
 
 def test_player_gw_fails_when_a_double_disagrees(world):
     double_gw_world(world, conflict=True)
+    world.write_player_snapshot()
     build(["fixture", "gameweek"], world.ctx)
     with pytest.raises(PlayerMatchError, match="differ within a GW"):
         build(["player_gw"], world.ctx)
+
+
+# --- registration timing ----------------------------------------------------------------
+
+D1, D2, D3 = utc("2021-08-13T17:30"), utc("2021-08-21T10:00"), utc("2021-08-28T10:00")
+DEADLINES = {1: D1, 2: D2, 3: D3}
+
+
+def gw_rows(rows):
+    """(player_key, gw, team_key) -> player GW rows of season 2021 with deadlines."""
+    df = pd.DataFrame(rows, columns=["player_key", "gw", "team_key"])
+    return df.assign(
+        season=2021,
+        gw_index=df["gw"],
+        deadline_time=df["gw"].map(DEADLINES).astype("datetime64[us, UTC]"),
+    )
+
+
+def stints(rows):
+    """(player_key, team_key, first listed) -> registration stints of season 2021."""
+    df = pd.DataFrame(rows, columns=["player_key", "team_key", "snapshot_at"])
+    df["snapshot_at"] = df["snapshot_at"].map(utc)
+    return df.assign(season=2021)[["snapshot_at", "season", "player_key", "team_key"]]
+
+
+CLUB_FIRST = pd.DataFrame({"season": 2021, "team_key": [10, 20], "first_gw_index": [1, 2]})
+
+
+def available(rows, stint_rows=(), coverage_start=None):
+    df = gw_rows(rows)
+    out = registration_available_at(df, stints(list(stint_rows)), coverage_start, CLUB_FIRST)
+    return dict(zip(zip(df["player_key"], df["gw"], strict=True), out, strict=True))
+
+
+def test_registration_with_snapshots_waits_for_the_first_listing_with_that_club():
+    out = available(
+        [
+            (1, 1, 10),
+            (1, 2, 10),
+            (1, 3, 10),  # listed since before GW1
+            (2, 2, 10),
+            (2, 3, 10),  # added the day after the GW2 deadline
+            (3, 1, 10),
+            (3, 2, 20),
+            (3, 3, 20),  # moved within the last hour before GW2
+            (4, 1, 10),
+            (4, 2, 20),  # moved to club 20 after the GW2 deadline
+            (5, 3, 30),  # never listed with club 30
+        ],  # fmt: skip
+        [
+            (1, 10, "2021-08-01T00:00"),
+            (2, 10, "2021-08-22T08:00"),
+            (3, 10, "2021-08-01T00:00"),
+            (3, 20, "2021-08-21T09:30"),
+            (4, 10, "2021-08-01T00:00"),
+            (4, 20, "2021-08-23T02:00"),
+            (5, 10, "2021-08-01T00:00"),
+        ],
+        coverage_start=utc("2021-08-01"),
+    )
+    assert out[(1, 1)] == D1 - HOUR and out[(1, 3)] == D3 - HOUR
+    assert out[(2, 2)] == utc("2021-08-22T08:00")  # not visible at the GW2 deadline
+    assert out[(2, 3)] == D3 - HOUR
+    assert out[(3, 1)] == D1 - HOUR
+    assert out[(3, 2)] == utc("2021-08-21T09:30")  # listed before the deadline: visible
+    assert out[(3, 3)] == D3 - HOUR
+    assert out[(4, 2)] == utc("2021-08-23T02:00")
+    assert out[(5, 3)] == D3  # never listed: from the next GW
+
+
+def test_registration_without_snapshots_trusts_only_game_launch_and_unchanged_clubs():
+    out = available(
+        [
+            (1, 1, 10),
+            (1, 2, 10),
+            (1, 3, 10),  # registered at launch
+            (2, 2, 20),
+            (2, 3, 20),  # club 20 blanks GW1: GW2 is its first GW
+            (3, 2, 10),
+            (3, 3, 10),  # signed after GW1
+            (4, 1, 10),
+            (4, 2, 20),
+            (4, 3, 20),  # moved from club 10 to 20
+        ],  # fmt: skip
+    )
+    assert [out[(1, gw)] for gw in (1, 2, 3)] == [D1 - HOUR, D2 - HOUR, D3 - HOUR]
+    assert [out[(2, gw)] for gw in (2, 3)] == [D2 - HOUR, D3 - HOUR]
+    assert [out[(3, gw)] for gw in (2, 3)] == [D2, D3 - HOUR]
+    assert [out[(4, gw)] for gw in (1, 2, 3)] == [D1 - HOUR, D2, D3 - HOUR]
+
+
+def test_registration_rule_switches_where_snapshot_coverage_starts():
+    # Coverage starts between the GW2 and GW3 deadlines: GW1-2 use the launch rule.
+    out = available(
+        [(1, 2, 10), (1, 3, 10), (2, 3, 10)],
+        [(1, 10, "2021-08-25T00:00"), (2, 10, "2021-08-29T00:00")],
+        coverage_start=utc("2021-08-25"),
+    )
+    assert out[(1, 2)] == D2  # first row not at the club's first GW
+    assert out[(1, 3)] == D3 - HOUR  # listed before the GW3 deadline
+    assert out[(2, 3)] == utc("2021-08-29T00:00")
+
+
+def test_registration_stints_are_runs_of_the_same_club():
+    snaps = pd.DataFrame(
+        {
+            "snapshot_at": [utc(f"2021-08-0{d}") for d in (1, 2, 3, 4, 1, 2)],
+            "season": 2021,
+            "player_key": [1, 1, 1, 1, 2, 2],
+            "team_key": [10, 10, 20, 10, 30, 30],
+            "now_cost": 50,
+        }
+    )
+    out = registration_stints(snaps.sample(frac=1, random_state=0))
+    assert out.to_dict("list") == {
+        "snapshot_at": [utc("2021-08-01"), utc("2021-08-03"), utc("2021-08-04"), utc("2021-08-01")],
+        "season": [2021] * 4,
+        "player_key": [1, 1, 1, 2],
+        "team_key": [10, 20, 10, 30],
+    }
+
+
+def test_ownership_and_player_season_never_precede_the_registration():
+    gw = gw_rows([(1, 1, 10), (1, 2, 10), (2, 2, 10), (2, 3, 10)])
+    gw = gw.assign(selected=5, transfers_in=1, transfers_out=0)
+    known = {(1, 1): D1 - HOUR, (1, 2): D2 - HOUR, (2, 2): utc("2021-08-30"), (2, 3): D3}
+    player_gw = gw.assign(
+        event_time=gw["deadline_time"],
+        available_at=[known[(p, g)] for p, g in zip(gw["player_key"], gw["gw"], strict=True)],
+    )
+    player_gw["available_at"] = player_gw["available_at"].astype("datetime64[us, UTC]")
+    own = player_gw_ownership_table(gw, player_gw).set_index(["player_key", "gw"])
+    assert own.loc[(1, 1), "available_at"] == D1  # final at the deadline
+    assert own.loc[(2, 2), "available_at"] == utc("2021-08-30")  # registered later still
+    assert own.loc[(2, 3), "available_at"] == D3
+
+    first = first_visible_rows(player_gw).set_index("player_key")
+    assert first.loc[1, "first_event_time"] == D1
+    assert first.loc[1, "first_available_at"] == D1 - HOUR
+    # Player 2's GW3 row is visible (D3) before his GW2 row (30 Aug).
+    assert first.loc[2, "first_event_time"] == D3
+    assert first.loc[2, "first_available_at"] == D3
