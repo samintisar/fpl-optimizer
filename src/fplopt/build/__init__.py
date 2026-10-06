@@ -8,6 +8,9 @@ with `schema=None` writes its own output(s) and returns a frame only for logging
 Rebuilding `player_match` or `player_dim` writes them without their Understat columns, so
 `build()` then also runs `understat` (which fills them) and `team_match` (built from
 `player_match`), and logs that it did.
+
+`fplopt.build.tables.TABLES` describes every written table (kind, key); a test checks it
+matches what a full build writes.
 """
 
 from __future__ import annotations
@@ -45,11 +48,27 @@ BUILDERS: dict[str, Builder] = {
         fixtures.GAMEWEEK_RESULT_SCHEMA,
         fixtures.GAMEWEEK_RESULT_SORT_BY,
     ),
+    "schedule": Builder(
+        fixtures.build_schedule, fixtures.SCHEDULE_SCHEMA, fixtures.SCHEDULE_SORT_BY
+    ),
+    "fixture_snapshot": Builder(
+        fixtures.build_fixture_snapshot,
+        fixtures.FIXTURE_SNAPSHOT_SCHEMA,
+        fixtures.FIXTURE_SNAPSHOT_SORT_BY,
+    ),
     "player_season": Builder(
         players.build_player_season, players.PLAYER_SEASON_SCHEMA, players.PLAYER_SEASON_SORT_BY
     ),
     "player_dim": Builder(
         players.build_player_dim, players.PLAYER_DIM_SCHEMA, players.PLAYER_DIM_SORT_BY
+    ),
+    "player_gw": Builder(
+        players.build_player_gw, players.PLAYER_GW_SCHEMA, players.PLAYER_GW_SORT_BY
+    ),
+    "player_gw_ownership": Builder(
+        players.build_player_gw_ownership,
+        players.PLAYER_GW_OWNERSHIP_SCHEMA,
+        players.PLAYER_GW_SORT_BY,
     ),
     "player_match": Builder(
         players.build_player_match, players.PLAYER_MATCH_SCHEMA, players.PLAYER_MATCH_SORT_BY
@@ -68,12 +87,17 @@ ORDER: list[str] = [
     "fixture",
     "gameweek",
     "gameweek_result",
+    "schedule",
+    # player_gw needs player_snapshot (registration times); player_season needs player_gw.
+    "player_snapshot",
     "player_match",
+    "player_gw",
+    "player_gw_ownership",
     "player_season",
     "player_dim",
     "understat",
     "team_match",
-    "player_snapshot",
+    "fixture_snapshot",
     "odds_snapshot",
     "team_rating",
 ]

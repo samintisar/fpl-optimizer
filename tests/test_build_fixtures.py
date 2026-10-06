@@ -13,8 +13,10 @@ from fplopt.build.fixtures import (
     assemble_gameweek_results,
     assemble_gameweeks,
     attach_football_data,
+    check_published_after_previous_season,
     fixtures_from_merged_gw,
     last_bootstrap_per_season,
+    schedule_from_fixture,
 )
 
 
@@ -221,7 +223,11 @@ def test_assemble_gameweeks_sources_and_bootstrap_event_without_fixtures():
     assert approx["lockdown_time"] == utc("2016-08-15T08:00")  # Monday 09:00 BST
     gw6 = out.loc[(2022, 6)]
     assert gw6["deadline_source"] == "bootstrap"
-    assert gw6["available_at"] == gw6["deadline_time"]
+    # A schedule: known from publication (1 June of the season's start year), timed at the
+    # deadline.
+    assert (out["event_time"] == out["deadline_time"]).all()
+    assert gw6["available_at"] == utc("2022-06-01T00:00")
+    assert approx["available_at"] == utc("2016-06-01T00:00")
 
     results = assemble_gameweek_results(gameweek, {2022: events}).set_index(["season", "gw"])
     assert list(results.index) == list(out.index)
@@ -230,6 +236,56 @@ def test_assemble_gameweeks_sources_and_bootstrap_event_without_fixtures():
     assert pd.isna(results.loc[(2022, 8), "average_entry_score"])  # not finished
     assert (results["event_time"] == out["lockdown_time"]).all()
     assert (results["available_at"] == out["lockdown_time"]).all()
+
+
+def restart_fixtures():
+    """2019/20 ending in July 2020 (GW47) and 2020/21 starting in September."""
+    return pd.DataFrame(
+        {
+            "fixture_key": [2019001, 2019002, 2020001, 2020002],
+            "season": [2019, 2019, 2020, 2020],
+            "gw": pd.array([39, 47, 1, 2], dtype="Int64"),
+            "gw_index": pd.array([30, 38, 1, 2], dtype="Int64"),
+            "kickoff_time": [
+                utc("2020-06-17T17:00"),
+                utc("2020-07-26T15:00"),
+                utc("2020-09-12T11:30"),
+                utc("2020-09-19T11:30"),
+            ],
+            "home_team_key": [1, 3, 1, 3],
+            "away_team_key": [2, 4, 2, 4],
+        }
+    )
+
+
+def test_next_season_schedule_waits_for_the_previous_season_to_lock():
+    """At 2019/20 GW39 (June 2020) the 2020/21 schedule must not be visible: it reveals
+    promotion and relegation. Known from max(1 June, the previous season's last lockdown)."""
+    fixture = restart_fixtures()
+    gameweek = assemble_gameweeks(fixture, {}, {}).set_index(["season", "gw"])
+    restart_end = utc("2020-07-27T08:00")  # lockdown after 26 July 2020 (BST)
+    assert gameweek.loc[(2019, 39), "available_at"] == utc("2019-06-01")
+    assert gameweek.loc[(2020, 1), "available_at"] == restart_end
+    assert gameweek.loc[(2020, 2), "available_at"] == restart_end
+    schedule = schedule_from_fixture(fixture).set_index("fixture_key")
+    assert schedule.loc[2019001, "available_at"] == utc("2019-06-01")
+    assert (schedule.loc[[2020001, 2020002], "available_at"] == restart_end).all()
+    last_2019_deadline = gameweek.loc[(2019, 47), "deadline_time"]
+    assert (gameweek.loc[2020, "available_at"] > last_2019_deadline).all()
+
+
+def test_rows_published_before_the_previous_season_ends_fail_the_check():
+    gameweek = assemble_gameweeks(restart_fixtures(), {}, {})
+    schedule = schedule_from_fixture(restart_fixtures())
+    check_published_after_previous_season(schedule, gameweek)  # passes
+    check_published_after_previous_season(gameweek, gameweek)
+    early = schedule.assign(
+        available_at=schedule["season"]
+        .map({2019: utc("2019-06-01"), 2020: utc("2020-06-01")})
+        .astype(schedule["available_at"].dtype)
+    )
+    with pytest.raises(ValueError, match="1 row"):
+        check_published_after_previous_season(early.iloc[[0, 1, 2]], gameweek)
 
 
 def test_last_bootstrap_per_season_uses_payload_season_not_timestamp(world):
@@ -291,3 +347,104 @@ def test_fixture_build_fails_when_a_team_misses_matches(world):
     world.add_vaastav_season(2022, fixtures=fixtures)
     with pytest.raises(TableValidationError, match="380 fixtures per season"):
         build(["fixture"], world.ctx)
+
+
+# --- schedule and fixture_snapshot ------------------------------------------------------
+
+RESULT_COLUMNS = {"home_goals", "away_goals", "finished", "fd_date"}
+
+
+def test_schedule_is_the_fixture_list_without_results(world):
+    world.add_vaastav_season(2023)
+    world.add_current_season()
+    build(["fixture", "gameweek", "schedule"], world.ctx)
+
+    schedule = world.ctx.table("schedule")
+    assert list(schedule.columns) == [
+        "fixture_key",
+        "season",
+        "gw",
+        "gw_index",
+        "kickoff_time",
+        "home_team_key",
+        "away_team_key",
+        "schedule_source",
+        "event_time",
+        "available_at",
+    ]
+    assert not RESULT_COLUMNS & set(schedule.columns)
+    assert (schedule["schedule_source"] == "final").all()
+    fixture = world.ctx.table("fixture").set_index("fixture_key")
+    s = schedule.set_index("fixture_key")
+    assert list(s.index) == list(fixture.index)
+    same = ["season", "gw", "gw_index", "kickoff_time", "home_team_key", "away_team_key"]
+    pd.testing.assert_frame_equal(s[same], fixture[same])
+    # Known from publication, 1 June of the season's start year.
+    published = s["season"].map({2023: utc("2023-06-01"), 2026: utc("2026-06-01")})
+    assert (s["available_at"] == published).all()
+    assert (s.loc[s["kickoff_time"].notna(), "event_time"] == s["kickoff_time"].dropna()).all()
+    postponed = s.loc[2026380]
+    assert pd.isna(postponed["gw"]) and postponed["event_time"] == UNSCHEDULED_AT
+    assert postponed["available_at"] == utc("2026-06-01")
+
+
+def test_fixture_snapshot_keeps_every_snapshot(world):
+    first_at = datetime(2026, 9, 1, tzinfo=UTC)
+    fx26 = world.add_current_season(at=first_at)  # fixture 380 postponed
+    later = fx26.copy()
+    later.loc[later["id"] == 1, "kickoff_time"] = "2026-08-02T19:30:00Z"  # rescheduled
+    later.loc[later["id"] == 380, ["event", "kickoff_time"]] = [10, "2026-10-20T19:00:00Z"]
+    later["started"] = later["finished"]
+    second_at = datetime(2026, 9, 2, 3, tzinfo=UTC)
+    world.add_own_fixtures(second_at, later)
+    build(["fixture_snapshot"], world.ctx)
+
+    snap = world.ctx.table("fixture_snapshot")
+    assert list(snap.columns) == [
+        "snapshot_at",
+        "season",
+        "fixture_key",
+        "fpl_fixture_id",
+        "gw",
+        "kickoff_time",
+        "home_team_key",
+        "away_team_key",
+        "started",
+        "finished",
+        "finished_provisional",
+        "event_time",
+        "available_at",
+    ]
+    assert not {"home_goals", "away_goals", "team_h_score", "team_a_score"} & set(snap.columns)
+    assert snap.groupby("snapshot_at").size().to_dict() == {
+        utc("2026-09-01"): 380,
+        utc("2026-09-02T03:00"): 380,
+    }
+    assert (snap["event_time"] == snap["snapshot_at"]).all()
+    assert (snap["available_at"] == snap["snapshot_at"]).all()
+    assert (snap["season"] == 2026).all()
+    s = snap.set_index(["snapshot_at", "fixture_key"])
+    one, two = utc("2026-09-01"), utc("2026-09-02T03:00")
+    assert s.loc[(one, 2026001), "kickoff_time"] == utc("2026-08-01T14:00")
+    assert s.loc[(two, 2026001), "kickoff_time"] == utc("2026-08-02T19:30")
+    assert pd.isna(s.loc[(one, 2026380), "gw"]) and pd.isna(s.loc[(one, 2026380), "kickoff_time"])
+    assert s.loc[(two, 2026380), "gw"] == 10
+    expected = season_fixtures(2026).set_index("id")
+    first = s.loc[one].sort_index()
+    assert first["home_team_key"].tolist() == [TEAM_CODES[i - 1] for i in expected["team_h"]]
+    assert first["away_team_key"].tolist() == [TEAM_CODES[i - 1] for i in expected["team_a"]]
+    assert first["started"].isna().all()  # absent from the first payload
+    assert s.loc[(two, 2026001), "started"] and not s.loc[(two, 2026021), "started"]
+
+
+def test_fixture_snapshot_without_own_archive_is_empty(world):
+    world.add_vaastav_season(2023)
+    build(["fixture_snapshot"], world.ctx)
+    assert world.ctx.table("fixture_snapshot").empty
+
+
+def test_fixture_snapshot_needs_a_full_fixture_list(world):
+    fx26 = world.add_current_season()
+    world.add_own_fixtures(datetime(2026, 9, 2, tzinfo=UTC), fx26.iloc[:-1])
+    with pytest.raises(TableValidationError, match="380 fixtures per snapshot"):
+        build(["fixture_snapshot"], world.ctx)

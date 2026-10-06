@@ -12,7 +12,8 @@ from pathlib import Path
 import pandas as pd
 
 from fplopt.build import teams
-from fplopt.build.common import BuildContext, write_table
+from fplopt.build.common import UTC_US, BuildContext, fplcache_and_own_bootstraps, write_table
+from fplopt.build.snapshots import build_player_snapshot
 from fplopt.build.teams import team_dim_from_config
 from fplopt.ingest.raw_store import RawStore, gzip_bytes
 from fplopt.seasons import football_data_code, season_label
@@ -131,6 +132,9 @@ def merged_gw(fixtures: pd.DataFrame) -> pd.DataFrame:
                 clean_sheets=int(conceded == 0),
                 total_points=2 + 4 * scored,
                 value=50,
+                selected=1000,
+                transfers_in=0,
+                transfers_out=0,
                 xP=9.9,
             )
             rows.append(row)
@@ -268,6 +272,24 @@ class World:
         played = fixtures[fixtures["finished"]]
         self.football_data(2026, football_data(played.head(fd_rows), 2026))
         return fixtures
+
+    def write_player_snapshot(self) -> None:
+        """player_snapshot (player_gw needs it): built in one process without the season
+        coverage check, or, for a world without bootstraps, an empty table with the columns
+        the player builders read."""
+        if fplcache_and_own_bootstraps(self.store):
+            build_player_snapshot(self.ctx, jobs=1, first_season=None)
+            return
+        empty = pd.DataFrame(
+            {
+                "snapshot_at": pd.Series(dtype=UTC_US),
+                "season": pd.Series(dtype="int64"),
+                "player_key": pd.Series(dtype="int64"),
+                "team_key": pd.Series(dtype="int64"),
+            }
+        )
+        self.ctx.data_dir.mkdir(parents=True, exist_ok=True)
+        empty.to_parquet(self.ctx.table_path("player_snapshot"), index=False)
 
     def add_element_summary(
         self,

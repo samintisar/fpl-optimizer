@@ -1,1 +1,41 @@
-"""Point-in-time feature builders; every builder takes a deadline."""
+"""Point-in-time features. Every builder takes one argument, an `AsOfView`
+(`fplopt.features.store.DataStore(data_dir).as_of(deadline)`), and reads only through it
+(PLAN §4). Feature modules import only `AsOfView` from the store, never `DataStore`
+(tests/test_features_architecture.py)."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+import pandas as pd
+
+from fplopt.features.baseline import (
+    availability,
+    ep_next,
+    player_pool,
+    pool_coverage,
+    recent_form,
+    team_strength,
+    upcoming_fixtures,
+)
+from fplopt.features.store import AsOfView
+
+FeatureBuilder = Callable[[AsOfView], pd.DataFrame]
+
+FEATURES: dict[str, FeatureBuilder] = {
+    "player_pool": player_pool,
+    "availability": availability,
+    "ep_next": ep_next,
+    "recent_form": recent_form,
+    "upcoming_fixtures": upcoming_fixtures,
+    "team_strength": team_strength,
+    "pool_coverage": pool_coverage,
+}
+
+
+def compute_features(view: AsOfView) -> dict[str, pd.DataFrame]:
+    """Every registered feature at the view's deadline, in FEATURES order."""
+    return {name: builder(view) for name, builder in FEATURES.items()}
+
+
+__all__ = ("FEATURES", "AsOfView", "FeatureBuilder", "compute_features")

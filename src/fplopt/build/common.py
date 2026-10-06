@@ -6,7 +6,7 @@ from __future__ import annotations
 import io
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -25,6 +25,9 @@ UTC_US = pd.DatetimeTZDtype("us", "UTC")
 EPOCH = pd.Timestamp("1970-01-01", tz="UTC").as_unit("us")
 MAX_FAILURES_SHOWN = 20
 MANIFEST = "_manifest.json.gz"
+# State fixed before deadline t (price, registration/club at t) is available this long
+# before it (PLAN §4: FPL prices change overnight).
+KNOWN_BEFORE_DEADLINE = pd.Timedelta(hours=1)
 
 
 class TableValidationError(ValueError):
@@ -201,3 +204,32 @@ def lockdown_times(last_kickoffs: pd.Series) -> pd.Series:
     local_day = last_kickoffs.dt.tz_convert(UK).dt.tz_localize(None).dt.normalize()
     local = local_day + pd.Timedelta(days=1, hours=9)
     return local.dt.tz_localize(UK).dt.tz_convert("UTC").astype(UTC_US)
+
+
+def schedule_published_at(season: int) -> pd.Timestamp:
+    """1 June of a season's start year, 00:00 UTC: FPL publishes the fixture list mid-June
+    (PLAN §4). Use `schedule_available_at`, which also waits for the previous season."""
+    return pd.Timestamp(year=int(season), month=6, day=1, tz="UTC").as_unit("us")
+
+
+def schedule_available_at(season: int, previous_last_kickoff: Any = None) -> pd.Timestamp:
+    """When a season's schedule (fixture list, GW deadlines) and club list count as known:
+    publication (`schedule_published_at`) or, if later, the lockdown after the previous
+    season's last kickoff, so they are never visible at a deadline of the previous season
+    (2019/20 ended on 26 July 2020; 2020/21's fixtures reveal promotion and relegation).
+    The real 2020/21 publication was 20 August 2020, but no deadline falls in between."""
+    published = schedule_published_at(season)
+    if previous_last_kickoff is None or pd.isna(previous_last_kickoff):
+        return published
+    return max(published, lockdown_time(pd.Timestamp(previous_last_kickoff)))
+
+
+def schedule_available(seasons: pd.Series, last_kickoffs: Mapping[int, Any]) -> pd.Series:
+    """Vectorised `schedule_available_at`; `last_kickoffs` maps a season to its last kickoff
+    (the previous season of each row's is looked up). Returns datetime64[us, UTC]."""
+    seasons = seasons.astype("int64")
+    known = {
+        int(season): schedule_available_at(int(season), last_kickoffs.get(int(season) - 1))
+        for season in seasons.unique()
+    }
+    return seasons.map(known).astype(UTC_US)

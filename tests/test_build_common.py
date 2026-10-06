@@ -15,6 +15,8 @@ from fplopt.build.common import (
     lockdown_time,
     lockdown_times,
     read_raw_csv,
+    schedule_available,
+    schedule_available_at,
     uk_date,
     write_table,
 )
@@ -192,6 +194,26 @@ def test_lockdown_times_matches_scalar_and_keeps_nulls():
     for k, v in zip(kickoffs, out, strict=True):
         if pd.notna(k):
             assert v == lockdown_time(k)
+
+
+def test_schedule_is_known_from_1_june_or_after_the_previous_season_locks():
+    # 2019/20 ended on 26 July 2020 (COVID restart): 2020/21's schedule (and with it who was
+    # promoted and relegated) is not known before that season's last lockdown.
+    last_2019 = pd.Timestamp("2020-07-26 15:00", tz="UTC")
+    assert schedule_available_at(2020, last_2019) == pd.Timestamp("2020-07-27 08:00", tz="UTC")
+    last_2020 = pd.Timestamp("2021-05-23 15:00", tz="UTC")
+    assert schedule_available_at(2021, last_2020) == pd.Timestamp("2021-06-01", tz="UTC")
+    assert schedule_available_at(2016, None) == pd.Timestamp("2016-06-01", tz="UTC")
+    seasons = pd.Series([2019, 2020, 2021, 2020], index=[5, 6, 7, 8])
+    out = schedule_available(seasons, {2019: last_2019, 2020: last_2020})
+    assert str(out.dtype) == "datetime64[us, UTC]"
+    assert list(out.index) == [5, 6, 7, 8]
+    assert out.tolist() == [
+        pd.Timestamp("2019-06-01", tz="UTC"),
+        pd.Timestamp("2020-07-27 08:00", tz="UTC"),
+        pd.Timestamp("2021-06-01", tz="UTC"),
+        pd.Timestamp("2020-07-27 08:00", tz="UTC"),
+    ]
 
 
 def test_uk_date():

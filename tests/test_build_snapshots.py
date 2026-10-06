@@ -221,10 +221,10 @@ def test_missing_seasons_fail(ctx):
 
 
 def test_player_dim_check_reports_missing_keys(ctx, caplog):
-    run(ctx)  # no player_dim yet: check skipped
-    pd.DataFrame({"player_key": [100, 200]}).to_parquet(ctx.table_path("player_dim"))
+    _, out = run(ctx)
+    dim = pd.DataFrame({"player_key": [100, 200]})
     with caplog.at_level(logging.WARNING, logger="fplopt.build.snapshots"):
-        run(ctx)
+        snapshots.report_missing_players(dim, out[["season", "player_key"]].drop_duplicates())
     assert "1 player_key(s) not in player_dim" in caplog.text
     assert "300" in caplog.text
 
@@ -233,3 +233,5 @@ def test_registered_after_team_dim():
     assert "player_snapshot" in BUILDERS
     assert BUILDERS["player_snapshot"].schema is None
     assert ORDER.index("player_snapshot") > ORDER.index("team_dim")
+    # player_gw reads registration times from it.
+    assert ORDER.index("player_snapshot") < ORDER.index("player_gw")

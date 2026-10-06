@@ -23,9 +23,11 @@ after every check passed.
 
 Checks: the per-chunk schema (dtypes, ranges, unique key — a snapshot never spans chunks, so
 per-chunk uniqueness is global uniqueness); every season from `first_season` (2020: the
-mirror starts in April 2021) to the newest is present; and, only if `player_dim` has been
-built, every player_key is in it — missing keys are logged as a warning, not a failure (a
-player deleted mid-season may be absent from end-of-season players_raw).
+mirror starts in April 2021) to the newest is present. The table depends only on raw/ and
+is built before the player tables (player_gw reads registration times from it); the
+`player_dim` builder then checks every snapshot player_key is in player_dim
+(`report_missing_players`: a warning, not a failure — a player deleted mid-season may be
+absent from end-of-season players_raw).
 """
 
 from __future__ import annotations
@@ -280,12 +282,10 @@ def _check_seasons(seasons: set[int], first_season: int) -> None:
         )
 
 
-def _report_missing_players(ctx: BuildContext, keys: pd.DataFrame) -> None:
-    """Warn about player_keys absent from player_dim; skipped if player_dim isn't built."""
-    if not ctx.table_path("player_dim").exists():
-        log.info("%s: player_dim not built yet; player_key check skipped", NAME)
-        return
-    known = set(ctx.table("player_dim")["player_key"].astype(int))
+def report_missing_players(player_dim: pd.DataFrame, keys: pd.DataFrame) -> None:
+    """Warn about snapshot (season, player_key) `keys` whose player_key is not in
+    `player_dim`."""
+    known = set(player_dim["player_key"].astype(int))
     missing = keys[~keys["player_key"].isin(known)]
     if missing.empty:
         return
@@ -321,7 +321,6 @@ def build_player_snapshot(
     path = ctx.table_path(NAME)
     tmp = data_dir / f"{NAME}.parquet.tmp"
     season_counts: dict[int, int] = {}
-    player_keys: list[pd.DataFrame] = []
     writer: pq.ParquetWriter | None = None
     row_groups = 0
     try:
@@ -336,13 +335,11 @@ def build_player_snapshot(
             row_groups += 1
             for season, count in chunk["season"].value_counts().items():
                 season_counts[int(season)] = season_counts.get(int(season), 0) + int(count)
-            player_keys.append(chunk[["season", "player_key"]].drop_duplicates())
             log.debug("%s: chunk %d, %d rows", NAME, row_groups, len(chunk))
         writer.close()
         writer = None
         if first_season is not None:
             _check_seasons(set(season_counts), first_season)
-        _report_missing_players(ctx, pd.concat(player_keys, ignore_index=True).drop_duplicates())
         os.replace(tmp, path)
     finally:
         if writer is not None:

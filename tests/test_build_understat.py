@@ -1,22 +1,16 @@
-from datetime import UTC, datetime
-from functools import partial
-
 import pandas as pd
-import pyarrow.parquet as pq
 import pytest
 from synthetic_raw import (
     REPO_CONFIG,
     TEAM_CODES,
     World,
-    bootstrap,
     football_data,
     merged_gw,
     season_fixtures,
 )
 
-from fplopt.build import BUILDERS, ORDER, Builder, build
+from fplopt.build import build
 from fplopt.build.common import EPOCH
-from fplopt.build.snapshots import build_player_snapshot
 from fplopt.build.teams import TeamResolver, team_dim_from_config
 from fplopt.build.understat import (
     UnderstatMappingError,
@@ -155,7 +149,15 @@ def two_seasons(world, *, skip_player=None):
     return fx23, fx24
 
 
-ALL = ["fixture", "gameweek", "player_season", "player_dim", "player_match", "understat"]
+ALL = [
+    "fixture",
+    "gameweek",
+    "player_match",
+    "player_gw",
+    "player_season",
+    "player_dim",
+    "understat",
+]
 
 
 def add_understat_season(world, season, fixtures, folder):
@@ -179,6 +181,7 @@ def test_placeholder_zero_fpl_columns_are_null_in_player_and_team_match(world):
     merged["expected_goals_conceded"] = 1.1 * late
     world.add_vaastav_season(2022, fixtures=fx, merged=merged)
     add_understat_season(world, 2022, fx, "2022-23")
+    world.write_player_snapshot()
     build([*ALL, "team_match"], world.ctx)
 
     pm = world.ctx.table("player_match")
@@ -194,6 +197,7 @@ def test_placeholder_zero_fpl_columns_are_null_in_player_and_team_match(world):
 
 def test_understat_build_end_to_end(world):
     two_seasons(world)
+    world.write_player_snapshot()
     build([*ALL, "team_match"], world.ctx)
 
     upm = world.ctx.table("understat_player_match")
@@ -232,25 +236,9 @@ def test_understat_build_end_to_end(world):
     assert (mapping["event_time"] == EPOCH).all() and (mapping["available_at"] == EPOCH).all()
 
 
-def test_every_built_table_has_event_time_and_available_at(world, monkeypatch):
-    fx23, fx24 = two_seasons(world)
-    world.add_fplcache_bootstrap(datetime(2024, 6, 1, tzinfo=UTC), bootstrap(2023, fx23))
-    world.add_fplcache_bootstrap(datetime(2025, 6, 1, tzinfo=UTC), bootstrap(2024, fx24))
-    snapshots = partial(build_player_snapshot, jobs=1, first_season=None)
-    monkeypatch.setitem(BUILDERS, "player_snapshot", Builder(snapshots, None))
-    # team_dim is already written by World (rebuilding it checks real club names).
-    build([name for name in ORDER if name != "team_dim"], world.ctx)
-
-    written = sorted(p.name.removesuffix(".parquet") for p in world.ctx.data_dir.glob("*.parquet"))
-    tables = (set(ORDER) - {"understat"}) | {"understat_map", "understat_player_match"}
-    assert written == sorted(tables)
-    for name in written:
-        columns = set(pq.read_schema(world.ctx.table_path(name)).names)
-        assert {"event_time", "available_at"} <= columns, name
-
-
 def test_unmapped_player_in_covered_season_fails(world):
     two_seasons(world, skip_player=7)
+    world.write_player_snapshot()
     with pytest.raises(UnderstatMappingError, match="1 FPL player"):
         build(ALL, world.ctx)
 
@@ -265,6 +253,7 @@ def test_override_exempts_a_player_without_understat(world, tmp_path):
     )
     world.ctx.config_dir = config
     two_seasons(world, skip_player=7)
+    world.write_player_snapshot()
     build(ALL, world.ctx)
     assert 100007 not in set(world.ctx.table("understat_map")["player_key"].dropna())
 
@@ -440,6 +429,7 @@ def test_understat_team_rows_fail_on_goal_mismatch():
 
 def test_rebuilding_player_match_alone_reruns_understat(world, caplog):
     two_seasons(world)
+    world.write_player_snapshot()
     build([*ALL, "team_match"], world.ctx)
     caplog.set_level("INFO", logger="fplopt.build")
     paths = build(["player_match"], world.ctx)
