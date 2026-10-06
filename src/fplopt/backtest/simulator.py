@@ -22,8 +22,10 @@ Policies only ever see the deadline view, and state transitions never use outcom
 reading outcomes cannot leak into decisions. The season's GW list comes from the `gameweek`
 rows visible at the start deadline (schedule rows are available from 1 June).
 
-A GW without any `player_match` row in its outcome view (not played yet, e.g. the live
-season) ends the run with a warning.
+Each GW is decided before its outcomes are read, so a decision never waits on (or sees)
+them. A GW without any `player_match` row in its outcome view (not played yet, e.g. the live
+season) ends the run with a warning: it is decided but not scored or recorded, and its
+state and decision are kept as `SeasonRun.pending_state` / `pending_decision`.
 
 The simulator is an orchestrator, not a feature builder: it holds the `DataStore` and reads
 through `store.as_of(...)` only. `Caches` keep xP frames, pools and outcomes across runs on
@@ -409,7 +411,8 @@ class SeasonRun:
     `free_transfers` before it, `xi_regret` null in chip GWs, `xg_points` null where not
     computable). `states[i]` is the refreshed state the policy saw at GW i, `decisions[i]` its
     decision; `final_state` the state after the last GW (FH reverted). `total` = Σ
-    net_points."""
+    net_points. If the run stopped at a GW without outcomes, `pending_state` /
+    `pending_decision` are that GW's refreshed state and decision (not scored)."""
 
     policy: str
     gws: pd.DataFrame
@@ -417,6 +420,8 @@ class SeasonRun:
     states: tuple[SquadState, ...]
     final_state: SquadState
     total: int
+    pending_state: SquadState | None = None
+    pending_decision: Decision | None = None
     timings: dict[str, float] = field(default_factory=dict)
 
 
@@ -430,10 +435,13 @@ def run_gameweeks(
     start: SquadState,
     schedule: pd.DataFrame,
     caches: Caches,
-) -> tuple[list[dict[str, Any]], list[Decision], list[SquadState], SquadState]:
+) -> tuple[list[dict[str, Any]], list[Decision], list[SquadState], SquadState, Step | None]:
     """Simulate the GWs of `schedule` (consecutive rows starting at `start.gw_index`);
-    `policy_for(i)` decides the i-th GW. Returns (rows, decisions, states, final state)."""
+    `policy_for(i)` decides the i-th GW. Each GW is decided before its outcomes are read; a
+    GW without outcomes stops the run unrecorded. Returns (rows, decisions, states, final
+    state, the unscored step of the GW it stopped at or None)."""
     state = start
+    pending: Step | None = None
     rows: list[dict[str, Any]] = []
     decisions: list[Decision] = []
     states: list[SquadState] = []
@@ -444,15 +452,17 @@ def run_gameweeks(
         gw, gw_index = int(gameweek.gw), int(gameweek.gw_index)
         if state.gw_index != gw_index:
             raise ValueError(f"state is at gw_index {state.gw_index}, schedule at {gw_index}")
+        step = decide_step(store, rules, policy_for(i), state, gameweek.deadline_time, caches)
         outcomes = caches.outcomes(store, rules, state.season, gw, gameweek.lockdown_time)
         if outcomes.empty:
             log.warning(
-                "%s GW%d: no outcomes as of its lockdown (not played yet?); stopping",
+                "%s GW%d: no outcomes as of its lockdown (not played yet?); decided, not "
+                "scored; stopping",
                 season_label(state.season),
                 gw,
             )
+            pending = step
             break
-        step = decide_step(store, rules, policy_for(i), state, gameweek.deadline_time, caches)
         gw_state, record, row = play_step(step, rules, outcomes, gw, gameweek.deadline_time)
         log.debug(
             "%s GW%d (gw_index %d): %d pts, %d transfer(s), chip %s, xg %s",
@@ -469,7 +479,7 @@ def run_gameweeks(
         states.append(step.state)
         following = int(gameweeks[i + 1].gw_index) if i + 1 < len(gameweeks) else gw_index + 1
         state = next_state(gw_state, record, rules, following)
-    return rows, decisions, states, state
+    return rows, decisions, states, state, pending
 
 
 def simulate(
@@ -497,7 +507,7 @@ def simulate(
     schedule = season_schedule(store, season, start.gw_index)
     if end_gw_index is not None:
         schedule = schedule[schedule["gw_index"] <= end_gw_index]
-    rows, decisions, states, final = run_gameweeks(
+    rows, decisions, states, final, pending = run_gameweeks(
         store, rules, lambda _: policy, start, schedule, caches
     )
     gws = gw_frame(rows)
@@ -521,5 +531,7 @@ def simulate(
         states=tuple(states),
         final_state=final,
         total=total,
+        pending_state=None if pending is None else pending.state,
+        pending_decision=None if pending is None else pending.decision,
         timings={"elapsed": elapsed},
     )

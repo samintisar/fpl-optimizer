@@ -5,13 +5,17 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import time
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
 import pytest
 from synthetic_season import synthetic_tables
 
+from fplopt.backtest import simulator
+from fplopt.backtest.evaluate import build_start_states
 from fplopt.backtest.gw_score import score_gameweek
 from fplopt.backtest.policies import (
     DecisionContext,
@@ -28,7 +32,6 @@ from fplopt.backtest.simulator import (
     GW_COLUMNS,
     Caches,
     HoldoutError,
-    decide_step,
     hindsight_points,
     read_outcomes,
     season_schedule,
@@ -37,8 +40,9 @@ from fplopt.backtest.simulator import (
 from fplopt.backtest.start_states import random_state, template_state
 from fplopt.backtest.state import Decision, apply_decision, next_state, refresh
 from fplopt.features.baseline import player_pool
-from fplopt.features.leakcheck import corrupt_future, truncate_future
+from fplopt.features.leakcheck import corrupt_future, load_tables, truncate_future
 from fplopt.features.store import DataStore
+from fplopt.seasons import HOLDOUT_SEASONS, season_label
 
 SEASON = 2023
 RULES = backtest_rules(SEASON)
@@ -380,27 +384,105 @@ def test_regrets_on_a_hand_made_gameweek(league):
 
 # --- leakage ----------------------------------------------------------------------------------
 
+LEAK_POLICIES = (GREEDY, GreedyPolicy("ep_next"))
+LEAK_GWS = (3, 10, 20)
 
-@pytest.mark.parametrize("variant", ["corrupted", "truncated"])
-def test_decisions_do_not_depend_on_data_after_the_deadline(league, runs, variant):
-    """Corrupt (or delete) every row available at or after GW t's deadline: the decisions
-    and scores of GWs < t and the decision at t are unchanged."""
-    tables, _, _, start = league
-    clean = runs[GREEDY.name]
-    t = 12
+
+def decided(run):
+    """(states, decisions) of every GW the run decided: its recorded GWs plus the GW it
+    stopped at without outcomes (decided, not scored), if any."""
+    states, decisions = list(run.states), list(run.decisions)
+    if run.pending_decision is not None:
+        states.append(run.pending_state)
+        decisions.append(run.pending_decision)
+    return states, decisions
+
+
+def assert_no_lookahead(tables, start, policy, t, variant, clean=None):
+    """Corrupt (or delete) every row available at or after GW t's deadline and simulate
+    through t: the states and decisions of GWs 1..t and the scored rows of GWs < t equal the
+    clean run's. `clean` is a clean run through at least t (computed if None)."""
     deadline = gameweek(tables, SEASON, t)["deadline_time"]
     if variant == "corrupted":
         altered = corrupt_future(tables, deadline, seed=5)
     else:
         altered = truncate_future(tables, deadline)
-    store = DataStore(tables=altered)
-    caches = Caches()
-    run = simulate(store, RULES, GREEDY, start, end_gw_index=t - 1, caches=caches)
-    assert run.decisions == clean.decisions[: t - 1]
-    pd.testing.assert_frame_equal(run.gws, clean.gws.iloc[: t - 1])
-    step = decide_step(store, RULES, GREEDY, run.final_state, deadline, caches)
-    assert step.state == clean.states[t - 1]
-    assert step.decision == clean.decisions[t - 1]
+    if clean is None:
+        clean = simulate(DataStore(tables=tables), RULES, policy, start, end_gw_index=t)
+    run = simulate(DataStore(tables=altered), RULES, policy, start, end_gw_index=t)
+    assert_same_decisions(run, clean, t - start.gw_index + 1)
+
+
+def assert_same_decisions(run, clean, n):
+    """`run` decided exactly `clean`'s first n GWs (states and decisions) and scored the
+    first n − 1 the same."""
+    clean_states, clean_decisions = (seq[:n] for seq in decided(clean))
+    assert len(clean_decisions) == n
+    states, decisions = decided(run)
+    assert decisions == clean_decisions
+    assert states == clean_states
+    pd.testing.assert_frame_equal(run.gws.iloc[: n - 1], clean.gws.iloc[: n - 1])
+
+
+@pytest.fixture(scope="module")
+def clean_runs(league):
+    """Clean runs through the last leakage GW, per policy."""
+    tables, store, caches, start = league
+    end = max(LEAK_GWS)
+    return {
+        p.name: simulate(store, RULES, p, start, end_gw_index=end, caches=caches)
+        for p in LEAK_POLICIES
+    }
+
+
+@pytest.mark.parametrize("t", LEAK_GWS)
+@pytest.mark.parametrize("policy", LEAK_POLICIES, ids=lambda p: p.name)
+@pytest.mark.parametrize("variant", ["corrupted", "truncated"])
+def test_decisions_do_not_depend_on_data_after_the_deadline(league, clean_runs, variant, policy, t):
+    """The whole orchestration (views, pools, xP, decisions, outcomes, state transitions)
+    run through GW t on a store whose future (from GW t's deadline) is corrupted or deleted:
+    every state and decision up to and including GW t is unchanged."""
+    tables, _, _, start = league
+    assert_no_lookahead(tables, start, policy, t, variant, clean_runs[policy.name])
+
+
+@pytest.mark.parametrize("variant", ["corrupted", "truncated"])
+def test_the_lookahead_check_catches_a_leaky_simulator(league, monkeypatch, variant):
+    """A wiring bug that feeds the GW's own realized points into the xP the policy sees is
+    caught by `assert_no_lookahead` (the decision at t changes on the altered store)."""
+    tables, _, _, start = league
+    honest = simulator.decide_step
+
+    def leaky_decide_step(store, rules, policy, state, deadline, caches):
+        step = honest(store, rules, policy, state, deadline, caches)
+        xp = step.xp.copy()
+        target = xp["horizon"] == 0
+        gw = int(xp.loc[target, "gw"].iloc[0])
+        later = store.as_of(deadline + pd.Timedelta(days=5))  # after the GW's lockdown
+        rows = later.table("player_match", columns=["player_key", "season", "gw", "total_points"])
+        rows = rows[(rows["season"] == state.season) & (rows["gw"] == gw)]
+        realized = rows.groupby("player_key")["total_points"].sum()
+        xp.loc[target, "xp"] = xp.loc[target, "player_key"].map(realized).fillna(0).to_numpy()
+        ctx = DecisionContext(step.view, step.state, rules, step.pool, xp)
+        return dataclasses.replace(step, xp=xp, decision=policy.decide(ctx))
+
+    monkeypatch.setattr(simulator, "decide_step", leaky_decide_step)
+    with pytest.raises(AssertionError):
+        assert_no_lookahead(tables, start, GREEDY, 10, variant)
+
+
+def test_a_gameweek_without_outcomes_is_decided_but_not_scored(league, runs):
+    """The live season's next GW: decided from the deadline view, kept as the pending
+    decision, not recorded."""
+    tables, _, _, start = league
+    cut = gameweek(tables, SEASON, 6)["lockdown_time"]
+    run = simulate(DataStore(tables=truncate_future(tables, cut)), RULES, GREEDY, start)
+    clean = runs[GREEDY.name]
+    assert len(run.gws) == len(run.decisions) == 5
+    assert run.pending_state == clean.states[5]
+    assert run.pending_decision == clean.decisions[5]
+    assert run.final_state.gw_index == 6
+    assert clean.pending_decision is None and clean.pending_state is None
 
 
 # --- xG points ----------------------------------------------------------------------------------
@@ -462,3 +544,44 @@ def test_free_hit_state_is_not_a_valid_start(league):
     bad = dataclasses.replace(start, freehit_backup=start.holdings, freehit_bank=start.bank)
     with pytest.raises(ValueError, match="Free Hit"):
         simulate(store, RULES, ROLL, bad)
+
+
+# --- real data ----------------------------------------------------------------------------------
+
+DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+# (season, the GW to corrupt from as (column, value) in `gameweek`, start spec, policy)
+REAL_LEAK_CASES = (
+    # 2019/20 through the COVID restart: GW39 (gw_index 30) after a three-month gap.
+    (2019, ("gw", 39), "random@1", GreedyPolicy("rolling")),
+    # 2022/23 across the cancelled GW7: gw_index 9 is GW10.
+    (2022, ("gw_index", 9), "template@1", GreedyPolicy("ep_next")),
+)
+
+
+@pytest.mark.realdata
+def test_simulator_does_not_look_ahead_on_the_real_data():
+    """The orchestration on the real tables, corrupted or truncated from GW t's deadline and
+    simulated through t: every state and decision up to and including t is unchanged."""
+    if not (DATA_DIR / "player_match.parquet").exists():
+        pytest.skip("data/ not built (run `uv run fplopt build all`)")
+    assert not {season for season, *_ in REAL_LEAK_CASES} & HOLDOUT_SEASONS
+    began = time.perf_counter()
+    tables = load_tables(DATA_DIR)
+    for season, (column, value), starts, policy in REAL_LEAK_CASES:
+        rules = backtest_rules(season)
+        store = DataStore(tables=tables)
+        ((start_id, start),) = build_start_states(store, season, starts, rules)
+        schedule = season_schedule(store, season, start.gw_index)
+        (row,) = schedule[schedule[column] == value].itertuples(index=False)
+        t, deadline = int(row.gw_index), row.deadline_time
+        clean = simulate(store, rules, policy, start, end_gw_index=t)
+        n = t - start.gw_index + 1
+        for variant in ("corrupted", "truncated"):
+            if variant == "corrupted":
+                altered = corrupt_future(tables, deadline, seed=0)
+            else:
+                altered = truncate_future(tables, deadline)
+            run = simulate(DataStore(tables=altered), rules, policy, start, end_gw_index=t)
+            assert_same_decisions(run, clean, n)
+        print(f"{season_label(season)} {policy.name} from {start_id} through gw_index {t}: ok")
+    print(f"real-data simulator lookahead check: {time.perf_counter() - began:.0f} s")
