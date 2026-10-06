@@ -1,4 +1,5 @@
-"""Masking secrets (API keys, bot tokens) out of log output. Importing installs the filter."""
+"""Masking secrets (API keys, bot tokens, heartbeat ping URLs) out of log output. Importing
+installs the filter."""
 
 from __future__ import annotations
 
@@ -7,10 +8,26 @@ import re
 
 _SECRET_QUERY = re.compile(r"(?i)\b(apikey|api_key|token)=[^&\s\"']+")
 _BOT_TOKEN = re.compile(r"/bot[^/]+/")
+# healthchecks.io ping URLs are https://hc-ping.com/<uuid>: the UUID is the secret.
+_UUID = re.compile(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+
+_SECRETS: set[str] = set()
+
+
+def register_secret(value: str) -> None:
+    """Mask this exact string from now on, e.g. a ping URL whose path is a secret but not a
+    UUID (healthchecks.io ping-key URLs, self-hosted instances)."""
+    value = value.strip()
+    if len(value) >= 8:  # never mask short, common strings
+        _SECRETS.add(value)
 
 
 def redact(text: str) -> str:
-    """Mask API keys in query strings and Telegram bot tokens in URL paths."""
+    """Mask registered secrets, UUIDs, API keys in query strings and Telegram bot tokens in
+    URL paths."""
+    for secret in sorted(_SECRETS, key=len, reverse=True):
+        text = text.replace(secret, "REDACTED")
+    text = _UUID.sub("REDACTED", text)
     return _BOT_TOKEN.sub("/botREDACTED/", _SECRET_QUERY.sub(r"\1=REDACTED", text))
 
 

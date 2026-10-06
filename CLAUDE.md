@@ -8,6 +8,7 @@
 - `uv run pytest` — tests
 - `uv run ruff check . && uv run ruff format .` — lint/format
 - `uv run fplopt snapshot daily|tick` / `uv run fplopt backfill element-summary` — archiver jobs (see `deploy/README.md`)
+- `uv run fplopt check freshness [--max-age-hours 36]` — fails (and alerts) if the newest bootstrap snapshot is missing or too old
 - `uv run fplopt backfill football-data|vaastav|fplcache` — one-off historical backfills into `raw/` (run on the server, see `deploy/README.md`)
 - `uv run fplopt rules export <season>` (e.g. `2026-27`, `--out` default `config/scoring`) — rules config from an archived bootstrap
 - `uv run fplopt build all` (or `build <table>`) — rebuild `data/*.parquet` from `raw/` (~1.5 min; needs a local `raw/` copy, see `deploy/README.md`). Club names across sources live in `config/teams.csv`; Understat mapping overrides in `config/overrides.csv`.

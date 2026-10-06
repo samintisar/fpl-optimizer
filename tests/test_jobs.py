@@ -32,7 +32,7 @@ class MultiLineFailingOdds:
 
 class FakeFpl:
     """`checked` marks those GW ids `data_checked` (finalised); the bootstrap lists GWs
-    1..max(checked), one week apart from `first_deadline`."""
+    1..max(checked, n_events), one week apart from `first_deadline`."""
 
     def __init__(
         self,
@@ -43,6 +43,7 @@ class FakeFpl:
         checked=(),
         fail_live=(),
         first_deadline=DEADLINE,
+        n_events=1,
     ):
         self.fail_ids = set(fail_ids)
         self.element_ids = list(element_ids)
@@ -51,6 +52,7 @@ class FakeFpl:
         self.checked = set(checked)
         self.fail_live = set(fail_live)
         self.first_deadline = first_deadline
+        self.n_events = n_events
         self.fetched = []
         self.summary_calls = []
         self.live_calls = []
@@ -65,7 +67,7 @@ class FakeFpl:
                 "finished": gw in self.checked,
                 "data_checked": gw in self.checked,
             }
-            for gw in range(1, max(self.checked, default=1) + 1)
+            for gw in range(1, max(max(self.checked, default=1), self.n_events) + 1)
         ]
 
     def bootstrap_static(self):
@@ -660,3 +662,64 @@ def test_summary_manifest_tolerates_bootstrap_without_events(tmp_path):
     assert manifest["season"] is None
     assert manifest["through_event"] == 0
     assert latest_complete_element_summary(store) == (0, 0)
+
+
+# --- post-lockdown in the pre-deadline tick ----------------------------------------------
+# GW1's deadline is a week before DEADLINE, GW2's is DEADLINE; GW1 may be finalised (Tuesday
+# morning, say) after the 02:30 daily run but before GW2's deadline.
+
+GW1_DEADLINE = DEADLINE - timedelta(weeks=1)
+IN_WINDOW = DEADLINE - timedelta(minutes=110)
+
+
+def two_gw_fpl(**kwargs):
+    return FakeFpl(first_deadline=GW1_DEADLINE, n_events=2, **kwargs)
+
+
+def test_pre_deadline_tick_archives_a_newly_finalised_gw(tmp_path):
+    store = RawStore(tmp_path)
+    run_daily(store, two_gw_fpl(), None, Clock(DAILY), sleep=no_sleep)
+    fpl = two_gw_fpl(checked=(1,))
+    assert run_tick(store, fpl, None, Clock(IN_WINDOW), sleep=no_sleep) is True
+    assert fpl.live_calls == [1]
+    assert len(event_live_times(store, 1)) == 1
+    assert fpl.summary_calls == [1, 2]
+    assert latest_complete_element_summary(store) == (2026, 1)
+
+
+def test_pre_deadline_tick_with_nothing_newly_finalised_fetches_nothing_extra(tmp_path):
+    store = RawStore(tmp_path)
+    run_daily(store, two_gw_fpl(checked=(1,)), None, Clock(DAILY), sleep=no_sleep)
+    fpl = two_gw_fpl(checked=(1,))
+    assert run_tick(store, fpl, None, Clock(IN_WINDOW), sleep=no_sleep) is True
+    assert len(store.times("fpl", "bootstrap-static")) == 3  # daily, its summary run, tick
+    assert fpl.live_calls == []
+    assert fpl.summary_calls == []
+
+
+def test_tick_outside_a_pre_deadline_window_skips_post_lockdown(tmp_path):
+    store = RawStore(tmp_path)
+    run_daily(store, two_gw_fpl(), None, Clock(DAILY), sleep=no_sleep)
+    # A fresh bootstrap showing GW1 finalised, not yet processed by any post-lockdown step.
+    store.write(
+        "fpl",
+        "bootstrap-static",
+        two_gw_fpl(checked=(1,)).bootstrap_static(),
+        DAILY + timedelta(hours=1),
+    )
+    fpl = two_gw_fpl(checked=(1,))
+    assert run_tick(store, fpl, None, Clock(DAILY + timedelta(hours=2)), sleep=no_sleep) is False
+    assert fpl.live_calls == []
+    assert fpl.summary_calls == []
+
+
+def test_tick_post_lockdown_failure_does_not_hide_fpl_or_odds(tmp_path):
+    store = RawStore(tmp_path)
+    run_daily(store, two_gw_fpl(), None, Clock(DAILY), sleep=no_sleep)
+    fpl = two_gw_fpl(checked=(1,), fail_live={1})
+    with pytest.raises(SnapshotError) as info:
+        run_tick(store, fpl, FakeOdds(), Clock(IN_WINDOW), sleep=no_sleep)
+    assert "post-lockdown" in str(info.value)
+    assert len(store.times("fpl", "bootstrap-static")) == 3  # daily, tick, tick's summary run
+    assert len(store.times("odds", "soccer_epl")) == 1
+    assert fpl.summary_calls == [1, 2]

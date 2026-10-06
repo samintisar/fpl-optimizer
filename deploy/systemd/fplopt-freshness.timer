@@ -1,0 +1,9 @@
+[Unit]
+Description=fpl-optimizer daily archive freshness check
+
+[Timer]
+OnCalendar=*-*-* 12:00:00 Europe/London
+Persistent=true
+
+[Install]
+WantedBy=timers.target

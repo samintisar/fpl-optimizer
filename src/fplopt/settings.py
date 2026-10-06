@@ -15,6 +15,7 @@ class Settings:
     telegram_bot_token: str | None
     telegram_admin_chat_id: str | None
     data_dir: Path = Path("data")
+    healthcheck_ping_url: str | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -25,6 +26,7 @@ class Settings:
             telegram_bot_token=_get(env, "TELEGRAM_BOT_TOKEN"),
             telegram_admin_chat_id=_get(env, "TELEGRAM_ADMIN_CHAT_ID"),
             data_dir=Path(_get(env, "FPLOPT_DATA_DIR") or "data").expanduser().resolve(),
+            healthcheck_ping_url=_get(env, "HEALTHCHECK_PING_URL"),
         )
 
 

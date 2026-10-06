@@ -1,13 +1,12 @@
 [Unit]
-Description=fpl-optimizer daily snapshot (bootstrap, fixtures, odds)
+Description=fpl-optimizer archive freshness check (newest bootstrap snapshot under 36 h old)
 After=network-online.target
 OnFailure=fplopt-failure@%n.service
 
 [Service]
 Type=oneshot
-TimeoutStartSec=40min
+TimeoutStartSec=10min
 WorkingDirectory=%h/fpl-optimizer
-# After=network-online.target does nothing for user units: wait up to ~2 min for DNS at boot,
-# then start regardless (if the network never came up, the job fails and alerts as usual).
+# The check itself is local, but its failure alert needs the network: same DNS wait as the jobs.
 ExecStartPre=/bin/sh -c 'for i in $$(seq 24); do getent hosts fantasy.premierleague.com >/dev/null && exit 0; sleep 5; done; echo "fantasy.premierleague.com still not resolving after 2 minutes; starting anyway" >&2; exit 0'
-ExecStart=%h/fpl-optimizer/.venv/bin/fplopt snapshot daily
+ExecStart=%h/fpl-optimizer/.venv/bin/fplopt check freshness
