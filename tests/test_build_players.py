@@ -586,3 +586,20 @@ def test_ownership_and_player_season_never_precede_the_registration():
     # Player 2's GW3 row is visible (D3) before his GW2 row (30 Aug).
     assert first.loc[2, "first_event_time"] == D3
     assert first.loc[2, "first_available_at"] == D3
+
+
+def test_rebuilding_player_season_rebuilds_player_match(caplog):
+    """player_match rows wait for the player's first listing in player_season (#24), so a
+    player_season rebuild also rebuilds player_match (and, through it, understat and
+    team_match)."""
+    from fplopt.build import _resolve
+
+    caplog.set_level("INFO", logger="fplopt.build")
+    assert _resolve(["player_season"]) == [
+        "player_season",
+        "player_match",
+        "understat",
+        "team_match",
+    ]
+    assert "also rebuilding player_match: its rows depend on player_season" in caplog.text
+    assert _resolve(["player_gw"]) == ["player_gw"]
