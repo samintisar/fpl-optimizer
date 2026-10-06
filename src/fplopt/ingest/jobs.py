@@ -65,7 +65,10 @@ def _run_independently(steps: list[tuple[str, Callable[[], object]]]) -> None:
             step()
         except Exception as exc:
             log.exception("%s snapshot failed", name)
-            errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            # First line only: the combined message must stay one line so no source's
+            # error is cut off when the CLI alert keeps just the first line.
+            summary = str(exc).splitlines()[0] if str(exc) else ""
+            errors.append(f"{name}: {type(exc).__name__}: {summary}")
     if errors:
         raise SnapshotError("; ".join(errors))
 

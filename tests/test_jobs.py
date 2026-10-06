@@ -9,6 +9,11 @@ from fplopt.ingest.raw_store import RawStore
 DEADLINE = datetime(2026, 10, 10, 10, 0, tzinfo=UTC)
 
 
+class MultiLineFailingOdds:
+    def epl_odds(self):
+        raise RuntimeError("odds down\ndetails on a second line")
+
+
 class FakeFpl:
     def __init__(self, fail_ids=(), element_ids=(1, 2), fail_fixtures=False, clock=None):
         self.fail_ids = set(fail_ids)
@@ -220,3 +225,14 @@ def test_backfill_writes_manifest_even_when_aborted(tmp_path):
     assert manifest["expected"] == [1, 2, 3, 4]
     assert manifest["written"] == [1]
     assert manifest["failed"] == [2, 3]
+
+
+def test_combined_error_is_one_line_naming_every_source(tmp_path):
+    store = RawStore(tmp_path)
+    fpl = FakeFpl(fail_fixtures=True)
+    with pytest.raises(RuntimeError) as info:
+        run_daily(store, fpl, MultiLineFailingOdds(), Clock(DEADLINE - timedelta(hours=8)))
+    message = str(info.value)
+    assert "\n" not in message
+    assert "fixtures down" in message
+    assert "odds down" in message
