@@ -294,3 +294,88 @@ def test_missing_available_at_values_are_rejected():
     df.loc[0, "available_at"] = pd.NaT
     with pytest.raises(ValueError, match="available_at"):
         DataStore(tables={"player_match": df}).as_of(DEADLINE).table("player_match")
+
+
+# --- static tables: identity lookups only ------------------------------------------------
+
+EPOCH = ts("1970-01-01")
+
+
+def static_tables() -> dict[str, pd.DataFrame]:
+    """player 1 has played by the deadline (a visible player_season row); player 9 debuts
+    later; club 3 has a visible rating, club 90 is first rated after the deadline."""
+    player_dim = pd.DataFrame(
+        {
+            "player_key": [1, 9],
+            "first_name": ["Ann", "Zed"],
+            "second_name": ["One", "Nine"],
+            "web_name": ["One", "Nine"],
+            "opta_code": ["p1", "p9"],
+            "understat_id": pd.array([501, 509], dtype="Int64"),
+        }
+    ).assign(event_time=EPOCH, available_at=EPOCH)
+    player_season = pd.DataFrame(
+        {"player_key": [1, 9], "season": 2026, "available_at": [T1, T3]}
+    ).astype({"available_at": UTC_US})
+    team_dim = pd.DataFrame(
+        {
+            "team_key": [3, 90],
+            "short_name": ["ARS", "BUR"],
+            "fpl_names": ["Arsenal", "Burnley"],
+            "in_fpl": [True, True],
+        }
+    ).assign(event_time=EPOCH, available_at=EPOCH)
+    team_rating = pd.DataFrame(
+        {"team_key": [3, 90], "rating_after": [1600.0, 1450.0], "available_at": [T1, T3]}
+    ).astype({"available_at": UTC_US})
+    understat_map = pd.DataFrame(
+        {"understat_id": [501, 509], "player_key": [1, 9], "name_score": [0.9, 0.8]}
+    ).assign(event_time=EPOCH, available_at=EPOCH)
+    understat_player_match = pd.DataFrame(
+        {"understat_id": [501, 509], "available_at": [T1, T3]}
+    ).astype({"available_at": UTC_US})
+    return {
+        "player_dim": player_dim,
+        "player_season": player_season.assign(event_time=player_season["available_at"]),
+        "team_dim": team_dim,
+        "team_rating": team_rating.assign(event_time=team_rating["available_at"]),
+        "understat_map": understat_map,
+        "understat_player_match": understat_player_match.assign(
+            event_time=understat_player_match["available_at"]
+        ),
+    }
+
+
+def test_static_tables_are_not_readable_whole():
+    view = DataStore(tables=static_tables()).as_of(DEADLINE)
+    for name in ("player_dim", "team_dim", "understat_map"):
+        with pytest.raises(ValueError, match="lookup"):
+            view.table(name)
+
+
+def test_lookup_returns_identity_columns_of_visible_keys_only():
+    view = DataStore(tables=static_tables()).as_of(DEADLINE)
+    players = view.lookup("player_dim", pd.Series([9, 1, 1, 42]))
+    # Only identity columns; player 9 (debuts after the deadline) and unknown 42 dropped.
+    assert players.to_dict("list") == {
+        "player_key": [1],
+        "first_name": ["Ann"],
+        "second_name": ["One"],
+        "web_name": ["One"],
+    }
+    teams = view.lookup("team_dim", [90, 3])
+    assert list(teams.columns) == ["team_key", "short_name", "fpl_names"]
+    assert teams["team_key"].tolist() == [3]
+    mapping = view.lookup("understat_map", [509, 501])
+    assert mapping.to_dict("list") == {"understat_id": [501], "player_key": [1]}
+    later = DataStore(tables=static_tables()).as_of(T3 + pd.Timedelta(seconds=1))
+    assert later.lookup("player_dim", [1, 9])["player_key"].tolist() == [1, 9]
+    assert later.lookup("team_dim", [3, 90])["team_key"].tolist() == [3, 90]
+    empty = view.lookup("player_dim", [])
+    assert list(empty.columns) == ["player_key", "first_name", "second_name", "web_name"]
+    assert empty.empty
+
+
+def test_lookup_is_for_static_tables_only(store):
+    with pytest.raises(ValueError, match="static"):
+        store.as_of(DEADLINE).lookup("player_match", [1])

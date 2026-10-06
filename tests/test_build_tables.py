@@ -68,3 +68,21 @@ def test_synthetic_build_all_writes_exactly_the_registered_tables(world, monkeyp
             assert (df["available_at"] == published).all(), name
     for name in ("schedule", "fixture_snapshot", "player_gw", "player_gw_ownership"):
         assert len(pd.read_parquet(world.ctx.table_path(name))), name
+
+
+def test_static_tables_declare_public_columns_and_a_visibility_source():
+    for name, spec in TABLES.items():
+        if spec.kind != "static":
+            assert spec.public_columns == () and spec.visible_via is None, name
+            continue
+        assert len(spec.key) == 1 and spec.key[0] == spec.public_columns[0], name
+        table, column = spec.visible_via
+        assert TABLES[table].kind != "static", name
+    assert TABLES["team_dim"].public_columns == ("team_key", "short_name", "fpl_names")
+    assert TABLES["player_dim"].public_columns == (
+        "player_key",
+        "first_name",
+        "second_name",
+        "web_name",
+    )
+    assert TABLES["understat_map"].public_columns == ("understat_id", "player_key")

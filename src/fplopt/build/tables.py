@@ -2,7 +2,11 @@
 for the as-of store, the leakage harness and the tests (Phase 2 plan, Task 1).
 
 Kinds (how `available_at` is set and how as-of reads treat the table):
-- `static`: reference data with nothing time-dependent (`available_at` = epoch).
+- `static`: reference data (`available_at` = epoch). The whole table is not as-of: it lists
+  future debutants (`player_dim`), clubs' FPL eras (`team_dim.in_fpl`) and match statistics
+  fitted on every season (`understat_map`). Feature code reads it only through
+  `AsOfView.lookup`: the `public_columns` (identity: key and names) of keys that are visible
+  as of the deadline in `visible_via` (table, column).
 - `schedule`: known from publication (`available_at` = 1 June of the season's start year, or
   the lockdown after the previous season's last kickoff if later: `schedule_available_at`);
   historically only the final version exists (PLAN §3, §4).
@@ -29,6 +33,10 @@ class TableSpec:
     kind: Kind
     key: tuple[str, ...]
     snapshot_col: str | None = None
+    # static tables only: the columns `AsOfView.lookup` returns (the key first) and the
+    # as-of (table, column) whose visible values are the keys it may return.
+    public_columns: tuple[str, ...] = ()
+    visible_via: tuple[str, str] | None = None
 
 
 def _specs(*specs: TableSpec) -> dict[str, TableSpec]:
@@ -37,9 +45,27 @@ def _specs(*specs: TableSpec) -> dict[str, TableSpec]:
 
 TABLES: dict[str, TableSpec] = _specs(
     # static
-    TableSpec("team_dim", "static", ("team_key",)),
-    TableSpec("player_dim", "static", ("player_key",)),
-    TableSpec("understat_map", "static", ("understat_id",)),
+    TableSpec(
+        "team_dim",
+        "static",
+        ("team_key",),
+        public_columns=("team_key", "short_name", "fpl_names"),
+        visible_via=("team_rating", "team_key"),
+    ),
+    TableSpec(
+        "player_dim",
+        "static",
+        ("player_key",),
+        public_columns=("player_key", "first_name", "second_name", "web_name"),
+        visible_via=("player_season", "player_key"),
+    ),
+    TableSpec(
+        "understat_map",
+        "static",
+        ("understat_id",),
+        public_columns=("understat_id", "player_key"),
+        visible_via=("understat_player_match", "understat_id"),
+    ),
     # schedule
     TableSpec("schedule", "schedule", ("fixture_key",)),
     TableSpec("gameweek", "schedule", ("season", "gw")),

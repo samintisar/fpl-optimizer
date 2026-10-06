@@ -4,7 +4,10 @@
 
 A view exposes only rows with `available_at < deadline` (strict; the column, never
 `event_time`). Snapshot tables are read with `latest()` (newest snapshot per group before the
-deadline); the as-of fixture list with `schedule()`.
+deadline); the as-of fixture list with `schedule()`. Static tables are not as-of (they list
+future debutants, whole-history flags and statistics), so `table()` refuses them: `lookup()`
+returns only their identity columns (`TableSpec.public_columns`) for keys visible at the
+deadline.
 
 Performance: each table is loaded once per store, lazily and column by column, and kept
 sorted by `available_at` (for snapshot tables: ties ordered so the preferred source comes
@@ -226,9 +229,36 @@ class AsOfView:
         return table, table.visible(self._deadline_ns)
 
     def table(self, name: str, columns: Sequence[str] | None = None) -> pd.DataFrame:
-        """Rows with available_at < deadline (a copy), in available_at order."""
+        """Rows with available_at < deadline (a copy), in available_at order. Not for static
+        tables (use `lookup`)."""
+        if name in TABLES and TABLES[name].kind == "static":
+            raise ValueError(
+                f"{name!r} is a static table (not as-of: it covers every season); "
+                f"use lookup({name!r}, keys) for its identity columns"
+            )
         table, k = self._visible(name)
         return table.frame(table.columns if columns is None else list(columns), slice(0, k))
+
+    def lookup(self, name: str, keys: pd.Series | Sequence[Any]) -> pd.DataFrame:
+        """Static tables only: the `public_columns` of the rows whose key is in `keys` and
+        is visible as of the deadline (appears in a visible row of the spec's `visible_via`
+        table); one row per key, sorted by key. Other keys are dropped."""
+        if name not in TABLES:
+            raise _unknown(name)
+        spec = TABLES[name]
+        if spec.kind != "static" or spec.visible_via is None:
+            raise ValueError(f"lookup() is for static tables; {name!r} is {spec.kind}")
+        key = spec.key[0]
+        via_table, via_column = spec.visible_via
+        visible = self.table(via_table, columns=[via_column])[via_column]
+        wanted = pd.Series(keys).dropna()
+        wanted = wanted[wanted.isin(visible)]
+        table = self._store._table(name)
+        rows = table.frame([key], slice(0, table.n))[key]
+        positions = np.flatnonzero(rows.isin(wanted).to_numpy(dtype=bool))
+        out = table.frame(list(spec.public_columns), positions)
+        out = out.drop_duplicates(key)
+        return out.sort_values(key, kind="mergesort").reset_index(drop=True)
 
     def latest(
         self, name: str, by: Sequence[str], columns: Sequence[str] | None = None
