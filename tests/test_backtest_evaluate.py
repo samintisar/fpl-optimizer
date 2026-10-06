@@ -245,19 +245,22 @@ def every_gw(league):
 
 
 def test_per_decision_windows_tile_the_run_without_overlap(league, every_gw):
-    """Default stride = k: decisions at the reference run's GWs 0, k, 2k, ... per start, so
-    the windows don't overlap and cover every GW once; each row equals the every-GW row of
-    the same decision GW."""
+    """Default stride = k: decisions at gw_index 1, 1 + k, 1 + 2k, ... for every start (a
+    start off that grid waits for its next point), so the windows of all starts coincide,
+    don't overlap and cover every GW from the first decision on; each row equals the
+    every-GW row of the same decision GW."""
     _, store, caches = league
     out = per_decision(store, [SEASON], "template@1,random@30", GREEDY, ROLL, ROLL, caches=caches)
     assert (out["stride"] == 4).all() and (every_gw["stride"] == 1).all()
-    for start_id, first in (("template@1", 1), ("random0@30", 30)):
+    for start_id, first in (("template@1", 1), ("random0@30", 33)):
         part = out[out["start_id"] == start_id]
         assert part["gw_index"].tolist() == list(range(first, 39, 4))
         covered = [g for r in part.itertuples() for g in range(r.gw_index, r.gw_index + r.k)]
         assert covered == list(range(first, 39))
     assert out.loc[out["start_id"] == "template@1", "k"].tolist() == [4] * 9 + [2]
-    assert out.loc[out["start_id"] == "random0@30", "k"].tolist() == [4, 4, 1]
+    assert out.loc[out["start_id"] == "random0@30", "k"].tolist() == [4, 2]
+    windows = out.groupby("start_id")[["gw_index", "k"]].apply(lambda f: set(map(tuple, f.values)))
+    assert windows["random0@30"] <= windows["template@1"]  # one grid: same cells
     same = every_gw.merge(out[["start_id", "gw_index"]], on=["start_id", "gw_index"])
     columns = [c for c in out.columns if c != "stride"]
     pd.testing.assert_frame_equal(out[columns], same[columns])
@@ -266,8 +269,8 @@ def test_per_decision_windows_tile_the_run_without_overlap(league, every_gw):
 def test_per_decision_stride_two(league, every_gw):
     _, store, caches = league
     out = per_decision(store, [SEASON], "random@30", GREEDY, ROLL, ROLL, stride=2, caches=caches)
-    assert out["gw_index"].tolist() == [30, 32, 34, 36, 38]
-    assert out["k"].tolist() == [4, 4, 4, 3, 1]
+    assert out["gw_index"].tolist() == [31, 33, 35, 37]  # gw_index 1 + 2j
+    assert out["k"].tolist() == [4, 4, 4, 2]
     expected = every_gw[every_gw["gw_index"].isin(out["gw_index"])]
     expected = expected[expected["start_id"] == "random0@30"].reset_index(drop=True)
     pd.testing.assert_frame_equal(out.drop(columns="stride"), expected.drop(columns="stride"))

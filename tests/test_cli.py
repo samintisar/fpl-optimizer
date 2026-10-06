@@ -598,10 +598,10 @@ def test_backtest_compare_end_to_end(backtest, tmp_path, capsys):
     paired = pd.read_parquet(out / "paired.parquet")
     decisions = pd.read_parquet(out / "per_decision.parquet")
     assert len(paired) == 2 * 2 * 7  # seasons x starts x GWs 12-18
-    # Non-overlapping k = 2 windows by default: decisions at GWs 12, 14, 16, 18.
-    assert len(decisions) == 2 * 2 * 4
-    assert sorted(set(decisions["gw_index"])) == [12, 14, 16, 18]
-    assert decisions["k"].tolist() == [2, 2, 2, 1] * 4 and (decisions["stride"] == 2).all()
+    # Non-overlapping k = 2 windows on the grid gw_index 1, 3, 5, ...: 13, 15, 17.
+    assert len(decisions) == 2 * 2 * 3
+    assert sorted(set(decisions["gw_index"])) == [13, 15, 17]
+    assert decisions["k"].tolist() == [2, 2, 2] * 4 and (decisions["stride"] == 2).all()
     summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
     assert summary["policy_a"] == "greedy(ep_next,t=1.0)"
     assert summary["continuation"] == "roll(rolling)"

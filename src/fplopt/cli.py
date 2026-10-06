@@ -722,7 +722,7 @@ def _backtest_compare(c: Context) -> object:
         f"{TOTALS_TITLE}\n{season_table(totals)}\n\n"
         f"Overall (means over seasons)\n{overall_table(totals)}\n\n"
         f"Paired differences A - B (full run: mean per GW; per-decision: mean per {args.k}-GW "
-        f"decision window, a decision every {args.stride} GWs; {CI_LEVEL:.0%} CI, two-sided "
+        f"decision window, decisions at gw_index 1 + {args.stride}j; {CI_LEVEL:.0%} CI, two-sided "
         f"(lower bound = one-sided alpha {(1 - CI_LEVEL) / 2:.2f}), from a GW-block bootstrap "
         f"by season, blocks of {args.block_length} GWs, {args.n_boot} resamples; p "
         "one-sided, H1: A > B; realized@xg = realized points on the xG metric's sample; "
@@ -849,8 +849,8 @@ def _add_backtest_parsers(groups: Any) -> None:
         "--stride",
         type=int,
         default=None,
-        help="GWs between per-decision windows (default k: windows don't overlap; 1 = every "
-        "GW, a diagnostic)",
+        help="per-decision windows start at gw_index 1, 1 + stride, ... for every start state "
+        "(default k: windows don't overlap; 1 = every GW, a diagnostic)",
     )
     compare.add_argument(
         "--per-decision",

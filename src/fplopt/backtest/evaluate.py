@@ -11,10 +11,12 @@ Season totals are too noisy to compare policies directly, so every comparison is
   both arms start from that state; arm A plays A's decision at t, arm B plays B's, and both
   then follow the same continuation policy (same xP) for k − 1 GWs (truncated at the
   season's end). Each arm's score is its net points over t..t+k−1 (hits at t included).
-  Decision GWs are every `stride`-th GW of the reference run (default stride = k), so the
-  windows don't overlap and tile the run: windows sharing outcomes would make neighbouring
-  differences dependent and the bootstrap too optimistic (stride 1 = every GW, a
-  diagnostic).
+  Decision GWs are the reference run's GWs on the season's grid gw_index ≡ 1 (mod
+  `stride`), default stride = k, so the windows don't overlap and tile the season: windows
+  sharing outcomes would make neighbouring differences dependent and the bootstrap too
+  optimistic. The grid is the same for every start state of a season, so their windows
+  coincide and average into one cell; a start off the grid (`template@2`, `random@20`)
+  gets its first decision at the next grid GW. Stride 1 = every GW (a diagnostic).
 - `block_bootstrap`: average the paired differences over start states per (season,
   gw_index), then resample circular moving blocks of those cells within each season, all
   seasons together; mean, percentile CI (default 80% two-sided, i.e. one-sided α = 0.10,
@@ -308,8 +310,8 @@ def per_decision(
     rules_fn: RulesFn = backtest_rules,
 ) -> pd.DataFrame:
     """Per-decision paired differences (module docstring), one row per decision GW of the
-    reference trajectory: its GWs i = 0, stride, 2·stride, ... per (season, start_id), with
-    `stride` defaulting to `k` (non-overlapping windows that tile the run; 1 = every GW).
+    reference trajectory with gw_index ≡ 1 (mod `stride`), `stride` defaulting to `k`
+    (non-overlapping windows on one grid per season, whatever the start; 1 = every GW).
     Columns: `k` = the window length actually scored (shorter at the season's end),
     `stride`, `same_decision` (A and B decided the same at t, so the arms are identical and
     diff = 0), each arm's transfers at t, its net points and xG net points over the window,
@@ -334,7 +336,9 @@ def per_decision(
             ref = simulate(store, rules, ref_policy, start, caches=caches)
             schedule = season_schedule(store, season, start.gw_index).iloc[: len(ref.gws)]
             first_row = len(rows)
-            for i in range(0, len(ref.states), stride):
+            for i, gw_index in enumerate(schedule["gw_index"]):
+                if (gw_index - 1) % stride:
+                    continue  # not on the season's decision grid
                 state = ref.states[i]
                 window = schedule.iloc[i : i + k]
                 deadline = window["deadline_time"].iloc[0]
