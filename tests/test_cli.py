@@ -1,6 +1,7 @@
 import logging
 import signal
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -240,3 +241,27 @@ def test_cli_import_does_not_load_pandas():
     code = "import sys, fplopt.cli; print('pandas' in sys.modules)"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "False"
+
+
+def test_check_freshness_passes_store_and_max_age(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        cli.health,
+        "check_freshness",
+        lambda store, now, max_age: seen.append((store.root, now.tzinfo is not None, max_age)),
+    )
+    settings = make_settings(tmp_path)
+    assert cli.main(["check", "freshness"], settings=settings) == 0
+    assert cli.main(["check", "freshness", "--max-age-hours", "12.5"], settings=settings) == 0
+    assert seen == [
+        (tmp_path, True, timedelta(hours=36)),
+        (tmp_path, True, timedelta(hours=12.5)),
+    ]
+
+
+def test_check_freshness_on_an_empty_archive_alerts_and_returns_one(tmp_path, monkeypatch):
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    assert cli.main(["check", "freshness"], settings=make_settings(tmp_path)) == 1
+    assert "check freshness failed" in alerts[0]
+    assert "StaleArchiveError" in alerts[0]

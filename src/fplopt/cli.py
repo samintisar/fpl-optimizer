@@ -3,7 +3,9 @@
 `fplopt snapshot daily|tick` (archiver timers), `fplopt backfill element-summary|football-data|
 vaastav|fplcache` (one-off backfills into raw/; football-data takes `--from-season YEAR`),
 `fplopt rules export SEASON [--out DIR]` (config/scoring/<season>.json from an archived
-bootstrap), `fplopt build TABLE|all` (raw/ -> data/<table>.parquet; no network). Every job
+bootstrap), `fplopt build TABLE|all` (raw/ -> data/<table>.parquet; no network),
+`fplopt check freshness [--max-age-hours H]` (fails if the newest bootstrap snapshot is
+missing or older than H hours, default 36: a dead-man's switch for the timers). Every job
 gets a `Context`; failures are logged and alerted to Telegram, and the exit code is 1.
 """
 
@@ -18,6 +20,7 @@ import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
@@ -30,7 +33,7 @@ from fplopt.adapters.http import make_client
 from fplopt.adapters.odds import OddsClient
 from fplopt.adapters.vaastav import VaastavClient
 from fplopt.alerts import send_admin_alert
-from fplopt.ingest import history, jobs
+from fplopt.ingest import health, history, jobs
 from fplopt.ingest.raw_store import RawStore
 from fplopt.redact import redact
 from fplopt.seasons import parse_season_label
@@ -91,6 +94,9 @@ JOBS: dict[str, Job] = {
     "backfill fplcache": lambda c: history.backfill_fplcache(c.store, FplcacheClient(c.http)),
     "rules export": _rules_export,
     "build": _build,
+    "check freshness": lambda c: health.check_freshness(
+        c.store, jobs.utc_now(), timedelta(hours=c.args.max_age_hours)
+    ),
 }
 
 
@@ -118,6 +124,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build_group = groups.add_parser("build", help="build data/<table>.parquet from raw/")
     build_group.add_argument("target", help="table name, or 'all'")
+    check = groups.add_parser("check", help="archive health checks")
+    check.add_argument("command", choices=["freshness"])
+    check.add_argument(
+        "--max-age-hours",
+        type=float,
+        default=health.DEFAULT_MAX_AGE.total_seconds() / 3600,
+        metavar="H",
+        help="fail if the newest bootstrap snapshot is older than this (default 36)",
+    )
     return parser
 
 

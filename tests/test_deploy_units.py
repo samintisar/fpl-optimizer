@@ -24,7 +24,9 @@ def service_settings(name: str) -> list[tuple[str, str]]:
     return pairs
 
 
-@pytest.mark.parametrize("unit", ["fplopt-daily.service", "fplopt-tick.service"])
+@pytest.mark.parametrize(
+    "unit", ["fplopt-daily.service", "fplopt-tick.service", "fplopt-freshness.service"]
+)
 def test_job_units_wait_for_dns_before_starting(unit):
     # After=network-online.target is a no-op in user units, so a Persistent timer firing at
     # boot could otherwise start before DNS works.
