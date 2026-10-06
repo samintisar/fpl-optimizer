@@ -59,7 +59,7 @@ def build_players(world):
     `understat` builder after player_match / player_dim: these worlds have no Understat."""
     build(["fixture", "gameweek"], world.ctx)
     world.write_player_snapshot()
-    for name in ("player_match", "player_gw", "player_season", "player_dim"):
+    for name in ("player_gw", "player_season", "player_match", "player_dim"):
         builder = BUILDERS[name]
         df = builder.run(world.ctx)
         write_table(df, name, builder.schema, world.ctx.data_dir, builder.sort_by)
@@ -161,6 +161,36 @@ def test_player_tables_end_to_end(world):
     assert len(player_dim) == 22
     assert player_dim["opta_code"].iloc[0] == f"p{player_dim['player_key'].iloc[0]}"
     assert "first_season" not in player_dim.columns and "last_season" not in player_dim.columns
+
+
+def test_player_match_rows_wait_for_the_players_first_listing(world):
+    # 2026-27 with snapshots from before GW1. Element 21 (code 100022, team id 1) is first
+    # listed at LATER_AT, after the GW1 and GW2 lockdowns, yet his element-summary history has
+    # (0-minute) rows for both GWs.
+    preseason = bootstrap(2026, season_fixtures(2026), finished_through=0)
+    world.add_own_bootstrap(datetime(2026, 7, 20, tzinfo=UTC), preseason)
+    fx26 = world.add_current_season(finished_through=2)
+    later = bootstrap(2026, season_fixtures(2026), finished_through=2)
+    later["elements"].append({**later["elements"][0], "id": 21, "code": 100022})
+    world.add_own_bootstrap(LATER_AT, later)
+    history = current_history(fx26)
+    zeros = {"minutes": 0, "goals_scored": 0, "assists": 0, "clean_sheets": 0, "starts": 0}
+    signing = history[history["element"] == 1].assign(element=21, **zeros)
+    world.add_element_summary(LATER_AT, pd.concat([history, signing]), 2026, through_event=2)
+
+    pm = build_players(world)
+    listed_at = pd.Timestamp(LATER_AT).as_unit("us")
+    ps = world.ctx.table("player_season").set_index(["season", "player_key"])
+    assert ps.loc[(2026, 100022), "available_at"] == listed_at
+    lockdown = world.ctx.table("gameweek").set_index(["season", "gw"])["lockdown_time"]
+    assert lockdown[(2026, 2)] < listed_at
+    late = pm["player_key"] == 100022
+    assert pm.loc[late, "gw"].tolist() == [1, 2]
+    assert (pm.loc[late, "available_at"] == listed_at).all()
+    gw_lockdown = lockdown.reindex(pd.MultiIndex.from_frame(pm[["season", "gw"]])).to_numpy()
+    assert (pm.loc[~late, "available_at"] == gw_lockdown[~late.to_numpy()]).all()
+    fixture = world.ctx.table("fixture").set_index("fixture_key")
+    assert (pm["event_time"] == fixture.loc[pm["fixture_key"], "kickoff_time"].to_numpy()).all()
 
 
 def test_current_season_stays_buildable_after_next_season_data_arrives(world, caplog):

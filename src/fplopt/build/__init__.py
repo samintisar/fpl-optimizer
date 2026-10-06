@@ -88,12 +88,13 @@ ORDER: list[str] = [
     "gameweek",
     "gameweek_result",
     "schedule",
-    # player_gw needs player_snapshot (registration times); player_season needs player_gw.
+    # player_gw needs player_snapshot (registration times); player_season needs player_gw;
+    # player_match needs player_season (rows wait for the player's first listing).
     "player_snapshot",
-    "player_match",
     "player_gw",
     "player_gw_ownership",
     "player_season",
+    "player_match",
     "player_dim",
     "understat",
     "team_match",

@@ -6,7 +6,8 @@ id, which resets every season and is never a key.
 Registered players per season (`registered_players`): vaastav `players_raw` (2016-17 …
 2025-26; managers, `element_type` 5, dropped) and, for seasons vaastav doesn't cover
 (2026-27 →), the newest archived bootstrap of that season. player_match maps elements to
-player_keys through them; player_season is built from them after player_gw.
+player_keys through them; player_season is built from them after player_gw, and
+player_match after player_season (its `available_at` waits for the player's listing).
 
 player_season: one row per player and season, no club (`players_raw.team_code` is the
 end-of-season club: the club per match is in player_match, the as-of club in
@@ -39,7 +40,10 @@ season without such a run has no rows if none of its fixtures is finished, else 
   (dropping them all would lose the pair).
 - Team: from the fixture (`home_team_key` if `was_home` else `away_team_key`), checked
   against `opponent_team` (season id -> code) and, where present (2020-21+), the `team` name.
-  Kickoff, GW and timing come from `fixture`; `available_at` = the GW's lockdown.
+  Kickoff, GW and `event_time` come from `fixture`; `available_at` = the GW's lockdown, or
+  the player's player_season `available_at` if later (`not_before_listing`: FPL can add a
+  player days after a GW, and his history then has rows for GWs before he was listed), so
+  player_match is built after player_season.
 - `starts` and `fpl_x*` (FPL/Opta expected goals / assists / goals conceded): from 2022-23
   GW16 (null before 2022-23: no columns; null for 2022-23 GW1–15, where vaastav has the
   columns but every value is a 0 placeholder). CBIT/recoveries/tackles where the source has
@@ -699,12 +703,32 @@ def assembled_match_rows(
     return df, players
 
 
+def not_before_listing(player_match: pd.DataFrame, player_season: pd.DataFrame) -> pd.DataFrame:
+    """player_match with `available_at` = max(GW lockdown, the player's player_season
+    `available_at`), by (player_key, season): a player added to FPL after a GW's lockdown has
+    rows for it in his history, which must not reveal him before he was listed. Fails
+    (PlayerMatchError) on rows without a player_season row."""
+    listed = player_season.set_index(["season", "player_key"])["available_at"]
+    at = listed.reindex(pd.MultiIndex.from_frame(player_match[["season", "player_key"]]))
+    at = pd.Series(at.to_numpy(), index=player_match.index)
+    _fail_if(at.isna(), player_match, "row(s) without a player_season row")
+    later = at > player_match["available_at"]
+    if later.any():
+        log.info(
+            "player_match: %d row(s) wait for the player's first listing (per season: %s)",
+            int(later.sum()),
+            player_match.loc[later, "season"].value_counts().sort_index().to_dict(),
+        )
+    available_at = at.where(later, player_match["available_at"]).astype(UTC_US)
+    return player_match.assign(available_at=available_at)
+
+
 def build_player_match(ctx: BuildContext) -> pd.DataFrame:
     df, _ = assembled_match_rows(ctx)
     fixture = ctx.table("fixture")
     check_goal_sums(df, fixture)
     check_placeholder_zeros(df)
-    return df
+    return not_before_listing(df, ctx.table("player_season"))
 
 
 # --- player_gw / player_gw_ownership -----------------------------------------------------
