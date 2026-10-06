@@ -7,11 +7,11 @@ of a package):
 - `fplopt/features/`: every module (subpackages included) except `store.py` (the reader) and
   `leakcheck.py` (the harness, which loads and corrupts whole tables); registry `FEATURES`;
 - `fplopt/models/`: every module; may also import the scanned feature modules (and the
-  `fplopt.features` package); registry `MODELS`.
-A later scanned package adds an entry (e.g. `fplopt.backtest` with
-`files=("policies.py", "start_states.py", "probes.py")`, trusting the features and models
-targets, `extra_modules` for the pure backtest modules it uses and `registries` for its
-registry).
+  `fplopt.features` package); registry `MODELS`;
+- `fplopt/backtest/`: only `policies.py`, `start_states.py`, `probes.py` (what decides at a
+  deadline); may also import the scanned feature and model modules, the pure backtest
+  modules `rules`, `state`, `gw_score` and `fplopt.seasons`; registry `PROBES`.
+A later scanned package adds an entry the same way.
 
 Rules (`violations`, the same for every target):
 - imports: an allowlist of pure modules (`PURE_MODULES`), the target's sibling modules,
@@ -160,7 +160,22 @@ MODELS_TARGET = ScanTarget(
     restricted={"fplopt.features.store": STORE_NAMES},
     registries={"__init__.py": frozenset({"MODELS"})},
 )
-TARGETS = (FEATURES_TARGET, MODELS_TARGET)
+BACKTEST_TARGET = ScanTarget(
+    package="fplopt.backtest",
+    files=("policies.py", "start_states.py", "probes.py"),
+    trusted=(FEATURES_TARGET, MODELS_TARGET),
+    extra_modules=frozenset(
+        {
+            "fplopt.backtest.rules",  # reads config/scoring (rules), never data/
+            "fplopt.backtest.state",
+            "fplopt.backtest.gw_score",
+            "fplopt.seasons",
+        }
+    ),
+    restricted={"fplopt.features.store": STORE_NAMES},
+    registries={"probes.py": frozenset({"PROBES"})},
+)
+TARGETS = (FEATURES_TARGET, MODELS_TARGET, BACKTEST_TARGET)
 
 
 def scanned_files(target: ScanTarget) -> list[Path]:
@@ -398,6 +413,11 @@ def _scan_id(item: tuple[ScanTarget, Path]) -> str:
 def test_scanned_modules_exist():
     assert {p.name for p in feature_modules()} >= {"__init__.py", "baseline.py"}
     assert {p.name for p in scanned_files(MODELS_TARGET)} >= {"__init__.py", "baseline.py"}
+    assert [p.name for p in scanned_files(BACKTEST_TARGET)] == [
+        "policies.py",
+        "probes.py",
+        "start_states.py",
+    ]
     for target in TARGETS:
         for path in scanned_files(target):
             assert path.is_file(), path
@@ -741,3 +761,99 @@ from fplopt.features import leakcheck
             "imports leakcheck from fplopt.features",
         ]
     )
+
+
+# --- backtest policies, start states, probes -----------------------------------------------
+
+BACKTEST_DIR = BACKTEST_TARGET.directory
+
+
+def test_backtest_modules_may_use_features_models_and_pure_backtest_modules():
+    source = """
+from collections import Counter
+
+import numpy as np
+import pandas as pd
+
+from fplopt.backtest.gw_score import Lineup
+from fplopt.backtest.rules import Rules, backtest_rules
+from fplopt.backtest.state import Decision, SquadState, apply_decision
+from fplopt.backtest.policies import GreedyPolicy
+from .start_states import template_state
+from fplopt.features.baseline import player_pool, pool_coverage
+from fplopt.features.store import AsOfView
+from fplopt.models import MODELS
+from fplopt.seasons import HOLDOUT_SEASONS
+
+def decide(view: AsOfView) -> pd.DataFrame:
+    return player_pool(view)
+"""
+    for name in ("policies.py", "start_states.py"):
+        assert violations(source, BACKTEST_DIR / name, BACKTEST_TARGET) == []
+    probes = source + "\nPROBES = {'p': decide}\n"
+    assert violations(probes, BACKTEST_DIR / "probes.py", BACKTEST_TARGET) == []
+    assert violations(probes, BACKTEST_DIR / "policies.py", BACKTEST_TARGET) == [
+        "module-level PROBES is mutable"
+    ]
+
+
+@pytest.mark.parametrize("name", ["policies.py", "start_states.py", "probes.py"])
+def test_the_scanner_catches_a_backtest_module_bypass(name):
+    source = """
+from pathlib import Path
+from fplopt.backtest.simulator import simulate
+from fplopt.backtest import simulator
+from fplopt.backtest.evaluate import paired
+from fplopt.features.store import AsOfView, DataStore
+from fplopt.features import leakcheck
+from fplopt.features.leakcheck import load_tables
+from fplopt.build.tables import TABLES
+from functools import lru_cache
+import fplopt.cli
+
+SEEN = {}
+
+def decide(ctx):
+    a = pd.read_parquet("data/player_match.parquet")
+    b = ctx.view._store._frames["player_match"]
+    c = getattr(ctx.view, "_store")
+    d = fplopt.features.store.DataStore("data")
+    SEEN[ctx.view.deadline] = a
+    return a
+"""
+    found = violations(source, BACKTEST_DIR / name, BACKTEST_TARGET)
+    expected = [
+        "imports pathlib",
+        "imports fplopt.backtest.simulator",
+        "imports simulator from fplopt.backtest",
+        "imports fplopt.backtest.evaluate",
+        "imports DataStore from fplopt.features.store",
+        "imports leakcheck from fplopt.features",
+        "imports fplopt.features.leakcheck",
+        "imports fplopt.build.tables",
+        "imports functools",
+        "imports fplopt.cli",
+        "module-level SEEN is mutable",
+        "calls .read_parquet()",
+        "accesses private attribute ._store",
+        "accesses private attribute ._frames",
+        "calls getattr()",
+        "accesses fplopt.features.store",
+        "mutates module-level SEEN",
+    ]
+    assert sorted(found) == sorted(expected)
+
+
+def test_probes_take_exactly_the_view():
+    from fplopt.backtest.probes import PROBES
+
+    assert list(PROBES) == [
+        "greedy_rolling_random0",
+        "greedy_ep_next_template",
+        "roll_rolling_template",
+    ]
+    for name, probe in PROBES.items():
+        parameters = list(inspect.signature(probe).parameters.values())
+        assert len(parameters) == 1, name
+        assert parameters[0].annotation in ("AsOfView", fplopt.features.AsOfView), name
+        assert probe.__module__ == "fplopt.backtest.probes", name
