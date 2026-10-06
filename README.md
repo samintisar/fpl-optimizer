@@ -36,7 +36,7 @@ Put these in a local `.env` (gitignored) or set them as env vars on the server:
 src/fplopt/
   adapters/   one module per data source (fpl, odds, football_data, vaastav, fplcache)
   ingest/     raw snapshot writers (daily/tick jobs), one-off historical backfills
-  build/      raw -> Parquet tables, ID mapping
+  build/      raw -> Parquet tables (`fplopt build all`), ID mapping, rules export
   features/   point-in-time feature builders (all take a deadline)
   models/     team, shares, minutes, bonus, defcon, assemble_xp
   optimize/   MILP formulation, chips, top-k plans
@@ -44,7 +44,7 @@ src/fplopt/
   bot/        Telegram handlers, alerts, user state
 notebooks/    exploration
 tests/        incl. leakage tests
-config/       scoring rules per season, overrides.csv, settings
+config/       scoring rules per season, teams.csv (club names per source), overrides.csv
 raw/          (gitignored) immutable gzipped API snapshots
 data/         (gitignored) Parquet tables, SQLite user state
 ```
@@ -61,7 +61,7 @@ data/         (gitignored) Parquet tables, SQLite user state
 | # | Phase | Status |
 |---|---|---|
 | 0 | Snapshot archiver | done, running on the server |
-| 1 | Backfill + ID mapping + Parquet tables | in progress: 1a (raw backfills) built, server run pending; 1b (Parquet tables) next |
+| 1 | Backfill + ID mapping + Parquet tables | done: raw backfills on the server; `fplopt build all` builds every table |
 | 2 | `as_of` layer + leakage tests | |
 | 3 | Backtester + baselines + greedy policy | |
 | 4 | Optimizer | |

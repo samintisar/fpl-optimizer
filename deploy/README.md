@@ -145,3 +145,5 @@ ssh fplopt-server 'tar -C fpl-optimizer -cf - raw' | tar -C . -xf -
 ```
 
 Expect over 1 GB, mostly fplcache. Files that already exist locally are overwritten with identical content, since raw files never change.
+
+Then build the Parquet tables locally with `uv run fplopt build all` (~1.5 min, ~35 MB in `data/`). The server doesn't need `data/` yet.

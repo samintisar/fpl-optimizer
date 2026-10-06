@@ -74,6 +74,19 @@ def test_backfill_football_data_fetches_every_season_in_order(tmp_path):
         assert RawStore.read_bytes(path) == csv_for(year)
 
 
+def test_backfill_football_data_from_an_earlier_season(tmp_path):
+    store = RawStore(tmp_path)
+    fd = FakeFootballData()
+    sleeps = []
+    assert (
+        backfill_football_data(store, fd, Clock(NOW), sleep=sleeps.append, first_season=2005) == 22
+    )
+    assert fd.seasons == list(range(2005, 2027))
+    assert len(sleeps) == 21
+    path = store.latest("football-data", "E0/0506", suffix=".csv.gz")
+    assert RawStore.read_bytes(path) == csv_for(2005)
+
+
 def test_backfill_football_data_continues_past_a_failing_season(tmp_path):
     store = RawStore(tmp_path)
     fd = FakeFootballData(fail={2018})

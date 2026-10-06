@@ -1,9 +1,10 @@
 """Command-line entry point.
 
 `fplopt snapshot daily|tick` (archiver timers), `fplopt backfill element-summary|football-data|
-vaastav|fplcache` (one-off backfills into raw/), `fplopt rules export SEASON [--out DIR]`
-(config/scoring/<season>.json from an archived bootstrap). Every job gets a `Context`;
-failures are logged and alerted to Telegram, and the exit code is 1.
+vaastav|fplcache` (one-off backfills into raw/; football-data takes `--from-season YEAR`),
+`fplopt rules export SEASON [--out DIR]` (config/scoring/<season>.json from an archived
+bootstrap), `fplopt build TABLE|all` (raw/ -> data/<table>.parquet; no network). Every job
+gets a `Context`; failures are logged and alerted to Telegram, and the exit code is 1.
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ from fplopt.adapters.http import make_client
 from fplopt.adapters.odds import OddsClient
 from fplopt.adapters.vaastav import VaastavClient
 from fplopt.alerts import send_admin_alert
-from fplopt.build import rules
 from fplopt.ingest import history, jobs
 from fplopt.ingest.raw_store import RawStore
 from fplopt.redact import redact
@@ -60,6 +60,24 @@ class Context:
 
 Job = Callable[[Context], object]
 
+
+# The build layer pulls in pandas and pandera (~2 s to import), which the archiver jobs that
+# run every 15 minutes don't need, so it is imported only by the jobs that use it.
+def _rules_export(c: Context) -> object:
+    from fplopt.build import rules
+
+    # The season label is parsed inside the job, so a bad label is alerted like any failure.
+    return rules.export_rules(c.store, parse_season_label(c.args.season), Path(c.args.out))
+
+
+def _build(c: Context) -> object:
+    from fplopt.build import build
+    from fplopt.build.common import BuildContext
+
+    # Unknown table names fail inside the job, so they are logged and alerted (exit 1).
+    return build([c.args.target], BuildContext(c.store, c.settings.data_dir))
+
+
 JOBS: dict[str, Job] = {
     "snapshot daily": lambda c: jobs.run_daily(
         c.store, c.fpl, c.odds, football_data=FootballDataClient(c.http)
@@ -67,14 +85,12 @@ JOBS: dict[str, Job] = {
     "snapshot tick": lambda c: jobs.run_tick(c.store, c.fpl, c.odds),
     "backfill element-summary": lambda c: jobs.backfill_element_summaries(c.store, c.fpl),
     "backfill football-data": lambda c: history.backfill_football_data(
-        c.store, FootballDataClient(c.http)
+        c.store, FootballDataClient(c.http), first_season=c.args.from_season
     ),
     "backfill vaastav": lambda c: history.backfill_vaastav(c.store, VaastavClient(c.http)),
     "backfill fplcache": lambda c: history.backfill_fplcache(c.store, FplcacheClient(c.http)),
-    # The season label is parsed inside the job, so a bad label is alerted like any failure.
-    "rules export": lambda c: rules.export_rules(
-        c.store, parse_season_label(c.args.season), Path(c.args.out)
-    ),
+    "rules export": _rules_export,
+    "build": _build,
 }
 
 
@@ -87,13 +103,29 @@ def build_parser() -> argparse.ArgumentParser:
     backfill.add_argument(
         "command", choices=["element-summary", "football-data", "vaastav", "fplcache"]
     )
+    backfill.add_argument(
+        "--from-season",
+        type=int,
+        default=history.FIRST_SEASON,
+        metavar="YEAR",
+        help=f"football-data only: first season's start year (default {history.FIRST_SEASON})",
+    )
     rules_group = groups.add_parser("rules", help="per-season rules config")
     rules_group.add_argument("command", choices=["export"])
     rules_group.add_argument("season", help="season label, e.g. 2026-27")
     rules_group.add_argument(
         "--out", default="config/scoring", help="output directory (default: config/scoring)"
     )
+    build_group = groups.add_parser("build", help="build data/<table>.parquet from raw/")
+    build_group.add_argument("target", help="table name, or 'all'")
     return parser
+
+
+def job_name(args: argparse.Namespace) -> str:
+    """The JOBS key for parsed arguments: '<group> <command>', or just '<group>' for groups
+    without a command (build)."""
+    command = getattr(args, "command", None)
+    return f"{args.group} {command}" if command else args.group
 
 
 def configure_logging() -> None:
@@ -128,7 +160,7 @@ def _sigterm_raises_system_exit() -> Iterator[None]:
 
 def main(argv: Sequence[str] | None = None, settings: Settings | None = None) -> int:
     args = build_parser().parse_args(argv)
-    job_name = f"{args.group} {args.command}"
+    name = job_name(args)
     if settings is None:
         load_dotenv(Path.cwd() / ".env")
         settings = Settings.from_env()
@@ -137,24 +169,23 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
         log.warning(
             "TELEGRAM_BOT_TOKEN/TELEGRAM_ADMIN_CHAT_ID not set: failures will not be alerted"
         )
-    log.info("job %r starting (raw dir %s)", job_name, settings.raw_dir)
+    log.info("job %r starting (raw dir %s)", name, settings.raw_dir)
     try:
         store = RawStore(settings.raw_dir)
         with make_client() as http, _sigterm_raises_system_exit():
-            JOBS[job_name](Context(store=store, http=http, settings=settings, args=args))
+            JOBS[name](Context(store=store, http=http, settings=settings, args=args))
     except Exception as exc:
-        log.exception("job %r failed", job_name)
+        log.exception("job %r failed", name)
         summary = str(exc).splitlines()[0] if str(exc) else ""
         send_admin_alert(
             redact(
-                f"fplopt {job_name} failed on {socket.gethostname()}: "
-                f"{type(exc).__name__}: {summary}"
+                f"fplopt {name} failed on {socket.gethostname()}: {type(exc).__name__}: {summary}"
             ),
             token=settings.telegram_bot_token,
             chat_id=settings.telegram_admin_chat_id,
         )
         return 1
-    log.info("job %r done", job_name)
+    log.info("job %r done", name)
     return 0
 
 

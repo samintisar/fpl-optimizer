@@ -96,26 +96,32 @@ fpl-optimizer/
   - **GW lockdown:** 09:00 UK the day after the GW's last match.
 
 ### Tables (Parquet)
-- `player_dim` — stable `player_key` ↔ FPL id per season ↔ Understat id ↔ `opta_code`. **FPL ids reset every season; never use them as keys.**
-- `team_dim` — name mappings across sources.
+- `player_dim` — stable `player_key` (= FPL player `code`, stable across seasons; `opta_code` = `"p"+code`) ↔ Understat id; identity only (names), static (`available_at` = epoch), so no first/last season. **FPL ids reset every season; never use them as keys.**
+- `player_season` — per player and season: FPL id (`element_id`), position, names; no club (per-match club in `player_match`, as-of club in `player_snapshot`). `available_at` = deadline of the GW of the player's first `player_match` row that season.
+- `team_dim` — `team_key` (= FPL team `code`, stable across seasons; synthetic codes ≥ 1000 for clubs never in FPL's era, needed for Elo burn-in) ↔ names in every source, from the hand-maintained `config/teams.csv`.
+- `fixture` — every EPL match: season, FPL fixture id and GW, kickoff (from FPL), teams, result; football-data and Understat match ids.
+- `gameweek` — per season and GW: deadline (from bootstrap snapshots; 2016/17–2019/20 approximated as first kickoff − 90 min and flagged), lockdown time.
+- `gameweek_result` — per season and GW outcomes known at lockdown (`available_at` = lockdown): `average_entry_score`.
 - `player_snapshot` — price, position, status, chance_of_playing, news, ownership, `ep_next`, penalty / set-piece order, `team_join_date` per snapshot time.
-- `fixture_snapshot` — the fixture list as it looked at each snapshot.
+- `fixture_snapshot` — the fixture list as it looked at each snapshot. **Only from our own archive (2026-10-05 on):** fplcache has bootstrap only, so earlier seasons have just the final fixture list — the as-of blank/double leak (§4) cannot be fully avoided historically.
 - `player_match` — minutes, starts, goals, assists, CS, saves, cards, BPS, bonus, CBIT/recoveries (where available), npxG, xA, penalties.
-- `team_match` — team xG for/against, goals.
-- `team_rating` — our Elo ratings from football-data results, per date.
-- `odds_snapshot` — fixture, market, outcome, price, snapshot time.
+- `team_match` — per fixture and side: goals, Understat xG/npxG (`us_*`), football-data xG (`fd_*`, 2026/27), summed FPL xG (`fpl_*`, 2022/23 GW16+; FPL published zeros before GW16, stored as null).
+- `understat_map` / `understat_player_match` — Understat id ↔ `player_key` (matched on per-fixture minutes + names; 100% agreement with vaastav's `id_dict` for 2021/22–2022/23) and the per-match Understat rows behind `player_match.us_*`.
+- `team_rating` — our Elo ratings from football-data results, per date. Burn-in from 2005/06 (football-data E0 backfilled back to 2005/06 for this only); promoted clubs enter at the mean rating of the clubs they replace.
+- `odds_snapshot` — long format: fixture, source, bookmaker (`avg`/`pinnacle`/`betfair_ex` from football-data; Odds API bookmaker keys), market (`h2h`/`totals` 2.5/`ah`), outcome, line, price, `is_closing`, snapshot time. football-data pre-match odds get `available_at` = the Friday (weekend) / Tuesday (midweek) 15:00 UK collection time, capped at kickoff − 1h; closing odds `available_at` = kickoff.
 
 User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, chips remaining, per GW), `user_overrides`, `user_settings`.
 
 ### Backfill rules
 - Backfill from 2016/17. Snapshot-derived fields (status flags, news, ownership, `ep_next`, set-piece orders) exist from 2021/22 via fplcache; earlier seasons lack them.
-- Store raw stat components and **re-score every season under the current season's rules** (scoring config per season in `config/`). Exception: seasons before 2025/26 have no CBIT/recoveries data in our sources, so they are re-scored **without** defensive-contribution points.
+- Store raw stat components and **re-score every season under the current season's rules** (scoring config per season in `config/`). Exception: 2019/20–2024/25 have no CBIT/recoveries data in our sources, so they are re-scored **without** defensive-contribution points. 2016/17–2018/19 vaastav files *do* carry `clearances_blocks_interceptions`, `recoveries`, `tackles` (FPL's old detailed stats) — **VERIFY** the definitions match 2025/26+ before scoring defcon for those seasons (if they do, they could also set the defcon prior without FPL-Core-Insights, issue #14).
 - **xG coverage** (no direct Understat — see §12):
-  - Player npxG/xA: Understat mirror, complete 2021/22–2024/25, partial before (players active in 2021/22+). From 2025/26: FPL's own `expected_goals` / `expected_assists` (Opta, in vaastav and our `element-summary` archive; available 2022/23+, so it overlaps the mirror for calibration). FPL xG includes penalties; npxG for 2025/26+ subtracts penalty xG using penalty attempts inferred from takers — approximate, **VERIFY** against the 2022/23–2024/25 overlap.
-  - Team xG: Understat mirror 2019/20–2024/25, football-data `HxG`/`AxG` 2026/27, summed FPL player xG otherwise. 2016/17–2018/19: goals only.
+  - Player npxG/xA: Understat mirror. Share of FPL minutes covered: 2016/17 47%, 2017/18 62%, 2018/19 75%, 2019/20 91%, 2020/21–2023/24 100%, 2024/25 80% (the mirror stops at 2025-04-07). From 2025/26: FPL's own `expected_goals` / `expected_assists` (Opta, in vaastav and our `element-summary` archive; available from 2022/23 GW16, so it overlaps the mirror for calibration). FPL xG includes penalties; npxG for 2025/26+ subtracts penalty xG using penalty attempts inferred from takers — approximate, **VERIFY** against the 2022/23–2024/25 overlap.
+  - Team xG: Understat mirror 2019/20–2024/25 (2024/25 only to 2025-04-07), football-data `HxG`/`AxG` 2026/27, summed FPL player xG (2022/23 GW16+) otherwise. 2016/17–2018/19: goals only.
+  - Derived tables keep each source in its own columns (e.g. `us_npxg`, `fpl_xg`); blending is a modelling decision (Phase 5).
 - Weight older seasons lower in training rather than dropping them.
-- Handle quirks: 2019/20 COVID GWs (numbered 39–47), postponed GWs (e.g. 2022/23).
-- `available_at` for GW outcomes: from 2026/27, the official lockdown. Earlier seasons: kickoff + fixed delay (approximate). Snapshots (ours and fplcache) are exact to their timestamp.
+- Handle quirks: 2019/20 COVID GWs (numbered 39–47; vaastav also has phantom GW29 copies of the rescheduled fixture), 2022/23 has no GW7, duplicated rows (2025/26), 2024/25 assistant managers (`element_type` 5 / position `AM` — dropped), player names that change mid-season (key on ids, never names), Understat files that include other leagues and stale previous-season team files.
+- `available_at` for GW outcomes: the GW lockdown — 09:00 UK the day after the GW's last kickoff (official from 2026/27; the same rule applied to earlier seasons as an approximation). Snapshots (ours and fplcache) are exact to their timestamp.
 
 ### ID mapping
 - Fuzzy match with `rapidfuzz` + hand-maintained `config/overrides.csv`.

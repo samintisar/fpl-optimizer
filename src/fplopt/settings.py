@@ -14,6 +14,7 @@ class Settings:
     odds_api_key: str | None
     telegram_bot_token: str | None
     telegram_admin_chat_id: str | None
+    data_dir: Path = Path("data")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -23,6 +24,7 @@ class Settings:
             odds_api_key=_get(env, "ODDS_API_KEY"),
             telegram_bot_token=_get(env, "TELEGRAM_BOT_TOKEN"),
             telegram_admin_chat_id=_get(env, "TELEGRAM_ADMIN_CHAT_ID"),
+            data_dir=Path(_get(env, "FPLOPT_DATA_DIR") or "data").expanduser().resolve(),
         )
 
 
