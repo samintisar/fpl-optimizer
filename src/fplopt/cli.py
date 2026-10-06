@@ -5,7 +5,9 @@ vaastav|fplcache` (one-off backfills into raw/; football-data takes `--from-seas
 `fplopt rules export SEASON [--out DIR]` (config/scoring/<season>.json from an archived
 bootstrap), `fplopt build TABLE|all` (raw/ -> data/<table>.parquet; no network),
 `fplopt check freshness [--max-age-hours H]` (fails if the newest bootstrap snapshot is
-missing or older than H hours, default 36: a dead-man's switch for the timers). Every job
+missing or older than H hours, default 36: a dead-man's switch for the timers),
+`fplopt check leakage [--deadlines N] [--seed S]` (the corrupt-the-future check of every
+registered feature on data/ at N sampled deadlines, default 12, outside the holdout). Every job
 gets a `Context`; failures are logged and alerted to Telegram, and the exit code is 1.
 After a successful `snapshot daily|tick`, HEALTHCHECK_PING_URL (if set) gets a best-effort
 GET, for an external dead-man's switch that also notices the server being down.
@@ -87,6 +89,12 @@ def _build(c: Context) -> object:
     return build([c.args.target], BuildContext(c.store, c.settings.data_dir))
 
 
+def _check_leakage(c: Context) -> object:
+    from fplopt.features.leakcheck import run_leakage_check
+
+    return run_leakage_check(c.settings.data_dir, c.args.deadlines, c.args.seed)
+
+
 JOBS: dict[str, Job] = {
     "snapshot daily": lambda c: jobs.run_daily(
         c.store, c.fpl, c.odds, football_data=FootballDataClient(c.http)
@@ -103,6 +111,7 @@ JOBS: dict[str, Job] = {
     "check freshness": lambda c: health.check_freshness(
         c.store, jobs.utc_now(), timedelta(hours=c.args.max_age_hours)
     ),
+    "check leakage": _check_leakage,
 }
 
 
@@ -130,14 +139,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build_group = groups.add_parser("build", help="build data/<table>.parquet from raw/")
     build_group.add_argument("target", help="table name, or 'all'")
-    check = groups.add_parser("check", help="archive health checks")
-    check.add_argument("command", choices=["freshness"])
+    check = groups.add_parser("check", help="archive health and leakage checks")
+    check.add_argument("command", choices=["freshness", "leakage"])
     check.add_argument(
         "--max-age-hours",
         type=float,
         default=health.DEFAULT_MAX_AGE.total_seconds() / 3600,
         metavar="H",
         help="fail if the newest bootstrap snapshot is older than this (default 36)",
+    )
+    check.add_argument(
+        "--deadlines",
+        type=int,
+        default=12,
+        metavar="N",
+        help="leakage only: number of GW deadlines to check (default 12)",
+    )
+    check.add_argument(
+        "--seed", type=int, default=0, metavar="S", help="leakage only: corruption seed"
     )
     return parser
 

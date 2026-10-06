@@ -268,6 +268,49 @@ def test_check_freshness_on_an_empty_archive_alerts_and_returns_one(tmp_path, mo
     assert "StaleArchiveError" in alerts[0]
 
 
+def test_check_leakage_passes_data_dir_deadlines_and_seed(tmp_path, monkeypatch):
+    from fplopt.features import leakcheck
+
+    seen = []
+    monkeypatch.setattr(
+        leakcheck, "run_leakage_check", lambda data_dir, n, seed: seen.append((data_dir, n, seed))
+    )
+    settings = replace(make_settings(tmp_path), data_dir=tmp_path / "data")
+    assert cli.main(["check", "leakage"], settings=settings) == 0
+    assert cli.main(["check", "leakage", "--deadlines", "3", "--seed", "7"], settings=settings) == 0
+    assert seen == [(tmp_path / "data", 12, 0), (tmp_path / "data", 3, 7)]
+
+
+def test_check_leakage_failure_alerts_and_returns_one(tmp_path, monkeypatch):
+    from fplopt.features import leakcheck
+
+    def leaky(data_dir, n, seed):
+        raise leakcheck.LeakageError("2 leak(s) in 1 feature(s) at 1 deadline(s); first: ...")
+
+    alerts = []
+    monkeypatch.setattr(leakcheck, "run_leakage_check", leaky)
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    assert cli.main(["check", "leakage"], settings=make_settings(tmp_path)) == 1
+    assert "check leakage failed" in alerts[0] and "LeakageError: 2 leak(s)" in alerts[0]
+
+
+def test_check_leakage_end_to_end_on_synthetic_tables(tmp_path, built, caplog, monkeypatch):
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    for name, df in built.items():
+        df.to_parquet(data_dir / f"{name}.parquet")
+    settings = replace(make_settings(tmp_path), data_dir=data_dir)
+    with caplog.at_level(logging.INFO):
+        assert cli.main(["check", "leakage", "--deadlines", "3"], settings=settings) == 0
+    assert "leakage check passed: 3 deadline(s)" in caplog.text
+    # A missing table fails the job.
+    (data_dir / "player_match.parquet").unlink()
+    assert cli.main(["check", "leakage"], settings=settings) == 1
+    assert len(alerts) == 1 and "player_match" in alerts[0]
+
+
 @pytest.fixture
 def heartbeats(monkeypatch):
     sent = []
