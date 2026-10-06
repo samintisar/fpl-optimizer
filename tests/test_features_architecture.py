@@ -1,46 +1,67 @@
-"""The single access path (PLAN §4), enforced statically: feature modules read data only
-through the `AsOfView` they are given, and keep no state between calls. `store.py` (the
-reader) and `leakcheck.py` (the harness, which loads and corrupts whole tables) are the only
-exceptions; every other module under `fplopt/features/` (subpackages included) is scanned.
+"""The single access path (PLAN §4), enforced statically: code that computes decision inputs
+(feature builders, xP models; later the backtest policies) reads data only through the
+`AsOfView` it is given, and keeps no state between calls.
 
-Rules (`violations`):
-- imports: an allowlist of pure modules (`ALLOWED_MODULES`), `AsOfView` from
-  `fplopt.features.store` and sibling feature modules; nothing else (no `DataStore`, no
-  `leakcheck`, no other fplopt module, no I/O library);
+What is scanned is configured in `TARGETS`, one `ScanTarget` per package (or per listed files
+of a package):
+- `fplopt/features/`: every module (subpackages included) except `store.py` (the reader) and
+  `leakcheck.py` (the harness, which loads and corrupts whole tables); registry `FEATURES`;
+- `fplopt/models/`: every module; may also import the scanned feature modules (and the
+  `fplopt.features` package); registry `MODELS`.
+A later scanned package adds an entry (e.g. `fplopt.backtest` with
+`files=("policies.py", "start_states.py", "probes.py")`, trusting the features and models
+targets, `extra_modules` for the pure backtest modules it uses and `registries` for its
+registry).
+
+Rules (`violations`, the same for every target):
+- imports: an allowlist of pure modules (`PURE_MODULES`), the target's sibling modules,
+  the modules scanned under its trusted targets, its `extra_modules`, and from `restricted`
+  modules only the listed names (from `fplopt.features.store` only `AsOfView`); nothing else
+  (no `DataStore`, no `leakcheck`, no other fplopt module, no I/O library). Importing a
+  submodule by name (`from fplopt.features import leakcheck`) counts as importing it, and
+  so does reaching it through a package name (`fplopt.features.store.DataStore` after
+  `import fplopt.features.baseline`);
 - no dynamic access: `getattr`/`setattr`/`delattr`/`vars`/`globals`/`locals`/`__import__`/
   `eval`/`exec`/`compile`/`open` calls, dunder attributes that reach into objects or
   modules (`__dict__`, `__globals__`, ...), private attributes (`view._store`);
 - no pandas file readers/writers (`read_*`, `to_parquet`, ...);
 - no state between calls: no `global`/`nonlocal`, no cache decorators, module-level values
-  only immutable (constants, tuples, frozensets, a few immutable constructors; the `FEATURES`
-  registry in `__init__` excepted), and no function mutates a module-level name.
+  only immutable (constants, tuples, frozensets, a few immutable constructors; the target's
+  `registries` excepted), and no function mutates a module-level name.
 """
 
 import ast
 import inspect
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
+import fplopt
 import fplopt.features
+import fplopt.models
 from fplopt.features import FEATURES
+from fplopt.models import MODELS
 
+SRC_DIR = Path(fplopt.__file__).parent.parent
 FEATURES_DIR = Path(fplopt.features.__file__).parent
-PACKAGE = "fplopt.features"
-EXEMPT = {FEATURES_DIR / "store.py", FEATURES_DIR / "leakcheck.py"}
-ALLOWED_MODULES = {
-    "__future__",
-    "collections",
-    "collections.abc",
-    "dataclasses",
-    "logging",  # warnings about incomplete inputs (player_pool); output only
-    "math",
-    "numpy",
-    "pandas",
-    "typing",
-}
-# Names a feature module may import from the store: the view type, nothing that reads files.
-STORE_NAMES = {"AsOfView"}
+MODELS_DIR = Path(fplopt.models.__file__).parent
+PURE_MODULES = frozenset(
+    {
+        "__future__",
+        "collections",
+        "collections.abc",
+        "dataclasses",
+        "logging",  # warnings about incomplete inputs (player_pool); output only
+        "math",
+        "numpy",
+        "pandas",
+        "typing",
+    }
+)
+# Names a scanned module may import from the store: the view type, nothing that reads files.
+STORE_NAMES = frozenset({"AsOfView"})
 FORBIDDEN_CALLS = {
     "open",
     "eval",
@@ -107,23 +128,83 @@ MUTATORS = {
     "__setitem__",
     "__delitem__",
 }
-# Module-level containers allowed per file (path relative to fplopt/features): the registry.
-MUTABLE_ALLOWED = {"__init__.py": {"FEATURES"}}
+
+
+@dataclass(frozen=True)
+class ScanTarget:
+    """A package (or some of its files) held to the rules above."""
+
+    package: str  # dotted, e.g. "fplopt.features"
+    files: tuple[str, ...] | None = None  # paths relative to the package; None = every module
+    exempt: frozenset[str] = frozenset()  # relative paths not scanned (files=None only)
+    trusted: tuple["ScanTarget", ...] = ()  # their scanned modules are importable
+    extra_modules: frozenset[str] = frozenset()  # further importable modules
+    restricted: Mapping[str, frozenset[str]] = field(default_factory=dict)  # module -> names
+    registries: Mapping[str, frozenset[str]] = field(default_factory=dict)  # file -> names
+    root: Path | None = None  # default: the package's directory under src/
+
+    @property
+    def directory(self) -> Path:
+        return self.root if self.root is not None else SRC_DIR.joinpath(*self.package.split("."))
+
+
+FEATURES_TARGET = ScanTarget(
+    package="fplopt.features",
+    exempt=frozenset({"store.py", "leakcheck.py"}),
+    restricted={"fplopt.features.store": STORE_NAMES},
+    registries={"__init__.py": frozenset({"FEATURES"})},
+)
+MODELS_TARGET = ScanTarget(
+    package="fplopt.models",
+    trusted=(FEATURES_TARGET,),
+    restricted={"fplopt.features.store": STORE_NAMES},
+    registries={"__init__.py": frozenset({"MODELS"})},
+)
+TARGETS = (FEATURES_TARGET, MODELS_TARGET)
+
+
+def scanned_files(target: ScanTarget) -> list[Path]:
+    directory = target.directory
+    if target.files is not None:
+        return sorted(directory / name for name in target.files)
+    exempt = {directory / name for name in target.exempt}
+    return sorted(p for p in directory.rglob("*.py") if p not in exempt)
+
+
+def module_name(path: Path, target: ScanTarget = FEATURES_TARGET) -> str:
+    parts = list(path.relative_to(target.directory).with_suffix("").parts)
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join([target.package, *parts])
+
+
+def scanned_modules(target: ScanTarget) -> set[str]:
+    return {module_name(p, target) for p in scanned_files(target)}
+
+
+def sibling_modules(target: ScanTarget = FEATURES_TARGET) -> set[str]:
+    return scanned_modules(target) - {target.package}
+
+
+def allowed_modules(target: ScanTarget) -> set[str]:
+    """Modules a scanned module of `target` may import whole (any name from them)."""
+    allowed = set(PURE_MODULES) | set(target.extra_modules) | sibling_modules(target)
+    for trusted in target.trusted:
+        allowed |= scanned_modules(trusted)
+    return allowed
+
+
+def known_modules() -> set[str]:
+    """Every module of the fplopt package (to tell submodules from other imported names)."""
+    out = set()
+    for path in (SRC_DIR / "fplopt").rglob("*.py"):
+        parts = list(path.relative_to(SRC_DIR).with_suffix("").parts)
+        out.add(".".join(parts[:-1] if parts[-1] == "__init__" else parts))
+    return out
 
 
 def feature_modules() -> list[Path]:
-    return sorted(p for p in FEATURES_DIR.rglob("*.py") if p not in EXEMPT)
-
-
-def module_name(path: Path) -> str:
-    parts = list(path.relative_to(FEATURES_DIR).with_suffix("").parts)
-    if parts[-1] == "__init__":
-        parts = parts[:-1]
-    return ".".join([PACKAGE, *parts])
-
-
-def sibling_modules() -> set[str]:
-    return {module_name(p) for p in feature_modules()} - {PACKAGE}
+    return scanned_files(FEATURES_TARGET)
 
 
 def _dotted(node: ast.AST) -> str:
@@ -145,29 +226,40 @@ def _resolve(node: ast.ImportFrom, module: str, is_package: bool) -> str:
     return ".".join([*base, *([node.module] if node.module else [])])
 
 
-def _import_violations(tree: ast.AST, module: str, is_package: bool) -> list[str]:
-    siblings = sibling_modules()
+def _import_violations(
+    tree: ast.AST, module: str, is_package: bool, target: ScanTarget
+) -> list[str]:
+    allowed = allowed_modules(target)
+    siblings = sibling_modules(target)
+    modules = known_modules() | siblings
     found = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name not in ALLOWED_MODULES:
+                if alias.name not in allowed:
                     found.append(f"imports {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             source = _resolve(node, module, is_package)
             names = [alias.name for alias in node.names]
             found += [f"imports {name}" for name in names if name.startswith(FILE_METHODS)]
-            if source in ALLOWED_MODULES or source in siblings:
-                continue
-            if source == f"{PACKAGE}.store":
-                found += [
-                    f"imports {name} from {source}" for name in names if name not in STORE_NAMES
-                ]
-            elif source == PACKAGE:
+            if source in allowed:
+                # A submodule imported by name is an import of that module.
                 found += [
                     f"imports {name} from {source}"
                     for name in names
-                    if f"{PACKAGE}.{name}" not in siblings
+                    if f"{source}.{name}" in modules and f"{source}.{name}" not in allowed
+                ]
+            elif source in target.restricted:
+                found += [
+                    f"imports {name} from {source}"
+                    for name in names
+                    if name not in target.restricted[source]
+                ]
+            elif source == target.package:
+                found += [
+                    f"imports {name} from {source}"
+                    for name in names
+                    if f"{source}.{name}" not in siblings
                 ]
             else:
                 found.append(f"imports {source}")
@@ -206,9 +298,8 @@ def _immutable(node: ast.AST | None) -> bool:
     return False
 
 
-def _state_violations(tree: ast.Module, relative: str) -> list[str]:
+def _state_violations(tree: ast.Module, allowed: set[str]) -> list[str]:
     found = []
-    allowed = MUTABLE_ALLOWED.get(relative, set())
     for node in tree.body:
         if isinstance(node, ast.Assign | ast.AnnAssign | ast.AugAssign):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -254,12 +345,18 @@ def _state_violations(tree: ast.Module, relative: str) -> list[str]:
     return found
 
 
-def violations(source: str, path: Path | None = None) -> list[str]:
-    """What a feature module must not do (see the module docstring). `path` (default: a
-    module directly in fplopt/features) resolves relative imports and per-file exceptions."""
-    path = FEATURES_DIR / "example.py" if path is None else path
+def violations(
+    source: str, path: Path | None = None, target: ScanTarget = FEATURES_TARGET
+) -> list[str]:
+    """What a scanned module of `target` must not do (see the module docstring). `path`
+    (default: a module directly in the target's package) resolves relative imports and
+    per-file exceptions (registries)."""
+    path = target.directory / "example.py" if path is None else path
     tree = ast.parse(source)
-    found = _import_violations(tree, module_name(path), path.name == "__init__.py")
+    module = module_name(path, target)
+    found = _import_violations(tree, module, path.name == "__init__.py", target)
+    allowed = allowed_modules(target)
+    modules = known_modules()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
@@ -268,6 +365,16 @@ def violations(source: str, path: Path | None = None) -> list[str]:
             if isinstance(func, ast.Attribute) and func.attr.startswith(FILE_METHODS):
                 found.append(f"calls .{func.attr}()")
         elif isinstance(node, ast.Attribute):
+            # `import fplopt.features.baseline` binds `fplopt`: no reaching other modules
+            # through it (`fplopt.features.store.DataStore`). Packages on the way to an
+            # allowed module are fine.
+            dotted = _dotted(node)
+            if (
+                dotted in modules
+                and dotted not in allowed
+                and not any(m.startswith(f"{dotted}.") for m in allowed)
+            ):
+                found.append(f"accesses {dotted}")
             if node.attr in FORBIDDEN_DUNDERS:
                 found.append(f"accesses .{node.attr}")
             private = node.attr.startswith("_") and not node.attr.startswith("__")
@@ -275,28 +382,41 @@ def violations(source: str, path: Path | None = None) -> list[str]:
                 found.append(f"accesses private attribute .{node.attr}")
         elif isinstance(node, ast.Name) and node.id in FORBIDDEN_DUNDERS:
             found.append(f"uses {node.id}")
-    found += _state_violations(tree, path.relative_to(FEATURES_DIR).as_posix())
+    relative = path.relative_to(target.directory).as_posix()
+    found += _state_violations(tree, set(target.registries.get(relative, ())))
     return found
 
 
-def test_feature_modules_exist():
+SCANNED = [(target, path) for target in TARGETS for path in scanned_files(target)]
+
+
+def _scan_id(item: tuple[ScanTarget, Path]) -> str:
+    target, path = item
+    return f"{target.package.split('.')[-1]}/{path.relative_to(target.directory).as_posix()}"
+
+
+def test_scanned_modules_exist():
     assert {p.name for p in feature_modules()} >= {"__init__.py", "baseline.py"}
+    assert {p.name for p in scanned_files(MODELS_TARGET)} >= {"__init__.py", "baseline.py"}
+    for target in TARGETS:
+        for path in scanned_files(target):
+            assert path.is_file(), path
 
 
-@pytest.mark.parametrize("path", feature_modules(), ids=lambda p: str(p.relative_to(FEATURES_DIR)))
-def test_feature_modules_read_only_through_the_view(path):
-    assert violations(path.read_text(encoding="utf-8"), path) == []
+@pytest.mark.parametrize("item", SCANNED, ids=[_scan_id(item) for item in SCANNED])
+def test_scanned_modules_read_only_through_the_view(item):
+    target, path = item
+    assert violations(path.read_text(encoding="utf-8"), path, target) == []
 
 
-def test_subpackages_are_scanned(tmp_path, monkeypatch):
+def test_subpackages_are_scanned(tmp_path):
     sub = tmp_path / "extra"
     sub.mkdir()
     (sub / "more.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "store.py").write_text("", encoding="utf-8")
-    monkeypatch.setitem(globals(), "FEATURES_DIR", tmp_path)
-    monkeypatch.setitem(globals(), "EXEMPT", {tmp_path / "store.py"})
-    assert [p.relative_to(tmp_path).as_posix() for p in feature_modules()] == ["extra/more.py"]
-    assert module_name(sub / "more.py") == "fplopt.features.extra.more"
+    target = ScanTarget("fplopt.features", exempt=frozenset({"store.py"}), root=tmp_path)
+    assert [p.relative_to(tmp_path).as_posix() for p in scanned_files(target)] == ["extra/more.py"]
+    assert module_name(sub / "more.py", target) == "fplopt.features.extra.more"
 
 
 def test_the_scanner_catches_each_kind_of_bypass():
@@ -457,3 +577,167 @@ def test_feature_builders_take_exactly_the_view():
         assert len(parameters) == 1, name
         assert parameters[0].annotation in ("AsOfView", fplopt.features.AsOfView), name
         assert builder.__module__.startswith("fplopt.features."), name
+
+
+# --- models ------------------------------------------------------------------------------
+
+
+def test_model_modules_may_use_features_and_the_view():
+    source = """
+import logging
+
+import numpy as np
+import pandas as pd
+
+import fplopt.features.baseline
+from fplopt.features import FEATURES, AsOfView, baseline, compute_features
+from fplopt.features.baseline import HORIZON, player_pool, upcoming_fixtures
+from fplopt.features.store import AsOfView
+from fplopt.models.baseline import xp_rolling
+from .baseline import xp_ep_next
+
+log = logging.getLogger(__name__)
+
+def xp(view: AsOfView) -> pd.DataFrame:
+    matches = view.table("player_match", columns=["player_key", "total_points"])
+    return player_pool(view).merge(matches, on="player_key")
+"""
+    path = MODELS_DIR / "other.py"
+    assert violations(source, path, MODELS_TARGET) == []
+
+
+def test_the_scanner_catches_a_models_module_bypass():
+    source = """
+from pathlib import Path
+import fplopt.features.store
+from fplopt.features.store import AsOfView, DataStore, files_blocked
+from fplopt.features import leakcheck, store
+from fplopt.features.leakcheck import load_tables
+from fplopt.build.tables import TABLES
+from fplopt.backtest import simulator
+from fplopt.models import MODELS
+from ..features.store import DataStore as Store
+from functools import lru_cache
+
+FITTED = {}
+
+def leaky(view):
+    a = pd.read_parquet("data/player_match.parquet")
+    b = view._store._frames["player_match"]
+    c = getattr(view, "_store")
+    FITTED[view.deadline] = a
+    return a
+"""
+    found = violations(source, MODELS_DIR / "baseline.py", MODELS_TARGET)
+    expected = [
+        "imports pathlib",
+        "imports fplopt.features.store",
+        "imports DataStore from fplopt.features.store",
+        "imports files_blocked from fplopt.features.store",
+        "imports leakcheck from fplopt.features",
+        "imports store from fplopt.features",
+        "imports fplopt.features.leakcheck",
+        "imports fplopt.build.tables",
+        "imports fplopt.backtest",
+        "imports MODELS from fplopt.models",
+        "imports DataStore from fplopt.features.store",
+        "imports functools",
+        "module-level FITTED is mutable",
+        "calls .read_parquet()",
+        "accesses private attribute ._store",
+        "accesses private attribute ._frames",
+        "calls getattr()",
+        "mutates module-level FITTED",
+    ]
+    assert sorted(found) == sorted(expected)
+
+
+def test_no_reaching_other_modules_through_an_imported_package_name():
+    source = """
+import fplopt.features.baseline
+
+def sneaky(view):
+    store = fplopt.features.store.DataStore("data")
+    tables = fplopt.build.tables.TABLES
+    return fplopt.features.baseline.player_pool(store.as_of(view.deadline))
+"""
+    expected = [
+        "accesses fplopt.features.store",
+        "accesses fplopt.build.tables",
+        "accesses fplopt.build",
+    ]
+    assert sorted(violations(source, MODELS_DIR / "x.py", MODELS_TARGET)) == sorted(expected)
+    assert sorted(violations(source)) == sorted(expected)  # same in a feature module
+
+
+def test_feature_modules_may_not_import_models():
+    assert violations("from fplopt.models import MODELS\n") == ["imports fplopt.models"]
+    assert violations("import fplopt.models.baseline\n") == ["imports fplopt.models.baseline"]
+
+
+def test_each_target_allows_only_its_own_registry():
+    registry = "from fplopt.models.baseline import xp_rolling\n\nMODELS = {'r': xp_rolling}\n"
+    assert violations(registry, MODELS_DIR / "__init__.py", MODELS_TARGET) == []
+    assert violations(registry, MODELS_DIR / "baseline.py", MODELS_TARGET) == [
+        "module-level MODELS is mutable"
+    ]
+    features = "FEATURES = {}\n"
+    assert violations(features, MODELS_DIR / "__init__.py", MODELS_TARGET) == [
+        "module-level FEATURES is mutable"
+    ]
+
+
+def test_model_builders_take_exactly_the_view():
+    assert list(MODELS) == ["rolling", "ep_next"]
+    for name, model in MODELS.items():
+        parameters = list(inspect.signature(model).parameters.values())
+        assert len(parameters) == 1, name
+        assert parameters[0].annotation in ("AsOfView", fplopt.features.AsOfView), name
+        assert model.__module__.startswith("fplopt.models."), name
+
+
+def test_a_target_of_listed_files_trusting_features_and_models(tmp_path):
+    """How a later package joins the scan (e.g. fplopt/backtest/policies.py): listed files,
+    trusted targets, extra pure modules of its own package and its registry."""
+    (tmp_path / "policies.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "probes.py").write_text("y = 2\n", encoding="utf-8")
+    (tmp_path / "simulator.py").write_text("open('data/x')\n", encoding="utf-8")  # not listed
+    target = ScanTarget(
+        package="fplopt.backtest",
+        files=("policies.py", "probes.py"),
+        trusted=(FEATURES_TARGET, MODELS_TARGET),
+        extra_modules=frozenset({"fplopt.backtest.rules", "fplopt.backtest.state"}),
+        restricted={"fplopt.features.store": STORE_NAMES},
+        registries={"probes.py": frozenset({"PROBES"})},
+        root=tmp_path,
+    )
+    assert [p.name for p in scanned_files(target)] == ["policies.py", "probes.py"]
+    ok = """
+from fplopt.features.baseline import player_pool
+from fplopt.features.store import AsOfView
+from fplopt.models import MODELS
+from fplopt.models.baseline import xp_rolling
+from fplopt.backtest.rules import Rules
+from .state import SquadState
+from .policies import x
+"""
+    assert violations(ok, tmp_path / "policies.py", target) == []
+    probes = ok + "\nPROBES = {'a': x}\n"
+    assert violations(probes, tmp_path / "probes.py", target) == []
+    assert violations(probes, tmp_path / "policies.py", target) == [
+        "module-level PROBES is mutable"
+    ]
+    bad = """
+from fplopt.backtest.simulator import simulate
+from fplopt.backtest import simulator
+from fplopt.features.store import DataStore
+from fplopt.features import leakcheck
+"""
+    assert sorted(violations(bad, tmp_path / "policies.py", target)) == sorted(
+        [
+            "imports fplopt.backtest.simulator",
+            "imports simulator from fplopt.backtest",
+            "imports DataStore from fplopt.features.store",
+            "imports leakcheck from fplopt.features",
+        ]
+    )

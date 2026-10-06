@@ -1,6 +1,6 @@
 """Corrupt-the-future harness (PLAN §4): the harness itself, deliberately leaky builders it
-must catch, the registered features on the synthetic world (CI) and on the real data
-(`-m realdata`)."""
+must catch, the registered features and xP models on the synthetic worlds (CI) and on the
+real data (`-m realdata`)."""
 
 import time
 from pathlib import Path
@@ -8,13 +8,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from synthetic_season import synthetic_tables
 
 from fplopt.build.tables import TABLES
 from fplopt.features import FEATURES
 from fplopt.features.leakcheck import (
     Leak,
     check_leakage,
+    checked_builders,
     corrupt_future,
+    describe_builders,
     edge_deadlines,
     feature_fingerprint,
     load_tables,
@@ -24,6 +27,7 @@ from fplopt.features.leakcheck import (
     variant_order,
 )
 from fplopt.features.store import AsOfView, DataStore, FilesBlockedError, files_blocked
+from fplopt.models import MODELS
 from fplopt.seasons import HOLDOUT_SEASONS
 
 UTC_US = pd.DatetimeTZDtype("us", "UTC")
@@ -334,12 +338,68 @@ SYNTHETIC_DEADLINES = [(2023, 1), (2023, 10), (2024, 38), (2026, 1), (2026, 3), 
 
 
 def test_registered_features_do_not_leak_on_the_synthetic_world(built):
-    """Phase 2 'done when' (CI): every feature is byte-identical on the clean, corrupted
-    and truncated data at deadlines covering GW1, mid-season, the last GW, the player_gw
-    and snapshot pool paths and the as-of snapshot schedule."""
+    """Phase 2 'done when' (CI): every feature (and xP model) is byte-identical on the
+    clean, corrupted and truncated data at deadlines covering GW1, mid-season, the last GW,
+    the player_gw and snapshot pool paths and the as-of snapshot schedule."""
     deadlines = [deadline_of(built, season, gw) for season, gw in SYNTHETIC_DEADLINES]
     for seed in (0, 1):
         assert check_leakage(built, deadlines, seed=seed) == []
+
+
+def test_checked_builders_are_the_features_and_the_models():
+    builders = checked_builders()
+    assert list(builders) == [*FEATURES, *(f"model:{name}" for name in MODELS)]
+    assert builders["model:rolling"] is MODELS["rolling"]
+    assert describe_builders(builders) == f"{len(FEATURES)} feature(s), {len(MODELS)} model(s)"
+    assert describe_builders({"a": 1, "probe:x": 2, "probe:y": 3}) == "1 feature(s), 2 probe(s)"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "gameweeks"),
+    [
+        # Season boundary (rolling reads the previous season), a blank target (ep_next falls
+        # back to form) next to a double, mid-season and the last GW.
+        (
+            {"seasons": (2022, 2023), "blank": (2023, 10, 1), "double": (2023, 11, 4)},
+            [(2022, 38), (2023, 1), (2023, 2), (2023, 10), (2023, 11), (2023, 38)],
+        ),
+        ({"snapshots": False}, [(2023, 1), (2023, 20)]),  # pool from player_gw, ep_next 0
+    ],
+)
+def test_models_do_not_leak_on_the_synthetic_league(kwargs, gameweeks):
+    tables = synthetic_tables(**kwargs)
+    deadlines = [deadline_of(tables, season, gw) for season, gw in gameweeks]
+    builders = {name: b for name, b in checked_builders().items() if name.startswith("model:")}
+    assert check_leakage(tables, deadlines, seed=0, features=builders) == []
+    assert check_leakage(tables, deadlines[:2], seed=1) == []  # default: features + models
+
+
+def leaky_rolling(view: AsOfView) -> pd.DataFrame:
+    """xp_rolling's frame, but the rate from the player's last 5 matches in the whole
+    table (the future included)."""
+    honest = MODELS["rolling"](view)
+    rows = backdoor(view, "player_match").sort_values(["player_key", "kickoff_time"])
+    rate = rows.groupby("player_key")["total_points"].apply(lambda s: s.tail(5).mean())
+    return honest.assign(xp=honest["player_key"].map(rate).fillna(0.0).astype("float64"))
+
+
+def test_the_default_check_catches_a_leaky_model(monkeypatch):
+    tables = synthetic_tables()
+    monkeypatch.setitem(MODELS, "leaky", leaky_rolling)
+    deadlines = [deadline_of(tables, 2023, 10)]
+    leaks = check_leakage(tables, deadlines, seed=0)
+    assert {feature for feature, _ in flagged(leaks)} == {"model:leaky"}
+    assert ("model:leaky", "truncated") in flagged(leaks)
+
+
+def test_run_leakage_check_logs_what_it_checks(tmp_path, built, caplog):
+    for name, df in built.items():
+        df.to_parquet(tmp_path / f"{name}.parquet")
+    with caplog.at_level("INFO", logger="fplopt.features.leakcheck"):
+        deadlines = run_leakage_check(tmp_path, n_deadlines=0)
+    counts = f"{len(FEATURES)} feature(s), {len(MODELS)} model(s)"
+    assert f"{len(deadlines)} deadline(s)" in caplog.text and counts in caplog.text
+    assert f"x {len(FEATURES) + len(MODELS)} builder(s) ({counts})" in caplog.text
 
 
 # --- deadline sampling -------------------------------------------------------------------
