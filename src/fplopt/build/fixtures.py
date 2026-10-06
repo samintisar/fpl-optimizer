@@ -41,6 +41,7 @@ dense rank of `gw` among a season's GWs with fixtures: 2019-20 39–47 -> 30–3
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from datetime import date, datetime
 from pathlib import Path
 
@@ -368,36 +369,77 @@ def _current_season_fixtures(ctx: BuildContext, have: set[int]) -> pd.DataFrame 
     return fixtures_from_api(fixtures, team_codes).assign(season=season)
 
 
-def football_data_results(ctx: BuildContext, resolver: TeamResolver) -> pd.DataFrame:
-    """football-data results (newest file per season, season >= 2016): season, fd_date,
-    home/away team keys, goals."""
+def football_data_files(
+    ctx: BuildContext, first_season: int | None = FIRST_SEASON
+) -> Iterator[tuple[int, Path]]:
+    """(season, newest file) per football-data E0 season folder, oldest first; `first_season`
+    None = every season present (2005/06+ after the Elo backfill). The season comes from the
+    folder code (`0506` -> 2005), never from the July-cutoff rule: the 2019/20 restart ran
+    into July 2020."""
     base = ctx.store.root / "football-data" / "E0"
-    frames = []
     for season_dir in sorted(p for p in base.iterdir() if p.is_dir()) if base.is_dir() else []:
         season = 2000 + int(season_dir.name[:2])
-        if season < FIRST_SEASON:
+        if first_season is not None and season < first_season:
             continue
         path = ctx.store.latest("football-data", f"E0/{season_dir.name}", suffix=".csv.gz")
-        if path is None:
-            continue
-        df = read_raw_csv(path, usecols=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"])
-        df = df.dropna(subset=["Date"])
+        if path is not None:
+            yield season, path
+
+
+def football_data_frames(
+    ctx: BuildContext,
+    resolver: TeamResolver,
+    columns: list[str] | tuple[str, ...] = (),
+    first_season: int | None = FIRST_SEASON,
+) -> pd.DataFrame:
+    """football-data rows of every season (newest file per season): season, fd_date,
+    home/away team keys, plus those of `columns` the season's file has (absent -> missing
+    column for that season, NaN after the concat). Rows without a `Date` are dropped
+    (2014/15 has a trailing empty row)."""
+    keys = ["season", "fd_date", "home_team_key", "away_team_key"]
+    frames = []
+    for season, path in football_data_files(ctx, first_season):
+        df = read_raw_csv(path, usecols=["Date", "HomeTeam", "AwayTeam", *columns])
+        df = df.dropna(subset=["Date"]).reset_index(drop=True)
         frames.append(
-            pd.DataFrame(
-                {
-                    "season": season,
-                    "fd_date": [_fd_date(text) for text in df["Date"]],
-                    "home_team_key": [resolver.football_data(n) for n in df["HomeTeam"]],
-                    "away_team_key": [resolver.football_data(n) for n in df["AwayTeam"]],
-                    "fd_home_goals": df["FTHG"].astype("int64").to_numpy(),
-                    "fd_away_goals": df["FTAG"].astype("int64").to_numpy(),
-                }
+            pd.concat(
+                [
+                    pd.DataFrame(
+                        {
+                            "season": season,
+                            "fd_date": [_fd_date(text) for text in df["Date"]],
+                            "home_team_key": [resolver.football_data(n) for n in df["HomeTeam"]],
+                            "away_team_key": [resolver.football_data(n) for n in df["AwayTeam"]],
+                        }
+                    ),
+                    df[[c for c in columns if c in df.columns]],
+                ],
+                axis=1,
             )
         )
-    columns = ["season", "fd_date", "home_team_key", "away_team_key"]
     if not frames:
+        return pd.DataFrame(columns=keys)
+    out = pd.concat(frames, ignore_index=True)
+    out["season"] = out["season"].astype("int64")
+    return out
+
+
+def football_data_results(
+    ctx: BuildContext, resolver: TeamResolver, first_season: int | None = FIRST_SEASON
+) -> pd.DataFrame:
+    """football-data results (newest file per season, season >= `first_season`; None = all):
+    season, fd_date, home/away team keys, goals."""
+    df = football_data_frames(ctx, resolver, ["FTHG", "FTAG"], first_season)
+    columns = ["season", "fd_date", "home_team_key", "away_team_key"]
+    if df.empty:
         return pd.DataFrame(columns=[*columns, "fd_home_goals", "fd_away_goals"])
-    return pd.concat(frames, ignore_index=True)
+    return pd.DataFrame(
+        {
+            **{c: df[c] for c in columns},
+            "fd_home_goals": df["FTHG"].astype("int64"),
+            "fd_away_goals": df["FTAG"].astype("int64"),
+        }
+    )
 
 
 def _fd_date(text: str) -> date:
