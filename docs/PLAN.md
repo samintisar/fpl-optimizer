@@ -103,7 +103,9 @@ fpl-optimizer/
 - `gameweek` — per season and GW: deadline (from bootstrap snapshots; 2016/17–2019/20 approximated as first kickoff − 90 min and flagged), lockdown time.
 - `gameweek_result` — per season and GW outcomes known at lockdown (`available_at` = lockdown): `average_entry_score`.
 - `player_snapshot` — price, position, status, chance_of_playing, news, ownership, `ep_next`, penalty / set-piece order, `team_join_date` per snapshot time.
+- `schedule` — the final fixture list (no results), available from publication; the fallback as-of schedule before `fixture_snapshot` exists.
 - `fixture_snapshot` — the fixture list as it looked at each snapshot. **Only from our own archive (2026-10-05 on):** fplcache has bootstrap only, so earlier seasons have just the final fixture list — the as-of blank/double leak (§4) cannot be fully avoided historically.
+- `player_gw` — per player and GW: registered club, position, price at the deadline (`available_at` = deadline − 1h). `player_gw_ownership` — `selected`, `transfers_in/out` (`available_at` = deadline). From vaastav 2016/17–2025/26 and our element-summary archive.
 - `player_match` — minutes, starts, goals, assists, CS, saves, cards, BPS, bonus, CBIT/recoveries (where available), npxG, xA, penalties.
 - `team_match` — per fixture and side: goals, Understat xG/npxG (`us_*`), football-data xG (`fd_*`, 2026/27), summed FPL xG (`fpl_*`, 2022/23 GW16+; FPL published zeros before GW16, stored as null).
 - `understat_map` / `understat_player_match` — Understat id ↔ `player_key` (matched on per-fixture minutes + names; 100% agreement with vaastav's `id_dict` for 2021/22–2022/23) and the per-match Understat rows behind `player_match.us_*`.
@@ -135,7 +137,13 @@ User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, c
 
 ## 4. Leakage prevention
 
-- **Single access path:** feature builders take a `deadline` and only read via `as_of(df, deadline)`.
+- **Single access path:** feature builders take a `deadline` and only read via `as_of(df, deadline)` — concretely `DataStore(data_dir).as_of(deadline)`; nothing else in `fplopt.features` reads files (enforced by a test).
+- **`as_of` semantics:**
+  - Keeps rows with `available_at < deadline` (strict); a row available exactly at the deadline is for the next decision.
+  - State fixed before deadline t (price at t, registration/club at t): `available_at = deadline_t − 1h` (prices change overnight).
+  - State that keeps moving until the deadline (ownership after GW t transfers, GW t transfer totals): `available_at = deadline_t`, i.e. visible from deadline t+1.
+  - Schedules (fixture list, GW deadlines): `available_at` = publication, approximated as 1 June of the season's start year. Historically only the final schedule exists (accepted leak, §3); from 2026-10-05 the as-of schedule comes from `fixture_snapshot`.
+  - Results keep the GW lockdown; snapshot tables are read as "newest snapshot before the deadline".
 - **Corrupt-the-future test** (in CI): randomize all data after a deadline, rerun, assert predictions are byte-identical. Requires deterministic models: LightGBM with fixed `seed`, `num_threads=1`, `deterministic=True`; fixed seeds everywhere else; solver with fixed threads and gap-based (not time-based) stopping.
 - Known FPL leaks to guard against:
   - Per-GW outcome fields (minutes, points, bonus) used as same-GW features.
