@@ -28,18 +28,21 @@ the season): only finished fixtures of GWs up to the run's `through_event`.
 - Team: from the fixture (`home_team_key` if `was_home` else `away_team_key`), checked
   against `opponent_team` (season id -> code) and, where present (2020-21+), the `team` name.
   Kickoff, GW and timing come from `fixture`; `available_at` = the GW's lockdown.
-- `starts`: null before 2022-23 (no column) and for 2022-23 GW1–15 (the column is 0 there;
-  the first GW with starts is 16). CBIT/recoveries/tackles where the source has them
-  (2016-17 … 2018-19, 2025-26 →), `defensive_contribution` 2025-26 →, `fpl_x*` (FPL/Opta
-  expected goals / assists / goals conceded) 2022-23 →; null elsewhere.
+- `starts` and `fpl_x*` (FPL/Opta expected goals / assists / goals conceded): from 2022-23
+  GW16 (null before 2022-23: no columns; null for 2022-23 GW1–15, where vaastav has the
+  columns but every value is a 0 placeholder). CBIT/recoveries/tackles where the source has
+  them (2016-17 … 2018-19, 2025-26 →), `defensive_contribution` 2025-26 →; null elsewhere.
 - Understat columns `us_*` are null here; the `understat` builder fills them and rewrites the
   table (so rebuilding player_match alone clears them until `understat` runs again).
 
-Checks: unique (player_key, fixture_key); minutes 0–90 (measured on raw/ 2026-10-06: the
-maximum is 90 in every season, FPL caps minutes); every row's fixture, GW and element are
-known; goal sums: home_goals = Σ home goals_scored + Σ away own_goals (and vice versa) for
-every fixture with player rows — measured 0 mismatches over all 3,850 played fixtures, so
-any mismatch fails the build (`MAX_GOAL_SUM_MISMATCHES = 0`).
+Checks: placeholder zeros — no (season, GW) with goals where every non-null value of an
+optional stat column (`OPTIONAL_STATS`) is 0 (measured on raw/ 2026-10-06: the only such
+blocks are 2022-23 GW1–15, `starts` and `fpl_x*`, nulled above); unique (player_key,
+fixture_key); minutes 0–90 (measured on raw/ 2026-10-06: the maximum is 90 in every season,
+FPL caps minutes); every row's fixture, GW and element are known; goal sums: home_goals =
+Σ home goals_scored + Σ away own_goals (and vice versa) for every fixture with player rows —
+measured 0 mismatches over all 3,850 played fixtures, so any mismatch fails the build
+(`MAX_GOAL_SUM_MISMATCHES = 0`).
 """
 
 from __future__ import annotations
@@ -74,8 +77,9 @@ log = logging.getLogger(__name__)
 
 MANAGER_TYPE = 5
 MAX_MINUTES = 90
-# First GW with a populated `starts` column, for seasons where it exists but starts late.
-STARTS_FIRST_GW = {2022: 16}
+# First GW whose `starts` and FPL expected-stat columns hold data, for seasons where the
+# columns exist but earlier GWs carry 0 placeholders (vaastav 2022-23: GW1–15).
+LATE_COLUMNS_FIRST_GW = {2022: 16}
 MAX_GOAL_SUM_MISMATCHES = 0
 PLAYER_FIELDS = ["id", "code", "first_name", "second_name", "web_name", "team_code"]
 
@@ -289,6 +293,10 @@ UNDERSTAT_COLUMNS = {
     "us_key_passes": "Int64",
 }
 DEFENSIVE = ["clearances_blocks_interceptions", "recoveries", "tackles", "defensive_contribution"]
+# Columns nulled before LATE_COLUMNS_FIRST_GW.
+LATE_COLUMNS = ["starts", *OPTIONAL_FLOATS.values()]
+# Optional stats checked for placeholder-zero blocks (see `placeholder_zero_blocks`).
+OPTIONAL_STATS = ["starts", *DEFENSIVE, *OPTIONAL_FLOATS.values()]
 
 PLAYER_MATCH_COLUMNS = [
     "player_key",
@@ -445,8 +453,9 @@ def assemble_player_match(
     name_codes = named["team_name"].map(lambda name: resolver.find("fpl_name", name))
     _fail_if(name_codes != named["team_key"], named, "`team` name mismatch(es)")
 
-    first_starts_gw = df["season"].map(STARTS_FIRST_GW).fillna(0)
-    df["starts"] = df["starts"].where(df["gw"] >= first_starts_gw).astype("Int64")
+    first_gw = df["season"].map(LATE_COLUMNS_FIRST_GW).fillna(0)
+    for name in LATE_COLUMNS:
+        df[name] = df[name].where(df["gw"] >= first_gw)
 
     lockdown = gameweek.set_index(["season", "gw"])["lockdown_time"]
     at = lockdown.reindex(pd.MultiIndex.from_frame(df[["season", "gw"]]))
@@ -479,6 +488,31 @@ def goal_sum_mismatches(player_match: pd.DataFrame, fixture: pd.DataFrame) -> pd
         joined["away_sum"] != joined["away_goals"]
     )
     return joined[differ.fillna(True)].reset_index()
+
+
+def placeholder_zero_blocks(player_match: pd.DataFrame) -> pd.DataFrame:
+    """(season, gw, column) where goals were scored but every non-null value of an optional
+    stat column is 0: a source placeholder (like vaastav 2022-23 GW1–15), not data."""
+    by_gw = player_match.groupby(["season", "gw"])
+    scored = by_gw["goals_scored"].sum() > 0
+    blocks = []
+    for name in OPTIONAL_STATS:
+        values = player_match[name]
+        present = by_gw[name].count() > 0
+        nonzero = values.fillna(0).ne(0).groupby([player_match["season"], player_match["gw"]])
+        bad = scored & present & ~nonzero.any()
+        blocks += [(season, gw, name) for season, gw in bad[bad].index]
+    return pd.DataFrame(blocks, columns=["season", "gw", "column"])
+
+
+def check_placeholder_zeros(player_match: pd.DataFrame) -> None:
+    blocks = placeholder_zero_blocks(player_match)
+    if len(blocks):
+        raise PlayerMatchError(
+            f"{len(blocks)} placeholder-zero block(s): goals scored but the column is 0 for "
+            f"every player of the GW (null it, see LATE_COLUMNS_FIRST_GW):\n"
+            f"{blocks.head(20).to_string(index=False)}"
+        )
 
 
 def check_goal_sums(player_match: pd.DataFrame, fixture: pd.DataFrame) -> None:
@@ -559,4 +593,5 @@ def build_player_match(ctx: BuildContext) -> pd.DataFrame:
         raw, fixture, ctx.table("gameweek"), player_season, team_codes, resolver
     )
     check_goal_sums(df, fixture)
+    check_placeholder_zeros(df)
     return df

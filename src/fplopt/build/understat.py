@@ -53,7 +53,7 @@ folder of the fixture's season, else the newest folder. `scored`/`missed` must e
 goals. Measured: 4,874 team-file rows, all join a fixture with matching goals; 4,418 sides
 after dropping repeats (2019/20–2023/24 every side, 2024/25 618 of 760). `fd_xg`/`fd_xga`
 from football-data `HxG`/`AxG` (2026-27). `fpl_xg`/`fpl_xga` = sum of the side's players'
-`fpl_xg` (null if any player row lacks it, i.e. before 2022/23).
+`fpl_xg` (null if any player row lacks it, i.e. before 2022/23 GW16).
 """
 
 from __future__ import annotations
@@ -783,7 +783,8 @@ def football_data_xg(
 
 
 def side_fpl_xg(player_match: pd.DataFrame) -> pd.DataFrame:
-    """Sum of the side's players' fpl_xg; null if any player row lacks it."""
+    """Sum of the side's players' fpl_xg; null if any player row lacks it (before 2022-23
+    GW16, see `players.LATE_COLUMNS_FIRST_GW`)."""
     grouped = player_match.groupby(["fixture_key", "team_key"])["fpl_xg"]
     total = grouped.sum(min_count=1)
     complete = grouped.count() == grouped.size()

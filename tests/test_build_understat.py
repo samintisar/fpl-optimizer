@@ -142,6 +142,40 @@ def two_seasons(world, *, skip_player=None):
 ALL = ["fixture", "gameweek", "player_season", "player_dim", "player_match", "understat"]
 
 
+def add_understat_season(world, season, fixtures, folder):
+    """Player files (named like the FPL players) and team files for one season."""
+    for team_id in range(1, 21):
+        player = f"First{team_id}_Second{team_id}_{900 + team_id}"
+        world.vaastav(f"{folder}/understat/{player}", player_file_rows(fixtures, season, team_id))
+        team = f"understat_{us_team(team_id).replace(' ', '_')}"
+        world.vaastav(f"{folder}/understat/{team}", team_file_rows(fixtures, team_id))
+
+
+def test_placeholder_zero_fpl_columns_are_null_in_player_and_team_match(world):
+    # 2022-23 GW1-15: vaastav has starts and FPL xG as 0 placeholders (first real GW: 16).
+    # No GW7 (37 GWs): rounds 7 and 8 both form GW8.
+    fx = season_fixtures(2022, gw_numbers=[*range(1, 7), 8, *range(8, 39)])
+    merged = merged_gw(fx)
+    late = merged["round"] >= 16
+    merged["starts"] = late.astype(int)
+    merged["expected_goals"] = 0.5 * late
+    merged["expected_assists"] = 0.2 * late
+    merged["expected_goals_conceded"] = 1.1 * late
+    world.add_vaastav_season(2022, fixtures=fx, merged=merged)
+    add_understat_season(world, 2022, fx, "2022-23")
+    build([*ALL, "team_match"], world.ctx)
+
+    pm = world.ctx.table("player_match")
+    early = pm["gw"] < 16
+    assert pm.loc[early, ["starts", "fpl_xg", "fpl_xa", "fpl_xgc"]].isna().all().all()
+    assert (pm.loc[~early, "starts"] == 1).all() and (pm.loc[~early, "fpl_xg"] == 0.5).all()
+    gws = world.ctx.table("fixture")[["fixture_key", "gw"]]
+    tm = world.ctx.table("team_match").merge(gws, on="fixture_key")
+    tm_early = tm["gw"] < 16
+    assert tm.loc[tm_early, ["fpl_xg", "fpl_xga"]].isna().all().all()
+    assert (tm.loc[~tm_early, "fpl_xg"] == 0.5).all()
+
+
 def test_understat_build_end_to_end(world):
     two_seasons(world)
     build([*ALL, "team_match"], world.ctx)

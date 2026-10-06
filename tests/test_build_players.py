@@ -200,11 +200,34 @@ def assemble(merged, fixture, gameweek, player_season, team_codes, resolver, sea
     return assemble_player_match(raw, fixture, gameweek, player_season, team_codes, resolver)
 
 
-def test_starts_null_for_early_2022_gws_only():
-    early = assemble(*small_inputs(gw=15))
-    assert early["starts"].isna().all()
-    later = assemble(*small_inputs(gw=16))
+LATE_COLUMNS = ["starts", "fpl_xg", "fpl_xa", "fpl_xgc"]
+PLACEHOLDER_XG = {
+    "expected_goals": [0.0, 0.0],
+    "expected_assists": [0.0, 0.0],
+    "expected_goals_conceded": [0.0, 0.0],
+}
+
+
+def test_starts_and_fpl_x_null_for_early_2022_gws_only():
+    merged, *rest = small_inputs(gw=15)
+    early = assemble(merged.assign(**PLACEHOLDER_XG), *rest)
+    assert early[LATE_COLUMNS].isna().all().all()
+    merged, *rest = small_inputs(gw=16)
+    later = assemble(merged.assign(**PLACEHOLDER_XG), *rest)
     assert later["starts"].tolist() == [0, 0]
+    assert later["fpl_xg"].tolist() == [0.0, 0.0] and later["fpl_xgc"].tolist() == [0.0, 0.0]
+
+
+def test_placeholder_zero_block_fails_the_build(world):
+    # FPL xG all 0 in GW3 although goals were scored: a placeholder block, not data.
+    fx = season_fixtures(2023)
+    merged = merged_gw(fx).assign(expected_goals=0.3)
+    merged.loc[merged["round"] == 3, "expected_goals"] = 0.0
+    world.add_vaastav_season(2023, fixtures=fx, merged=merged)
+    with pytest.raises(PlayerMatchError, match="placeholder") as failure:
+        build_players(world)
+    assert "1 placeholder-zero block" in str(failure.value)
+    assert str(failure.value).endswith("2023   3 fpl_xg")
 
 
 def test_team_name_and_opponent_mismatches_fail():
