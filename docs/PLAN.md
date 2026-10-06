@@ -146,7 +146,7 @@ User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, c
   - Current positions/prices instead of as-of values.
   - Models/scalers/priors/hyperparameters fit on the full season → refit walk-forward.
 - **Status flags:** available as-of from 2021/22 (fplcache). The minutes model is trained without flags (they don't exist before 2021/22); the flag adjustment layer (§6.4) is fit on 2021/22–2022/23 and checked on 2023/24–2024/25.
-- **vaastav per-GW fields** (`selected`, `transfers_in/out`, `value`) come from `element-summary` history, believed to be around-deadline values. **VERIFY** by joining against fplcache pre-deadline snapshots for 2021/22+ before using them as features.
+- **vaastav per-GW fields** (verified against fplcache 2021/22–2024/25, #6): `value` = price at deadline t (100% match with the last pre-deadline snapshot, never the end-of-GW price) → usable at deadline t. `transfers_in/out/balance` = totals for the window ending at deadline t and `selected` = ownership after GW t's transfers; both include the last hours before the deadline (~17% of the window's transfers) that a live pre-deadline read can't see → `available_at` after deadline t, i.e. features for GW t+1 onward. For the GW t decision use `player_snapshot` as of the deadline; before 2021/22, vaastav round t−1 values.
 
 ---
 
@@ -406,11 +406,13 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 
 ## 11. Open items to VERIFY
 
-- vaastav per-GW `selected` / `transfers_in` / `value` timing — check against fplcache pre-deadline snapshots (2021/22+).
 - Free-transfer reconstruction rules from public transfer history, including whether a WC/FH GW grants the +1 FT in 2026/27, and the 2025/26 AFCON top-up (GW and amount; absent from the API).
 - Free Hit consecutive-GW restriction in 2026/27.
 - FPL-Core-Insights components reproduce FPL CBIT/CBIRT (2026/27 GW1–5) before setting defcon `k`, `r`.
 - Solver performance with chip scenarios over a 6-GW horizon.
+
+**Resolved (2026-10-06):**
+- vaastav per-GW `selected` / `transfers` / `value` timing → §4 (#6).
 
 **Resolved (2026-10-05):**
 - 2026/27 rules → see §3 *Rules config* (checked against the live API).
