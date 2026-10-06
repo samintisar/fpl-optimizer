@@ -7,6 +7,7 @@
 - `uv sync --all-extras` — install everything
 - `uv run pytest` — tests
 - `uv run ruff check . && uv run ruff format .` — lint/format
+- `uv run fplopt snapshot daily|tick` / `uv run fplopt backfill element-summary` — archiver jobs (see `deploy/README.md`)
 
 ## Invariants (do not break)
 

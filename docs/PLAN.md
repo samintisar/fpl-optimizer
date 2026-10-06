@@ -28,7 +28,7 @@ This document is the source of truth for design decisions. Items marked **VERIFY
 | Concern | Decision |
 |---|---|
 | Dev | Windows + Claude Code; exploration in notebooks (flat, copy-pasteable cells), pipeline as a Python package |
-| Runtime | Ubuntu server (Tailscale). Bot as `systemd` service (long polling, no public URL). Pipeline via `cron` |
+| Runtime | Ubuntu server (Tailscale). Bot as `systemd` service (long polling, no public URL). Pipeline via `systemd` user timers (timezone-aware schedules; see `deploy/README.md`) |
 | Snapshot backup | No self-hosted backup. [Randdalf/fplcache](https://github.com/Randdalf/fplcache) (public domain, `bootstrap-static` 4×/day) is the independent backup for bootstrap snapshots; the Ubuntu archiver is the only source for fixtures, element-summary, odds and exact pre-deadline timing |
 | Analytical storage | Immutable `raw/` + Parquet tables queried with DuckDB |
 | User state | SQLite (DuckDB is single-writer; bot + pipeline would clash) |
@@ -431,3 +431,4 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-05 | Chips solved by fixed-chip scenarios; FT value concave; bench weighted by P(needed). | Solver performance; public-tool evidence. |
 | 2026-10-05 | Own thin adapters; no `soccerdata` dependency; own Elo instead of ClubElo. | soccerdata needs a browser + CAPTCHA solving; ClubElo API is down. |
 | 2026-10-05 | Drop PyMC; models use scipy MLE + closed-form shrinkage. PuLP builds the MILP on HiGHS; switch to `highspy` bulk API only if model build time dominates. | Hundreds of walk-forward refits per backtest make MCMC impractical; one modelling layer, decided by measurement. |
+| 2026-10-05 | systemd user timers instead of cron; pre-deadline snapshots via a 15-min tick that reads deadlines from the latest archived bootstrap and tracks FPL and odds windows separately. | Ubuntu cron has no per-job timezone (daily run follows UK time); deadlines change, so they are read, not scheduled. |

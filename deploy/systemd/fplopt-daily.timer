@@ -1,0 +1,10 @@
+[Unit]
+Description=fpl-optimizer daily snapshot after FPL price changes
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 Europe/London
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
