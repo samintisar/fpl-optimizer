@@ -12,6 +12,7 @@ from fplopt.features.baseline import (
     availability,
     ep_next,
     player_pool,
+    pool_coverage,
     recent_form,
     team_strength,
     upcoming_fixtures,
@@ -65,6 +66,7 @@ def test_registry_and_builder_signatures():
         "recent_form",
         "upcoming_fixtures",
         "team_strength",
+        "pool_coverage",
     ]
     for builder in FEATURES.values():
         assert len(inspect.signature(builder).parameters) == 1
@@ -112,6 +114,37 @@ def test_player_pool_keeps_blank_gw_players_and_drops_departed_ones(tables):
         assert pool.loc[player_of(team), "price"] == 49  # their newest earlier row (GW9)
         assert pool.loc[player_of(team), "team_key"] == team
     assert (pool.drop([player_of(t) for t in blank])["price"] == 50).all()
+
+
+def test_pool_coverage_flags_clubs_without_pool_players(tables, caplog):
+    """2020/21 GW1 without snapshots: clubs whose GW1 match was postponed have no player_gw
+    row before the deadline, so the pool silently lacks them; pool_coverage shows it and
+    player_pool warns."""
+    complete = pool_coverage(view(tables, 2023, 1))
+    assert list(complete.columns) == [
+        "season",
+        "gw",
+        "team_key",
+        "n_fixtures",
+        "n_fixtures_horizon",
+        "n_pool_players",
+    ]
+    assert len(complete) == 20 and (complete["n_pool_players"] == 1).all()
+    assert (complete["n_fixtures"] == 1).all() and (complete["n_fixtures_horizon"] == 6).all()
+    assert (complete["season"] == 2023).all() and (complete["gw"] == 1).all()
+
+    postponed = move_fixture(tables, 2023, from_gw=1, to_gw=3)
+    with caplog.at_level("WARNING", logger="fplopt.features.baseline"):
+        pool = player_pool(view(tables, 2023, 1))
+    assert len(pool) == 18
+    coverage = pool_coverage(view(tables, 2023, 1)).set_index("team_key")
+    assert len(coverage) == 20
+    for team in postponed:
+        assert coverage.loc[team, "n_fixtures"] == 0
+        assert coverage.loc[team, "n_fixtures_horizon"] == 6  # GW3 double
+        assert coverage.loc[team, "n_pool_players"] == 0
+    assert (coverage.drop(postponed)["n_pool_players"] == 1).all()
+    assert "2 club(s) with a fixture in the horizon have no pool players" in caplog.text
 
 
 def test_player_pool_from_latest_snapshot(tables):

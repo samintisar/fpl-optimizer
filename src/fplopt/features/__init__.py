@@ -11,6 +11,7 @@ from fplopt.features.baseline import (
     availability,
     ep_next,
     player_pool,
+    pool_coverage,
     recent_form,
     team_strength,
     upcoming_fixtures,
@@ -26,6 +27,7 @@ FEATURES: dict[str, FeatureBuilder] = {
     "recent_form": recent_form,
     "upcoming_fixtures": upcoming_fixtures,
     "team_strength": team_strength,
+    "pool_coverage": pool_coverage,
 }
 
 

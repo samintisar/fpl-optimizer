@@ -163,6 +163,7 @@ User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, c
 ### Simulator
 - Replays a season GW by GW. At each deadline it sees only `as_of(deadline)` data, builds xP, runs the decision policy, executes this GW's decisions, and scores them with actual outcomes (re-scored per the table below).
 - **Starts from any state:** squad, purchase prices, bank, FTs, chips remaining, current GW. This supports both GW1 starts and mid-season opt-ins.
+- **Incomplete player pools:** before player snapshots (to 2020/21 GW32) the pool comes from `player_gw` rows visible at the deadline, and a club can have no honest as-of source: at 2020/21 GW1 Man Utd, Man City, Burnley and Aston Villa (GW1 matches postponed, no earlier row) are missing entirely. The `pool_coverage` feature lists per club its fixtures and pool size, and `player_pool` warns. The backtester must not start from — or must flag — a deadline where a club with a fixture in the horizon has 0 pool players (measured over all non-holdout deadlines: only 2020/21 GW1).
 - Historical real-manager squads aren't available from the API for past seasons → generate start states from **template squads** (most-owned) and **random valid squads** at various GWs.
 - Chips included from the start. Develop/validate seasons use the current season's chip rules. The holdout and live season use their own native rules (2025/26 includes the AFCON free-transfer top-up).
 - **Decision policy is pluggable.** Policies:

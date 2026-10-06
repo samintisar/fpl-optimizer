@@ -3,14 +3,27 @@
 Each builder takes exactly one argument, an `AsOfView`, reads only through it and returns a
 deterministic frame (fixed columns and dtypes, sorted by its key, RangeIndex). The target
 gameweek is the one whose deadline is the view's deadline.
+
+Pool coverage: before player snapshots exist (2016/17 – 2020/21 GW32), `player_pool` is
+built from `player_gw` rows visible at the deadline, and some clubs can have no honest
+as-of source at all: at 2020/21 GW1 Man Utd, Man City, Burnley and Aston Villa had their
+GW1 match postponed, so they have no GW1 row and no earlier row that season, and the pool
+lacks them entirely. `pool_coverage` reports per club its fixtures and pool size, and
+`player_pool` logs a warning when a club with a fixture in the horizon has no players. The
+backtester must not start from such deadlines (or must flag them; PLAN §5). Measured on
+data/ 2026-10-06 over every non-holdout deadline: 2020/21 GW1 is the only one.
 """
 
 from __future__ import annotations
+
+import logging
 
 import numpy as np
 import pandas as pd
 
 from fplopt.features.store import AsOfView
+
+log = logging.getLogger(__name__)
 
 UTC_US = pd.DatetimeTZDtype("us", "UTC")
 SNAPSHOT_COLUMNS = [
@@ -86,8 +99,25 @@ def player_pool(view: AsOfView) -> pd.DataFrame:
     """Players pickable for the target GW with position, club and price (tenths of £m).
     From the newest player snapshot of the season when one exists before the deadline
     (source 'snapshot'); otherwise from `player_gw` (source 'player_gw'): the target GW's
-    rows (known at deadline - 1h) plus, for players of clubs without a fixture in the target
-    GW (blank), their newest earlier row of the season."""
+    rows visible at the deadline (players registered with that club by then) plus, for
+    players of clubs without a fixture in the target GW (blank), their newest earlier row
+    of the season. Logs a warning when a club with a fixture in the horizon has no players
+    (see the module docstring and `pool_coverage`)."""
+    pool = _pool(view)
+    gaps = _coverage(view, pool)
+    gaps = gaps[(gaps["n_fixtures_horizon"] > 0) & (gaps["n_pool_players"] == 0)]
+    if len(gaps):
+        log.warning(
+            "player_pool at %s: %d club(s) with a fixture in the horizon have no pool "
+            "players (team_key %s); the pool is incomplete",
+            view.deadline,
+            len(gaps),
+            gaps["team_key"].tolist(),
+        )
+    return pool
+
+
+def _pool(view: AsOfView) -> pd.DataFrame:
     season, gw, gw_index = _target(view)
     snaps = _newest_snapshot(view, season)
     if not snaps.empty:
@@ -116,6 +146,44 @@ def player_pool(view: AsOfView) -> pd.DataFrame:
     return _finish(pool, POOL_DTYPES, ["player_key"])
 
 
+COVERAGE_DTYPES = {
+    "season": "int64",
+    "gw": "int64",
+    "team_key": "int64",
+    "n_fixtures": "int64",
+    "n_fixtures_horizon": "int64",
+    "n_pool_players": "int64",
+}
+
+
+def _coverage(view: AsOfView, pool: pd.DataFrame) -> pd.DataFrame:
+    season, gw, gw_index = _target(view)
+    schedule = view.schedule(season)
+    gameweeks = _gameweeks(view, season)
+    horizon = gameweeks.loc[gameweeks["gw_index"].between(gw_index, gw_index + HORIZON), "gw"]
+    sides = _sides(schedule[schedule["gw"].notna()].astype({"gw": "int64"}))
+    teams = sorted(set(schedule["home_team_key"]) | set(schedule["away_team_key"]))
+    out = pd.DataFrame({"team_key": teams})
+    target = sides.loc[sides["gw"] == gw, "team_key"].value_counts()
+    ahead = sides.loc[sides["gw"].isin(horizon), "team_key"].value_counts()
+    players = pool["team_key"].value_counts()
+    out = out.assign(
+        season=season,
+        gw=gw,
+        n_fixtures=out["team_key"].map(target).fillna(0),
+        n_fixtures_horizon=out["team_key"].map(ahead).fillna(0),
+        n_pool_players=out["team_key"].map(players).fillna(0),
+    )
+    return _finish(out, COVERAGE_DTYPES, ["team_key"])
+
+
+def pool_coverage(view: AsOfView) -> pd.DataFrame:
+    """Per club of the season's as-of schedule: its fixtures in the target GW and in the
+    horizon (target GW and the next HORIZON GWs) and its number of `player_pool` players.
+    A club with fixtures and 0 players means the pool is incomplete at this deadline."""
+    return _coverage(view, _pool(view))
+
+
 AVAILABILITY_DTYPES = {
     "player_key": "int64",
     "status": "str",
@@ -127,7 +195,7 @@ AVAILABILITY_DTYPES = {
 def _pool_with_snapshot(view: AsOfView, columns: list[str]) -> pd.DataFrame:
     """Pool players with `columns` from the newest snapshot (null where there is none)."""
     season, _, _ = _target(view)
-    pool = player_pool(view)[["player_key"]]
+    pool = _pool(view)[["player_key"]]
     snaps = _newest_snapshot(view, season)[["player_key", *columns]]
     return pool.merge(snaps, on="player_key", how="left", validate="one_to_one")
 
