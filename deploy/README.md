@@ -79,7 +79,7 @@ The element-summary run has to fit in the daily unit's `TimeoutStartSec=40min`. 
 
 Run these on the server as transient user units, so they survive SSH disconnects and send the usual failure alert. Lingering is already on (setup step 6).
 
-> **Verified on server: pending.** `systemd-run` doesn't expand `%h`/`%n` on its command line, so these commands use `$HOME` and literal unit names. `fplopt-failure@<instance>.service` reads the instance (`%i`) as the name of the failed unit and passes it to `journalctl -u`.
+> Verified on the server (systemd 255) on 2026-10-06: the `OnFailure=` property is accepted on transient units. `systemd-run` doesn't expand `%h`/`%n` on its command line, so these commands use `$HOME` and literal unit names. `fplopt-failure@<instance>.service` reads the instance (`%i`) as the name of the failed unit and passes it to `journalctl -u`.
 
 ```bash
 cd ~/fpl-optimizer && git pull && ~/.local/bin/uv sync --locked
