@@ -96,7 +96,8 @@ fpl-optimizer/
   - **GW lockdown:** 09:00 UK the day after the GW's last match.
 
 ### Tables (Parquet)
-- `player_dim` — stable `player_key` (= FPL player `code`, stable across seasons; `opta_code` = `"p"+code`) ↔ FPL id per season ↔ Understat id. **FPL ids reset every season; never use them as keys.**
+- `player_dim` — stable `player_key` (= FPL player `code`, stable across seasons; `opta_code` = `"p"+code`) ↔ Understat id; identity only (names), static (`available_at` = epoch), so no first/last season. **FPL ids reset every season; never use them as keys.**
+- `player_season` — per player and season: FPL id (`element_id`), position, names; no club (per-match club in `player_match`, as-of club in `player_snapshot`). `available_at` = deadline of the GW of the player's first `player_match` row that season.
 - `team_dim` — `team_key` (= FPL team `code`, stable across seasons; synthetic codes ≥ 1000 for clubs never in FPL's era, needed for Elo burn-in) ↔ names in every source, from the hand-maintained `config/teams.csv`.
 - `fixture` — every EPL match: season, FPL fixture id and GW, kickoff (from FPL), teams, result; football-data and Understat match ids.
 - `gameweek` — per season and GW: deadline (from bootstrap snapshots; 2016/17–2019/20 approximated as first kickoff − 90 min and flagged), lockdown time, `average_entry_score`.

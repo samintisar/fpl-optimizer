@@ -3,16 +3,24 @@
 Keys: `player_key` is the FPL player `code` (stable across seasons); `element_id` is the FPL
 id, which resets every season and is never a key.
 
-player_season: vaastav `players_raw` per season (2016-17 … 2025-26; managers,
-`element_type` 5, dropped) and, for seasons vaastav doesn't cover (2026-27), the newest
-archived bootstrap of that season. `team_key` = `team_code` = the end-of-season (or latest)
-club. `event_time` = `available_at` = the season's first deadline: an approximation (players
-registered later in the season appear from the start; a later registration date isn't in
-these sources).
+Registered players per season (`registered_players`): vaastav `players_raw` (2016-17 …
+2025-26; managers, `element_type` 5, dropped) and, for seasons vaastav doesn't cover
+(2026-27 →), the newest archived bootstrap of that season. player_match maps elements to
+player_keys through them; player_season is built from them after player_match.
+
+player_season: one row per player and season, no club (`players_raw.team_code` is the
+end-of-season club: the club per match is in player_match, the as-of club in
+player_snapshot). `event_time` = `available_at` = the deadline of the GW of the player's
+first player_match row that season (every registered player of a club with a fixture has a
+row, minutes 0 or not, so his registration was public by then). A player without rows: the
+snapshot time of the bootstrap listing him (current seasons), else the season's last
+lockdown (end-of-season players_raw). Measured on raw/ 2026-10-06: every one of the 8,005
+player-seasons has rows.
 
 player_dim: one row per `player_key`; names from the newest season; `opta_code` = "p" + code;
 `understat_id` is filled by the `understat` builder (null here). Static reference data
-(event_time = available_at = 1970-01-01), like team_dim.
+(event_time = available_at = 1970-01-01), like team_dim, so it carries nothing that reveals
+the future (the seasons a player plays are in player_season, with their own `available_at`).
 
 player_match: one row per player per fixture his club played while he was registered (FPL
 lists every registered player of a club with a fixture: 52–62% of rows have 0 minutes).
@@ -81,7 +89,7 @@ MAX_MINUTES = 90
 # columns exist but earlier GWs carry 0 placeholders (vaastav 2022-23: GW1–15).
 LATE_COLUMNS_FIRST_GW = {2022: 16}
 MAX_GOAL_SUM_MISMATCHES = 0
-PLAYER_FIELDS = ["id", "code", "first_name", "second_name", "web_name", "team_code"]
+PLAYER_FIELDS = ["id", "code", "first_name", "second_name", "web_name"]
 
 
 class PlayerMatchError(ValueError):
@@ -101,7 +109,6 @@ PLAYER_SEASON_COLUMNS = [
     "season",
     "element_id",
     "element_type",
-    "team_key",
     "first_name",
     "second_name",
     "web_name",
@@ -115,7 +122,6 @@ PLAYER_SEASON_SCHEMA = pa.DataFrameSchema(
         "season": pa.Column("int64", pa.Check.ge(FIRST_SEASON)),
         "element_id": pa.Column("int64", pa.Check.gt(0)),
         "element_type": pa.Column("int64", pa.Check.in_range(1, 4)),
-        "team_key": pa.Column("int64", pa.Check.gt(0)),
         "first_name": pa.Column(str),
         "second_name": pa.Column(str),
         "web_name": pa.Column(str),
@@ -125,6 +131,7 @@ PLAYER_SEASON_SCHEMA = pa.DataFrameSchema(
     checks=[
         pa.Check(lambda df: ~df.duplicated(["player_key", "season"]), error="player per season"),
         pa.Check(lambda df: ~df.duplicated(["season", "element_id"]), error="element per season"),
+        pa.Check(lambda df: df["event_time"] == df["available_at"], error="event_time"),
     ],
     strict=True,
     ordered=True,
@@ -132,8 +139,11 @@ PLAYER_SEASON_SCHEMA = pa.DataFrameSchema(
 PLAYER_SEASON_SORT_BY = ("season", "player_key")
 
 
-def season_players(df: pd.DataFrame, season: int) -> pd.DataFrame:
-    """player_season rows (no timing columns) from players_raw / bootstrap `elements`."""
+def season_players(
+    df: pd.DataFrame, season: int, listed_at: pd.Timestamp | None = None
+) -> pd.DataFrame:
+    """Registered players (player_season columns without timing, plus `listed_at`: when the
+    source listing them was taken, NaT if unknown) from players_raw / bootstrap `elements`."""
     df = df[df["element_type"] != MANAGER_TYPE]
     return pd.DataFrame(
         {
@@ -141,10 +151,10 @@ def season_players(df: pd.DataFrame, season: int) -> pd.DataFrame:
             "season": season,
             "element_id": df["id"].astype("int64"),
             "element_type": df["element_type"].astype("int64"),
-            "team_key": df["team_code"].astype("int64"),
             "first_name": df["first_name"].astype(str),
             "second_name": df["second_name"].astype(str),
             "web_name": df["web_name"].astype(str),
+            "listed_at": pd.Series(listed_at, index=df.index, dtype=UTC_US),
         }
     )
 
@@ -157,8 +167,9 @@ def bootstrap_elements(bootstrap: dict) -> pd.DataFrame:
     return pd.DataFrame(bootstrap["elements"])[[*PLAYER_FIELDS, "element_type"]]
 
 
-def build_player_season(ctx: BuildContext) -> pd.DataFrame:
-    resolver = TeamResolver(ctx.table("team_dim"))
+def registered_players(ctx: BuildContext) -> pd.DataFrame:
+    """`season_players` rows of every season: vaastav players_raw, and for current seasons the
+    newest bootstrap of the season (`listed_at` = its snapshot time)."""
     frames = [
         season_players(players_raw(season_dir), season)
         for season, season_dir in vaastav_seasons(vaastav_run(ctx)).items()
@@ -167,18 +178,53 @@ def build_player_season(ctx: BuildContext) -> pd.DataFrame:
     for season in current_seasons(ctx):
         if season not in bootstraps:
             raise LookupError(f"no archived bootstrap for season {season}")
-        bootstrap = RawStore.read_json(bootstraps[season][1])
-        frames.append(season_players(bootstrap_elements(bootstrap), season))
-    df = pd.concat(frames, ignore_index=True)
-    for code in df["team_key"].unique():
-        resolver.fpl_code(int(code))
-    first_deadline = ctx.table("gameweek").groupby("season")["deadline_time"].min()
-    missing = sorted(set(df["season"]) - set(first_deadline.index))
+        snapshot_at, path, _ = bootstraps[season]
+        listed_at = pd.Timestamp(snapshot_at).tz_convert("UTC")
+        elements = bootstrap_elements(RawStore.read_json(path))
+        frames.append(season_players(elements, season, listed_at))
+    return pd.concat(frames, ignore_index=True)
+
+
+def first_match_deadlines(player_match: pd.DataFrame, gameweek: pd.DataFrame) -> pd.DataFrame:
+    """season, player_key, deadline_time of the GW of the player's first row that season."""
+    rows = player_match[["season", "player_key", "gw"]].drop_duplicates()
+    rows = rows.merge(gameweek[["season", "gw", "deadline_time"]], on=["season", "gw"], how="left")
+    if rows["deadline_time"].isna().any():
+        raise ValueError("player_match rows whose GW is not in gameweek")
+    return rows.groupby(["season", "player_key"], as_index=False)["deadline_time"].min()
+
+
+def player_season_from(
+    players: pd.DataFrame, player_match: pd.DataFrame, gameweek: pd.DataFrame
+) -> pd.DataFrame:
+    """player_season rows: `registered_players` + timing (see module docstring)."""
+    missing = sorted(set(players["season"]) - set(gameweek["season"]))
     if missing:
         raise ValueError(f"no gameweek rows for season(s) {missing}")
-    df["event_time"] = df["season"].map(first_deadline).astype(UTC_US)
-    df["available_at"] = df["event_time"]
+    df = players.merge(
+        first_match_deadlines(player_match, gameweek),
+        on=["season", "player_key"],
+        how="left",
+        validate="one_to_one",
+    )
+    no_rows = df["deadline_time"].isna()
+    if no_rows.any():
+        log.info(
+            "player_season: %d player-season(s) without player_match rows (per season: %s)",
+            int(no_rows.sum()),
+            df.loc[no_rows, "season"].value_counts().sort_index().to_dict(),
+        )
+    last_lockdown = gameweek.groupby("season")["lockdown_time"].max()
+    fallback = df["listed_at"].fillna(df["season"].map(last_lockdown))
+    df["available_at"] = df["deadline_time"].fillna(fallback).astype(UTC_US)
+    df["event_time"] = df["available_at"]
     return df[PLAYER_SEASON_COLUMNS]
+
+
+def build_player_season(ctx: BuildContext) -> pd.DataFrame:
+    return player_season_from(
+        registered_players(ctx), ctx.table("player_match"), ctx.table("gameweek")
+    )
 
 
 # --- player_dim --------------------------------------------------------------------------
@@ -190,8 +236,6 @@ PLAYER_DIM_COLUMNS = [
     "web_name",
     "opta_code",
     "understat_id",
-    "first_season",
-    "last_season",
     "event_time",
     "available_at",
 ]
@@ -206,13 +250,10 @@ PLAYER_DIM_SCHEMA = pa.DataFrameSchema(
         "understat_id": pa.Column(
             "Int64", pa.Check(lambda s: ~s.duplicated() | s.isna()), nullable=True
         ),
-        "first_season": pa.Column("int64", pa.Check.ge(FIRST_SEASON)),
-        "last_season": pa.Column("int64", pa.Check.ge(FIRST_SEASON)),
         "event_time": pa.Column(UTC_US),
         "available_at": pa.Column(UTC_US),
     },
     checks=[
-        pa.Check(lambda df: df["first_season"] <= df["last_season"], error="season order"),
         pa.Check(
             lambda df: df["opta_code"] == "p" + df["player_key"].astype(str), error="opta_code"
         ),
@@ -225,7 +266,6 @@ PLAYER_DIM_SORT_BY = ("player_key",)
 
 def player_dim_from_seasons(player_season: pd.DataFrame) -> pd.DataFrame:
     ordered = player_season.sort_values(["player_key", "season"], kind="mergesort")
-    seasons = ordered.groupby("player_key")["season"].agg(["min", "max"])
     newest = ordered.groupby("player_key").last()
     n = len(newest)
     epoch = pd.Series([EPOCH] * n, dtype=UTC_US)
@@ -237,8 +277,6 @@ def player_dim_from_seasons(player_season: pd.DataFrame) -> pd.DataFrame:
             "web_name": newest["web_name"].to_numpy(),
             "opta_code": ("p" + newest.index.astype(str)).to_numpy(),
             "understat_id": pd.array([pd.NA] * n, dtype="Int64"),
-            "first_season": seasons["min"].astype("int64").to_numpy(),
-            "last_season": seasons["max"].astype("int64").to_numpy(),
             "event_time": epoch,
             "available_at": epoch,
         }
@@ -415,12 +453,13 @@ def assemble_player_match(
     raw: pd.DataFrame,
     fixture: pd.DataFrame,
     gameweek: pd.DataFrame,
-    player_season: pd.DataFrame,
+    players: pd.DataFrame,
     team_codes: dict[int, dict[int, int]],
     resolver: TeamResolver,
 ) -> pd.DataFrame:
-    """player_match rows from raw source rows (`match_rows` shape). Fails (PlayerMatchError)
-    on unknown fixtures, GWs or elements, leftover duplicates and team inconsistencies."""
+    """player_match rows from raw source rows (`match_rows` shape); `players` maps (season,
+    element_id) -> player_key. Fails (PlayerMatchError) on unknown fixtures, GWs or elements,
+    leftover duplicates and team inconsistencies."""
     fx = fixture[
         ["season", "fpl_fixture_id", "fixture_key", "gw", "kickoff_time"]
         + ["home_team_key", "away_team_key"]
@@ -437,9 +476,9 @@ def assemble_player_match(
     df = df[~phantom]
     _fail_if(df.duplicated(keys, keep=False), df, "duplicate (element, fixture) row(s)")
 
-    players = player_season[["season", "element_id", "player_key"]]
-    df = df.merge(players, on=["season", "element_id"], how="left", validate="many_to_one")
-    _fail_if(df["player_key"].isna(), df, "row(s) whose element is not in player_season")
+    keys = players[["season", "element_id", "player_key"]]
+    df = df.merge(keys, on=["season", "element_id"], how="left", validate="many_to_one")
+    _fail_if(df["player_key"].isna(), df, "row(s) whose element is not a registered player")
 
     home = df["was_home"]
     df["team_key"] = df["home_team_key"].where(home, df["away_team_key"]).astype("int64")
@@ -578,7 +617,7 @@ def element_summary_match_rows(
 
 def build_player_match(ctx: BuildContext) -> pd.DataFrame:
     fixture = ctx.table("fixture")
-    player_season = ctx.table("player_season")
+    players = registered_players(ctx)
     resolver = TeamResolver(ctx.table("team_dim"))
     frames, team_codes = [], {}
     for season, season_dir in vaastav_seasons(vaastav_run(ctx)).items():
@@ -589,9 +628,7 @@ def build_player_match(ctx: BuildContext) -> pd.DataFrame:
         frames.append(rows)
         team_codes[season] = bootstrap_team_codes(bootstrap)
     raw = pd.concat(frames, ignore_index=True)
-    df = assemble_player_match(
-        raw, fixture, ctx.table("gameweek"), player_season, team_codes, resolver
-    )
+    df = assemble_player_match(raw, fixture, ctx.table("gameweek"), players, team_codes, resolver)
     check_goal_sums(df, fixture)
     check_placeholder_zeros(df)
     return df

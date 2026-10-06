@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 import pandas as pd
 import pytest
 from synthetic_raw import (
@@ -5,6 +7,7 @@ from synthetic_raw import (
     REPO_CONFIG,
     TEAM_CODES,
     World,
+    bootstrap,
     merged_gw,
     players_raw,
     season_fixtures,
@@ -25,6 +28,9 @@ def world(tmp_path):
     return World(tmp_path)
 
 
+LATER_AT = CURRENT_AT + timedelta(days=1)
+
+
 def utc(text):
     return pd.Timestamp(text, tz="UTC").as_unit("us")
 
@@ -43,7 +49,7 @@ def current_history(fixtures):
 
 
 def build_players(world):
-    build(["fixture", "gameweek", "player_season", "player_dim", "player_match"], world.ctx)
+    build(["fixture", "gameweek", "player_match", "player_season", "player_dim"], world.ctx)
     return world.ctx.table("player_match")
 
 
@@ -65,18 +71,30 @@ def test_player_tables_end_to_end(world):
         merged=pd.concat([merged24, manager_row]),
         players=pd.concat([raw24, manager]),
     )
-    # 2025-26: an exact duplicate row; `team` names present.
+    # 2025-26: an exact duplicate row; `team` names present; element 21 (code 100021) joins
+    # team id 1 before GW10 (rows from GW10 on, 0 minutes).
     fx25 = season_fixtures(2025)
     merged25 = merged_gw(fx25)
     names = team_dim_from_config(REPO_CONFIG / "teams.csv").set_index("team_key")["fpl_names"]
     merged25["team"] = [names[TEAM_CODES[e - 1]].split(";")[0] for e in merged25["element"]]
-    world.add_vaastav_season(2025, merged=pd.concat([merged25, merged25.iloc[[3]]]))
-    # 2026-27: element-summary run through GW1 (GW2 is finished but not yet in the run).
+    signing = merged25[(merged25["element"] == 1) & (merged25["round"] >= 10)].assign(
+        element=21, minutes=0, goals_scored=0, clean_sheets=0, total_points=0
+    )
+    raw25 = players_raw(2025)
+    raw25 = pd.concat([raw25, raw25.iloc[[0]].assign(id=21, code=100021, web_name="New")])
+    world.add_vaastav_season(
+        2025, merged=pd.concat([merged25, merged25.iloc[[3]], signing]), players=raw25
+    )
+    # 2026-27: element-summary run through GW1 (GW2 is finished but not yet in the run); a
+    # newer bootstrap lists element 21 (code 100022), registered after the run: no rows.
     fx26 = world.add_current_season(finished_through=2)
     world.add_element_summary(CURRENT_AT, current_history(fx26), 2026, through_event=1)
+    later = bootstrap(2026, season_fixtures(2026), finished_through=2)
+    later["elements"].append({**later["elements"][1], "id": 21, "code": 100022})
+    world.add_own_bootstrap(LATER_AT, later)
 
     pm = build_players(world)
-    assert pm.groupby("season").size().to_dict() == {2019: 760, 2024: 760, 2025: 760, 2026: 20}
+    assert pm.groupby("season").size().to_dict() == {2019: 760, 2024: 760, 2025: 789, 2026: 20}
     assert not pm["player_key"].eq(999999).any()
     assert pm.duplicated(["player_key", "fixture_key"]).sum() == 0
     f5 = pm[pm["fixture_key"] == 2019005]
@@ -101,18 +119,27 @@ def test_player_tables_end_to_end(world):
     assert (pm.loc[pm["season"] < 2026, "source"] == "vaastav").all()
 
     player_season = world.ctx.table("player_season")
+    assert "team_key" not in player_season.columns  # per match: player_match; as-of: snapshot
     assert player_season.groupby("season").size().to_dict() == {
         2019: 20,
         2024: 20,
-        2025: 20,
-        2026: 20,
+        2025: 21,
+        2026: 21,
     }
-    first_deadline = world.ctx.table("gameweek").groupby("season")["deadline_time"].min()
-    assert (player_season["available_at"] == player_season["season"].map(first_deadline)).all()
+    # available_at = deadline of the GW of the player's first player_match row that season;
+    # a player without rows: the time of the bootstrap that lists him.
+    deadline = world.ctx.table("gameweek").set_index(["season", "gw"])["deadline_time"]
+    ps = player_season.set_index(["season", "player_key"])
+    assert (ps["event_time"] == ps["available_at"]).all()
+    assert ps.loc[(2025, 100021), "available_at"] == deadline[(2025, 10)]
+    assert ps.loc[(2026, 100022), "available_at"] == pd.Timestamp(LATER_AT).as_unit("us")
+    regular = ps.drop([(2025, 100021), (2026, 100022)])
+    gw1 = [deadline[(season, 1)] for season, _ in regular.index]
+    assert (regular["available_at"] == gw1).all()
     player_dim = world.ctx.table("player_dim")
-    assert len(player_dim) == 20
+    assert len(player_dim) == 22
     assert player_dim["opta_code"].iloc[0] == f"p{player_dim['player_key'].iloc[0]}"
-    assert (player_dim["first_season"] == 2019).all() and (player_dim["last_season"] == 2026).all()
+    assert "first_season" not in player_dim.columns and "last_season" not in player_dim.columns
 
 
 def test_goal_sum_mismatch_fails_the_build(world):
@@ -136,7 +163,6 @@ def test_player_dim_takes_newest_names():
     )
     dim = player_dim_from_seasons(seasons).set_index("player_key")
     assert dim.loc[7, "first_name"] == "Heung-Min"
-    assert dim.loc[7, ["first_season", "last_season"]].tolist() == [2016, 2017]
     assert dim.loc[9, "opta_code"] == "p9"
 
 
@@ -242,7 +268,7 @@ def test_team_name_and_opponent_mismatches_fail():
 
 def test_unknown_element_and_leftover_duplicates_fail():
     merged, fixture, gameweek, player_season, team_codes, resolver = small_inputs()
-    with pytest.raises(PlayerMatchError, match="not in player_season"):
+    with pytest.raises(PlayerMatchError, match="not a registered player"):
         assemble(merged, fixture, gameweek, player_season.iloc[:1], team_codes, resolver)
     doubled = pd.concat([merged, merged.assign(minutes=[5, 5])])
     with pytest.raises(PlayerMatchError, match="duplicate"):
