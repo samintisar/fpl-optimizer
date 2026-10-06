@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from fplopt import cli
+from fplopt.adapters.football_data import FootballDataClient
+from fplopt.adapters.fpl import FplClient
 from fplopt.adapters.odds import OddsClient
 from fplopt.settings import Settings
 
@@ -20,13 +22,13 @@ def make_settings(tmp_path):
 
 def test_successful_job_returns_zero(tmp_path, monkeypatch):
     ran = []
-    monkeypatch.setitem(cli.JOBS, "snapshot daily", lambda store, fpl, odds: ran.append(odds))
+    monkeypatch.setitem(cli.JOBS, "snapshot daily", lambda c: ran.append(c.odds))
     assert cli.main(["snapshot", "daily"], settings=make_settings(tmp_path)) == 0
     assert ran == [None]  # no odds key -> no odds client
 
 
 def test_failed_job_alerts_and_returns_one(tmp_path, monkeypatch):
-    def boom(store, fpl, odds):
+    def boom(c):
         raise RuntimeError("fpl down")
 
     alerts = []
@@ -69,7 +71,7 @@ def test_settings_from_env():
 
 
 def test_alert_text_is_redacted_and_single_line(tmp_path, monkeypatch):
-    def boom(store, fpl, odds):
+    def boom(c):
         raise RuntimeError("GET https://x.test/?apiKey=SECRET failed\nsecond line")
 
     alerts = []
@@ -82,14 +84,14 @@ def test_alert_text_is_redacted_and_single_line(tmp_path, monkeypatch):
 
 def test_odds_client_built_when_key_set(tmp_path, monkeypatch):
     seen = []
-    monkeypatch.setitem(cli.JOBS, "snapshot daily", lambda store, fpl, odds: seen.append(odds))
+    monkeypatch.setitem(cli.JOBS, "snapshot daily", lambda c: seen.append(c.odds))
     settings = replace(make_settings(tmp_path), odds_api_key="K")
     assert cli.main(["snapshot", "daily"], settings=settings) == 0
     assert isinstance(seen[0], OddsClient)
 
 
 def test_unconfigured_telegram_warns_and_still_fails(tmp_path, monkeypatch, caplog):
-    def boom(store, fpl, odds):
+    def boom(c):
         raise RuntimeError("x")
 
     monkeypatch.setitem(cli.JOBS, "snapshot tick", boom)
@@ -107,3 +109,57 @@ def test_setup_failure_is_alerted(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
     assert cli.main(["snapshot", "daily"], settings=make_settings(tmp_path)) == 1
     assert "bad CA bundle" in alerts[0]
+
+
+def test_rules_export_passes_season_and_out_through(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setitem(
+        cli.JOBS, "rules export", lambda c: seen.append((c.args.season, c.args.out))
+    )
+    settings = make_settings(tmp_path)
+    assert cli.main(["rules", "export", "2026-27"], settings=settings) == 0
+    assert cli.main(["rules", "export", "2025-26", "--out", "x/y"], settings=settings) == 0
+    assert seen == [("2026-27", "config/scoring"), ("2025-26", "x/y")]
+
+
+@pytest.mark.parametrize("command", ["element-summary", "football-data", "vaastav", "fplcache"])
+def test_backfill_commands_are_valid(tmp_path, monkeypatch, command):
+    ran = []
+    monkeypatch.setitem(cli.JOBS, f"backfill {command}", lambda c: ran.append(c.store.root))
+    assert cli.main(["backfill", command], settings=make_settings(tmp_path)) == 0
+    assert ran == [tmp_path]
+
+
+def test_every_parsed_command_has_a_job():
+    parser = cli.build_parser()
+    for name in cli.JOBS:
+        extra = ["2026-27"] if name == "rules export" else []
+        args = parser.parse_args(name.split() + extra)
+        assert f"{args.group} {args.command}" == name
+
+
+def test_bad_season_label_alerts_and_returns_one(tmp_path, monkeypatch):
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    out = tmp_path / "out"
+    assert (
+        cli.main(
+            ["rules", "export", "2026/27", "--out", str(out)], settings=make_settings(tmp_path)
+        )
+        == 1
+    )
+    assert "rules export failed" in alerts[0]
+    assert "not a season label" in alerts[0]
+    assert not out.exists()
+
+
+def test_daily_job_archives_football_data(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cli.jobs, "run_daily", lambda store, fpl, odds, **kw: calls.append((fpl, odds, kw))
+    )
+    assert cli.main(["snapshot", "daily"], settings=make_settings(tmp_path)) == 0
+    ((fpl, odds, kw),) = calls
+    assert isinstance(fpl, FplClient)
+    assert odds is None
+    assert isinstance(kw["football_data"], FootballDataClient)
