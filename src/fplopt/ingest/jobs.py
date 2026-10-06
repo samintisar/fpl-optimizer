@@ -142,14 +142,27 @@ def run_daily(
 
 
 def run_tick(
-    store: RawStore, fpl: FplSource, odds: OddsSource | None, now: Clock = utc_now
+    store: RawStore,
+    fpl: FplSource,
+    odds: OddsSource | None,
+    now: Clock = utc_now,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
     """Run every ~15 min. Inside each pre-deadline window, snapshot FPL and odds once each;
-    a source that fails is retried on the next tick. Returns True if anything ran."""
+    a source that fails is retried on the next tick. Returns True if anything ran.
+
+    The tick that takes a window's FPL snapshot then runs the post-lockdown step on it, so a
+    GW finalised after the 02:30 daily run (e.g. Tuesday morning) is archived before the next
+    deadline. It is idempotent, so it usually does nothing; when a GW was newly finalised it
+    fetches event-live and does one element-summary run (~5 minutes, well inside the tick
+    unit's TimeoutStartSec=20min; the extra bootstrap that run archives is harmless). It
+    fails independently of the FPL and odds steps, and isn't retried by later ticks in the
+    window (the daily job picks it up)."""
     latest = store.latest("fpl", "bootstrap-static")
     if latest is None:
-        # FPL and odds only: the post-lockdown step (possibly a full element-summary run)
-        # belongs to the daily job, not a 15-minute tick.
+        # FPL and odds only: on a fresh store the post-lockdown step could mean a full
+        # element-summary run, which the daily job does.
         log.info("no bootstrap snapshot yet; taking one")
         run_independently(
             [
@@ -172,6 +185,11 @@ def run_tick(
     if odds_due:
         log.info("pre-deadline odds snapshot")
         steps.append(("odds", lambda: snapshot_odds(store, odds, now)))
+    if fpl_deadline is not None:
+        # Last, so it reads the bootstrap the FPL step just archived.
+        steps.append(
+            ("post-lockdown", lambda: snapshot_post_lockdown(store, fpl, now, sleep=sleep))
+        )
     run_independently(steps)
     return fpl_deadline is not None or odds_due
 
