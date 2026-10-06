@@ -41,10 +41,14 @@ Runs as your normal user with systemd **user** timers. Raw data lands in `~/fpl-
    mkdir -p ~/.config/systemd/user
    cp deploy/systemd/* ~/.config/systemd/user/
    systemctl --user daemon-reload
-   systemctl --user enable --now fplopt-daily.timer fplopt-tick.timer
+   systemctl --user enable --now fplopt-daily.timer fplopt-tick.timer fplopt-freshness.timer
    sudo loginctl enable-linger "$USER"   # keep timers running when logged out
    ```
    If a unit fails for any reason, including a broken venv where the CLI can't even start, `fplopt-failure@.service` sends a Telegram message. A job failure the CLI already alerted on will therefore alert twice. That's intentional.
+
+   What the units do besides running the CLI:
+   - **Network wait.** `After=network-online.target` does nothing for systemd *user* units, so a `Persistent=true` timer catching up at boot could start before DNS works. Each service's `ExecStartPre` polls `getent hosts fantasy.premierleague.com` every 5 s for up to ~2 minutes, then lets the job start either way: if the network never comes up, the job fails and alerts as usual. A boot-time run can therefore take up to 2 minutes longer to start.
+   - **Freshness check** (`fplopt-freshness.timer`, daily at 12:00 UK, `Persistent=true`): `fplopt check freshness` fails, and alerts, if the newest `raw/fpl/bootstrap-static` snapshot is missing or more than 36 hours old (`--max-age-hours` to change). The daily job writes one every night, so this catches jobs or timers that stopped silently, e.g. linger disabled or a timer left disabled after an update. It runs on the same server, so it can't notice the server itself being down: for that, set up the [heartbeat](#heartbeat-optional).
 7. Optional: element-summary by hand (issue #13, ~5 minutes). On a fresh server step 4 already did a full run, and the daily job keeps it fresh (see below), so this is only for forcing a new run, e.g. after step 4's run failed, without waiting for the next daily run. Same deadline caveat as step 4:
    ```bash
    .venv/bin/fplopt backfill element-summary
@@ -54,11 +58,17 @@ Runs as your normal user with systemd **user** timers. Raw data lands in `~/fpl-
 ## Operating
 
 - Timers: `systemctl --user list-timers 'fplopt-*'`
-- Logs: `journalctl --user -u fplopt-daily.service -u fplopt-tick.service --since today`
+- Logs: `journalctl --user -u fplopt-daily.service -u fplopt-tick.service -u fplopt-freshness.service --since today`
+- Archive age by hand: `.venv/bin/fplopt check freshness` (logs the newest bootstrap's age; exit 1 and an alert if over 36 h)
 - Update: `cd ~/fpl-optimizer && git pull && uv sync --locked` (re-copy units if `deploy/systemd/` changed, then `systemctl --user daemon-reload`)
 - **Units changed in Phase 1a:** `fplopt-daily.service` now has `TimeoutStartSec=40min` (was 20min). On a server set up before that, re-copy the units and reload when deploying:
   ```bash
   cp deploy/systemd/* ~/.config/systemd/user/ && systemctl --user daemon-reload
+  ```
+- **Units changed in Phase 1 ops hardening:** `fplopt-daily.service` and `fplopt-tick.service` gained the network-wait `ExecStartPre`, and `fplopt-freshness.service`/`.timer` are new. On a server set up before that, re-copy the units, reload and enable the new timer:
+  ```bash
+  cp deploy/systemd/* ~/.config/systemd/user/ && systemctl --user daemon-reload
+  systemctl --user enable --now fplopt-freshness.timer
   ```
 - Odds credits: each odds snapshot logs `credits remaining=…`; a warning is logged below 50 (free tier: 500/month; ~80 used).
 
@@ -73,6 +83,8 @@ Steps run independently: one failing doesn't stop the others, and the job fails 
    - `event/{gw}/live/` once per finalised GW, under `raw/fpl/event-live/<season>/<gw>/` (e.g. `2026-27/5`). GWs that are already archived are skipped, and failed GWs are retried the next day.
    - A fresh element-summary run (all players' per-GW history, about 700 requests, ~5 minutes) when a GW has been finalised since the newest *complete* run. Its manifest also records `season` and `through_event`. A run with failures, without a manifest, or with an older manifest that lacks these keys doesn't count, so the next day tries again. The first daily run after deploying Phase 1a therefore does a full run.
    - Does nothing on days when no new GW has been finalised.
+
+The pre-deadline tick runs the same post-lockdown step right after it takes a window's FPL snapshot, so a GW finalised after the 02:30 run (say on a Tuesday morning) is archived before a Tuesday-evening deadline. It's idempotent, so usually it does nothing; when a GW was newly finalised it adds event-live and one element-summary run (~5 minutes, inside the tick unit's `TimeoutStartSec=20min`). That run archives another bootstrap in the same, already-closed window, which is harmless. A failure there alerts but isn't retried by later ticks; the next daily run picks it up.
 
 The element-summary run has to fit in the daily unit's `TimeoutStartSec=40min`. If systemd stops the job (timeout or `systemctl stop`), the CLI turns SIGTERM into a normal exit so the run still writes its manifest; the run is incomplete, so the next day redoes it. A run killed outright (SIGKILL, power loss) leaves no manifest and is likewise redone.
 
