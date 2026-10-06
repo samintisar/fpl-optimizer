@@ -41,6 +41,7 @@ SNAPSHOT_COLUMNS = (
     "chance_of_playing_next_round",
     "news_added",
     "ep_next",
+    "form",
 )
 FORM_STATS = (
     "minutes",
@@ -214,9 +215,12 @@ def availability(view: AsOfView) -> pd.DataFrame:
 
 
 def ep_next(view: AsOfView) -> pd.DataFrame:
-    """Per pool player: FPL's `ep_next` from the newest snapshot (null without one)."""
-    df = _pool_with_snapshot(view, ["ep_next"])
-    return _finish(df, {"player_key": "int64", "ep_next": "Float64"}, ["player_key"])
+    """Per pool player: FPL's `ep_next` (expected points next GW, 0 for a blank) and `form`
+    (FPL's mean points per match over the last 30 days) from the newest snapshot (null
+    without one)."""
+    df = _pool_with_snapshot(view, ["ep_next", "form"])
+    dtypes = {"player_key": "int64", "ep_next": "Float64", "form": "Float64"}
+    return _finish(df, dtypes, ["player_key"])
 
 
 def _window(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
