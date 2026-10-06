@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -140,6 +140,35 @@ def test_player_tables_end_to_end(world):
     assert len(player_dim) == 22
     assert player_dim["opta_code"].iloc[0] == f"p{player_dim['player_key'].iloc[0]}"
     assert "first_season" not in player_dim.columns and "last_season" not in player_dim.columns
+
+
+def test_current_season_stays_buildable_after_next_season_data_arrives(world, caplog):
+    # 2026-27 complete through GW2 (football-data published for all of it).
+    fx26 = world.add_current_season(finished_through=2, fd_rows=1000)
+    world.add_element_summary(CURRENT_AT, current_history(fx26), 2026, through_event=2)
+    # June 2027: FPL resets. Our archive gets the 2027-28 bootstrap and fixture list (nothing
+    # played), an element-summary run with zero history rows, and a newer run whose manifest
+    # has no season (complete for no season).
+    reset_at = datetime(2027, 6, 20, tzinfo=UTC)
+    fx27 = season_fixtures(2027).assign(finished=False, team_h_score=None, team_a_score=None)
+    world.add_own_bootstrap(reset_at, bootstrap(2027, season_fixtures(2027), finished_through=0))
+    world.add_own_fixtures(reset_at, fx27)
+    no_history = pd.DataFrame({"element": pd.Series(dtype="int64")})
+    world.add_element_summary(reset_at, no_history, 2027, 0, elements=list(range(1, 21)))
+    world.add_element_summary(reset_at + timedelta(hours=1), no_history, None, 0, elements=[1])
+
+    pm = build_players(world)
+    fixture = world.ctx.table("fixture")
+    assert fixture.groupby("season").size().to_dict() == {2026: 380, 2027: 380}
+    assert fixture.loc[fixture["season"] == 2026, "finished"].sum() == 20
+    assert pm.groupby("season").size().to_dict() == {2026: 40}
+    gameweek = world.ctx.table("gameweek")
+    assert gameweek.groupby("season").size().to_dict() == {2026: 38, 2027: 38}
+    player_season = world.ctx.table("player_season").set_index(["season", "player_key"])
+    assert player_season.groupby(level="season").size().to_dict() == {2026: 20, 2027: 20}
+    reset = pd.Timestamp(reset_at).as_unit("us")
+    assert (player_season.loc[2027, "available_at"] == reset).all()  # listed, no rows yet
+    assert "has no season" in caplog.text
 
 
 def test_goal_sum_mismatch_fails_the_build(world):

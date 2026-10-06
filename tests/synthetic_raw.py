@@ -270,10 +270,17 @@ class World:
         return fixtures
 
     def add_element_summary(
-        self, at: datetime, history: pd.DataFrame, season: int, through_event: int
+        self,
+        at: datetime,
+        history: pd.DataFrame,
+        season: int | None,
+        through_event: int,
+        elements: list[int] | None = None,
     ) -> None:
-        """An element-summary run: one file per element with its `history` rows."""
-        elements = sorted(int(e) for e in history["element"].unique())
+        """An element-summary run: one file per element (default: those in `history`) with
+        its `history` rows."""
+        if elements is None:
+            elements = sorted(int(e) for e in history["element"].unique())
         for element in elements:
             rows = history[history["element"] == element]
             payload = {

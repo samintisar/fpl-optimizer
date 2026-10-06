@@ -24,9 +24,11 @@ the future (the seasons a player plays are in player_season, with their own `ava
 
 player_match: one row per player per fixture his club played while he was registered (FPL
 lists every registered player of a club with a fixture: 52–62% of rows have 0 minutes).
-2016-17 … 2025-26 from vaastav merged_gw, 2026-27 from the newest complete element-summary
-run (element -> code via the bootstrap archived with that run, else the newest bootstrap of
-the season): only finished fixtures of GWs up to the run's `through_event`.
+2016-17 … 2025-26 from vaastav merged_gw; each later season from the newest complete
+element-summary run whose manifest `season` is that season (runs without a season are
+skipped with a warning; team ids via the bootstrap archived with that run, else the newest
+bootstrap of the season): only finished fixtures of GWs up to the run's `through_event`. A
+season without such a run has no rows if none of its fixtures is finished, else fails.
 - Dropped on purpose: `value`, `selected`, `transfers_*` (timing unverified, issue #6), `xP`
   (lookahead leak), ICT.
 - Cleaning: exact duplicate rows dropped (2025-26: 10); managers dropped (2024-25: 20
@@ -66,7 +68,7 @@ from fplopt.build.common import (
     MANIFEST,
     UTC_US,
     BuildContext,
-    latest_complete_run,
+    latest_complete_season_run,
     read_raw_csv,
 )
 from fplopt.build.fixtures import (
@@ -589,30 +591,45 @@ def element_summary_bootstrap(ctx: BuildContext, run: Path, season: int) -> dict
     return RawStore.read_json(bootstraps[season][1])
 
 
+# Source columns `match_rows` needs (an empty run's history frame has none).
+SOURCE_COLUMNS = ["element", "fixture", "round", "was_home", "opponent_team", *COUNT_STATS]
+
+
 def element_summary_match_rows(
     ctx: BuildContext, season: int, fixture: pd.DataFrame
-) -> tuple[pd.DataFrame, dict]:
-    """Current-season rows from the newest complete element-summary run (finished fixtures
-    of GWs up to the run's `through_event`) and the bootstrap mapping its ids."""
-    run = latest_complete_run(ctx.store, "fpl", "element-summary")
+) -> tuple[pd.DataFrame, dict[int, int]]:
+    """A current season's rows from its newest complete element-summary run (finished
+    fixtures of GWs up to the run's `through_event`) and the team id -> code map for them."""
+    finished = fixture.loc[(fixture["season"] == season) & fixture["finished"], "fpl_fixture_id"]
+    run = latest_complete_season_run(ctx.store, "fpl", "element-summary", season)
+    if run is None:
+        if len(finished):
+            raise LookupError(
+                f"no complete element-summary run for season {season}, which has "
+                f"{len(finished)} finished fixture(s)"
+            )
+        log.info("season %d: no element-summary run and no finished fixture yet", season)
+        return match_rows(pd.DataFrame(columns=SOURCE_COLUMNS), season, "fpl"), {}
     manifest = RawStore.read_json(run / MANIFEST)
-    if int(manifest.get("season", season)) != season:
-        raise LookupError(f"element-summary run {run.name} is for season {manifest['season']}")
     histories = [
         pd.DataFrame(RawStore.read_json(path)["history"])
         for path in sorted(run.glob("*.json.gz"))
         if path.name != MANIFEST
     ]
-    history = pd.concat([h for h in histories if len(h)], ignore_index=True)
+    histories = [h for h in histories if len(h)]
+    history = (
+        pd.concat(histories, ignore_index=True)
+        if histories
+        else pd.DataFrame(columns=SOURCE_COLUMNS)
+    )
     rows = match_rows(history, season, "fpl")
-    finished = fixture.loc[(fixture["season"] == season) & fixture["finished"], "fpl_fixture_id"]
     keep = rows["fpl_fixture_id"].isin(finished)
     through = manifest.get("through_event")
     if through is not None:
         keep &= rows["round"] <= int(through)
     if (~keep).any():
         log.info("element-summary %s: skipped %d unfinished row(s)", run.name, int((~keep).sum()))
-    return rows[keep], element_summary_bootstrap(ctx, run, season)
+    return rows[keep], bootstrap_team_codes(element_summary_bootstrap(ctx, run, season))
 
 
 def build_player_match(ctx: BuildContext) -> pd.DataFrame:
@@ -624,10 +641,9 @@ def build_player_match(ctx: BuildContext) -> pd.DataFrame:
         frames.append(vaastav_match_rows(season, season_dir))
         team_codes[season] = season_team_codes(season_dir)
     for season in current_seasons(ctx):
-        rows, bootstrap = element_summary_match_rows(ctx, season, fixture)
+        rows, team_codes[season] = element_summary_match_rows(ctx, season, fixture)
         frames.append(rows)
-        team_codes[season] = bootstrap_team_codes(bootstrap)
-    raw = pd.concat(frames, ignore_index=True)
+    raw = pd.concat([f for f in frames if len(f)] or frames[:1], ignore_index=True)
     df = assemble_player_match(raw, fixture, ctx.table("gameweek"), players, team_codes, resolver)
     check_goal_sums(df, fixture)
     check_placeholder_zeros(df)

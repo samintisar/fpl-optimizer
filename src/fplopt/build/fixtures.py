@@ -6,9 +6,11 @@ fixture sources:
   rows (`was_home`) name the away club in `opponent_team` and vice versa; kickoff, round and
   scores must be unique per fixture.
 - 2018-19 … 2025-26: vaastav `fixtures.csv`.
-- 2026-27 (current): the newest `raw/fpl/fixtures` snapshot.
+- Seasons vaastav doesn't cover (2026-27 →): per season, the newest own `raw/fpl/fixtures`
+  snapshot of that season (season = start year of its earliest kickoff), so a new season's
+  fixture list does not hide the previous season's.
 Season team ids -> FPL team codes via vaastav `teams.csv` (2019-20+) or `players_raw`
-`team`→`team_code` (earlier), and for 2026-27 the newest bootstrap of that season.
+`team`→`team_code` (earlier), and for own snapshots the newest bootstrap of that season.
 
 `available_at` is the lockdown of the fixture's GW (when results and stats are final); a
 fixture without a GW/kickoff (postponed, not yet rescheduled) gets 2100-01-01. That the
@@ -43,7 +45,7 @@ dense rank of `gw` among a season's GWs with fixtures: 2019-20 39–47 -> 30–3
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import date, datetime
 from pathlib import Path
 
@@ -127,16 +129,14 @@ def bootstrap_team_codes(bootstrap: dict) -> dict[int, int]:
     return {int(team["id"]): int(team["code"]) for team in bootstrap["teams"]}
 
 
-def last_bootstrap_per_season(store: RawStore) -> dict[int, tuple[datetime, Path, str]]:
-    """The newest archived bootstrap (fplcache or own) describing each season. Seasons only
-    move forward in time, so a binary search per season parses ~13 files instead of ~8,000;
-    the season is `bootstrap_season(...)`, never the snapshot timestamp."""
-    entries = fplcache_and_own_bootstraps(store)
+def newest_per_season[T](entries: list[T], season_of: Callable[[T], int]) -> dict[int, T]:
+    """The newest of time-ordered `entries` for each season. Seasons only move forward in
+    time, so a binary search per season reads a few entries instead of all of them."""
     seasons: dict[int, int] = {}
 
     def season_at(i: int) -> int:
         if i not in seasons:
-            seasons[i] = bootstrap_season(RawStore.read_json(entries[i][1]))
+            seasons[i] = season_of(entries[i])
         return seasons[i]
 
     def last_at_most(season: int) -> int:
@@ -157,6 +157,32 @@ def last_bootstrap_per_season(store: RawStore) -> dict[int, tuple[datetime, Path
         if i >= 0 and season_at(i) == season:
             result[season] = entries[i]
     return result
+
+
+def last_bootstrap_per_season(store: RawStore) -> dict[int, tuple[datetime, Path, str]]:
+    """The newest archived bootstrap (fplcache or own) describing each season (~13 of ~8,000
+    files parsed); the season is `bootstrap_season(...)`, never the snapshot timestamp."""
+    return newest_per_season(
+        fplcache_and_own_bootstraps(store),
+        lambda entry: bootstrap_season(RawStore.read_json(entry[1])),
+    )
+
+
+def fixtures_snapshot_season(records: list[dict], snapshot_at: datetime) -> int:
+    """Season of an FPL fixtures payload: start year of its earliest kickoff (the snapshot's
+    own season if no fixture has a kickoff)."""
+    kickoffs = [r["kickoff_time"] for r in records if r.get("kickoff_time")]
+    if not kickoffs:
+        return season_start_year(snapshot_at)
+    return season_start_year(to_utc(pd.Series([min(kickoffs)])).iloc[0].to_pydatetime())
+
+
+def own_fixtures_per_season(store: RawStore) -> dict[int, tuple[datetime, Path]]:
+    """The newest own `fpl/fixtures` snapshot of each season."""
+    return newest_per_season(
+        store.entries("fpl", "fixtures"),
+        lambda entry: fixtures_snapshot_season(RawStore.read_json(entry[1]), entry[0]),
+    )
 
 
 # --- fixture -----------------------------------------------------------------------------
@@ -347,28 +373,25 @@ def _raw_fixtures(ctx: BuildContext) -> pd.DataFrame:
             )
             raw = fixtures_from_merged_gw(merged, team_codes)
         frames.append(raw.assign(season=season))
-    current = _current_season_fixtures(ctx, {f["season"].iloc[0] for f in frames})
-    if current is not None:
-        frames.append(current)
+    frames += _current_season_fixtures(ctx, {f["season"].iloc[0] for f in frames})
     return pd.concat(frames, ignore_index=True)
 
 
-def _current_season_fixtures(ctx: BuildContext, have: set[int]) -> pd.DataFrame | None:
-    """The newest own fixtures snapshot, if it is for a season vaastav doesn't cover."""
-    path = ctx.store.latest("fpl", "fixtures")
-    if path is None:
-        return None
-    fixtures = pd.DataFrame(RawStore.read_json(path))
-    kickoffs = to_utc(fixtures["kickoff_time"]).dropna()
-    season = season_start_year(kickoffs.min().to_pydatetime())
-    if season in have:
-        log.info("fixtures snapshot %s is for season %d, already covered by vaastav", path, season)
-        return None
-    bootstraps = last_bootstrap_per_season(ctx.store)
-    if season not in bootstraps:
-        raise LookupError(f"no archived bootstrap for season {season} (team ids of {path})")
-    team_codes = bootstrap_team_codes(RawStore.read_json(bootstraps[season][1]))
-    return fixtures_from_api(fixtures, team_codes).assign(season=season)
+def _current_season_fixtures(ctx: BuildContext, have: set[int]) -> list[pd.DataFrame]:
+    """Per season vaastav doesn't cover, its newest own fixtures snapshot."""
+    frames = []
+    bootstraps = None
+    for season, (_, path) in sorted(own_fixtures_per_season(ctx.store).items()):
+        if season in have:
+            log.info("fixtures snapshot %s is for season %d, covered by vaastav", path, season)
+            continue
+        bootstraps = bootstraps or last_bootstrap_per_season(ctx.store)
+        if season not in bootstraps:
+            raise LookupError(f"no archived bootstrap for season {season} (team ids of {path})")
+        team_codes = bootstrap_team_codes(RawStore.read_json(bootstraps[season][1]))
+        fixtures = pd.DataFrame(RawStore.read_json(path))
+        frames.append(fixtures_from_api(fixtures, team_codes).assign(season=season))
+    return frames
 
 
 def football_data_files(

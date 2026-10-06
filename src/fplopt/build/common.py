@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -78,9 +79,9 @@ def read_raw_csv(path: Path, usecols: list[str] | None = None, **kwargs: Any) ->
     return df
 
 
-def latest_complete_run(store: RawStore, source: str, endpoint: str) -> Path:
-    """Newest timestamp-named run directory under `<source>/<endpoint>/` whose manifest says
-    every expected file was written and none failed. Raises LookupError if there is none."""
+def complete_runs(store: RawStore, source: str, endpoint: str) -> Iterator[tuple[Path, dict]]:
+    """(run directory, manifest) of every timestamp-named run under `<source>/<endpoint>/`
+    whose manifest says every expected file was written and none failed, newest first."""
     directory = store.root / source / endpoint
     runs = (
         sorted(
@@ -103,9 +104,30 @@ def latest_complete_run(store: RawStore, source: str, endpoint: str) -> Path:
             and isinstance(written, list)
             and sorted(map(str, expected)) == sorted(map(str, written))
         ):
-            return run
-        log.warning("skipping incomplete run %s", run)
+            yield run, manifest
+        else:
+            log.warning("skipping incomplete run %s", run)
+
+
+def latest_complete_run(store: RawStore, source: str, endpoint: str) -> Path:
+    """Newest complete run (see `complete_runs`). Raises LookupError if there is none."""
+    for run, _ in complete_runs(store, source, endpoint):
+        return run
     raise LookupError(f"no complete run under {source}/{endpoint}")
+
+
+def latest_complete_season_run(
+    store: RawStore, source: str, endpoint: str, season: int
+) -> Path | None:
+    """Newest complete run whose manifest `season` is `season`, or None. A run whose manifest
+    has no season (missing or null) is complete for no season: skipped with a warning."""
+    for run, manifest in complete_runs(store, source, endpoint):
+        run_season = manifest.get("season")
+        if run_season is None:
+            log.warning("run %s has no season in its manifest; skipped", run)
+        elif int(run_season) == season:
+            return run
+    return None
 
 
 def fplcache_and_own_bootstraps(store: RawStore) -> list[tuple[datetime, Path, str]]:
