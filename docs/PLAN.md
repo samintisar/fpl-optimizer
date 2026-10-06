@@ -137,7 +137,7 @@ User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, c
 
 ## 4. Leakage prevention
 
-- **Single access path:** feature builders take a `deadline` and only read via `as_of(df, deadline)` — concretely `DataStore(data_dir).as_of(deadline)`; nothing else in `fplopt.features` reads files (enforced by a test).
+- **Single access path:** feature builders take a `deadline` and only read via `as_of(df, deadline)` — concretely `DataStore(data_dir).as_of(deadline)`; nothing else in `fplopt.features` reads files. Enforced statically (`tests/test_features_architecture.py`, every module under `fplopt/features/` except `store.py`/`leakcheck.py`): an import allowlist (pandas, numpy, typing, collections, dataclasses, math, logging; only `AsOfView` from the store; sibling feature modules), no dynamic access (`getattr`, `vars`, `globals`, `__dict__`, `__import__`, …) or private attributes, and no state between calls (no `global`/`nonlocal`, cache decorators, mutable module-level values except the `FEATURES` registry). The leakage check runs builders with `DataStore(data_dir=...)` blocked, and computes the clean/corrupted/truncated variants in a seeded random order per deadline.
 - **`as_of` semantics:**
   - Keeps rows with `available_at < deadline` (strict); a row available exactly at the deadline is for the next decision.
   - State fixed before deadline t (price at t, registration/club at t): `available_at = deadline_t − 1h` (prices change overnight) — but never before the player was registered with that club (`player_gw`: players added after the deadline are only visible from the first snapshot listing them, or the next GW without snapshots).

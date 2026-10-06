@@ -1,6 +1,8 @@
 """Corrupt-the-future harness (PLAN §4; Phase 2 plan, Task 4).
 
-For a deadline, every feature is computed three times, each from a fresh `DataStore`:
+For a deadline, every feature is computed three times, each from its own `DataStore`, in a
+per-deadline random order (`variant_order`, seeded), so a builder that keeps state between
+calls cannot rely on always seeing the clean data first:
 - **clean**: the tables as they are;
 - **corrupted** (`corrupt_future`): every row with `available_at >= deadline` gets random
   values of the same dtype in every column except `available_at` (keys, event/snapshot
@@ -25,6 +27,12 @@ A difference can also mean the builder is not deterministic; either way it fails
 
 Past rows (`available_at < deadline`) are never modified and keep their relative order.
 `available_at` is never corrupted (the store's visibility depends on it).
+
+The builders run inside `files_blocked()`: a builder that opens `data/` itself
+(`DataStore(data_dir=...)`) fails, which is reported as a clean-data failure. What the
+harness cannot see by construction — rows marked available too early are "past" and never
+corrupted — is covered by the build-time availability rules and checks, and the static
+rules of tests/test_features_architecture.py.
 """
 
 from __future__ import annotations
@@ -45,7 +53,7 @@ import pyarrow as pa
 
 from fplopt.build.tables import TABLES
 from fplopt.features import FEATURES, FeatureBuilder
-from fplopt.features.store import DataStore
+from fplopt.features.store import DataStore, files_blocked
 from fplopt.seasons import HOLDOUT_SEASONS
 
 log = logging.getLogger(__name__)
@@ -61,6 +69,7 @@ P_KEEP_KEY = 0.75  # ghost cell of a key column: keep the past row's value
 P_KEEP = 0.4  # ghost cell of another column: keep the past row's value
 DEFAULT_DEADLINES = 12
 VARIANTS = ("corrupted", "truncated")
+RUNS = ("clean", *VARIANTS)
 
 
 class LeakageError(RuntimeError):
@@ -400,6 +409,13 @@ def _fingerprints(results: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def variant_order(seed: int, i: int) -> tuple[str, ...]:
+    """The order in which the clean, corrupted and truncated features of the i-th deadline
+    are computed: random, deterministic for (seed, i)."""
+    rng = np.random.default_rng([seed, i, 0x0DE7])
+    return tuple(RUNS[j] for j in rng.permutation(len(RUNS)))
+
+
 def check_leakage(
     tables: Mapping[str, pd.DataFrame],
     deadlines: Sequence[Any],
@@ -407,38 +423,46 @@ def check_leakage(
     features: Mapping[str, FeatureBuilder] | None = None,
 ) -> list[Leak]:
     """For each deadline compute `features` (default: the registry) on the clean,
-    corrupted and truncated tables, each from a fresh DataStore; every difference is a
-    Leak. A feature that fails on the clean data is reported too (variant 'clean')."""
+    corrupted and truncated tables (each variant from a fresh DataStore; the clean one is
+    shared across deadlines), in `variant_order`, with `files_blocked()` active; every
+    difference is a Leak. A feature that fails on the clean data is reported too (variant
+    'clean')."""
     features = FEATURES if features is None else features
     clean_store = DataStore(tables=tables)
     leaks: list[Leak] = []
-    for i, raw in enumerate(deadlines):
-        deadline = _utc(raw)
-        started = time.perf_counter()
-        clean = _compute(clean_store, deadline, features)
-        expected = _fingerprints(clean)
-        for name, result in clean.items():
-            if isinstance(result, str):
-                leaks.append(Leak(deadline, name, "clean", result))
-        for variant in VARIANTS:
-            if variant == "corrupted":
-                altered = corrupt_future(tables, deadline, seed=seed + i)
-            else:
-                altered = truncate_future(tables, deadline)
-            results = _compute(DataStore(tables=altered), deadline, features)
-            del altered
-            for name, digest in _fingerprints(results).items():
-                if digest != expected[name]:
-                    detail = _describe(clean[name], results[name])
-                    leaks.append(Leak(deadline, name, variant, detail))
-        log.info(
-            "leakage check %d/%d at %s: %s (%.1f s)",
-            i + 1,
-            len(deadlines),
-            deadline,
-            "ok" if not any(leak.deadline == deadline for leak in leaks) else "LEAKS",
-            time.perf_counter() - started,
-        )
+    with files_blocked("while the leakage check runs (features read only the view)"):
+        for i, raw in enumerate(deadlines):
+            deadline = _utc(raw)
+            started = time.perf_counter()
+            results: dict[str, dict[str, Any]] = {}
+            for run in variant_order(seed, i):
+                if run == "clean":
+                    results[run] = _compute(clean_store, deadline, features)
+                    continue
+                if run == "corrupted":
+                    altered = corrupt_future(tables, deadline, seed=seed + i)
+                else:
+                    altered = truncate_future(tables, deadline)
+                results[run] = _compute(DataStore(tables=altered), deadline, features)
+                del altered
+            clean = results["clean"]
+            expected = _fingerprints(clean)
+            for name, result in clean.items():
+                if isinstance(result, str):
+                    leaks.append(Leak(deadline, name, "clean", result))
+            for variant in VARIANTS:
+                for name, digest in _fingerprints(results[variant]).items():
+                    if digest != expected[name]:
+                        detail = _describe(clean[name], results[variant][name])
+                        leaks.append(Leak(deadline, name, variant, detail))
+            log.info(
+                "leakage check %d/%d at %s: %s (%.1f s)",
+                i + 1,
+                len(deadlines),
+                deadline,
+                "ok" if not any(leak.deadline == deadline for leak in leaks) else "LEAKS",
+                time.perf_counter() - started,
+            )
     return leaks
 
 

@@ -17,6 +17,7 @@ data/ 2026-10-06 over every non-holdout deadline: 2020/21 GW1 is the only one.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
@@ -25,8 +26,12 @@ from fplopt.features.store import AsOfView
 
 log = logging.getLogger(__name__)
 
+# Module-level values are immutable (tuples; dtypes as (column, dtype) pairs): feature
+# modules keep no state between calls (tests/test_features_architecture.py).
+Dtypes = Mapping[str, object] | tuple[tuple[str, object], ...]
+
 UTC_US = pd.DatetimeTZDtype("us", "UTC")
-SNAPSHOT_COLUMNS = [
+SNAPSHOT_COLUMNS = (
     "snapshot_at",
     "season",
     "team_key",
@@ -36,8 +41,8 @@ SNAPSHOT_COLUMNS = [
     "chance_of_playing_next_round",
     "news_added",
     "ep_next",
-]
-FORM_STATS = [
+)
+FORM_STATS = (
     "minutes",
     "starts",
     "total_points",
@@ -47,16 +52,17 @@ FORM_STATS = [
     "us_xa",
     "fpl_xg",
     "fpl_xa",
-]
-RATE_STATS = [s for s in FORM_STATS if s not in ("minutes", "starts")]
+)
+RATE_STATS = tuple(s for s in FORM_STATS if s not in ("minutes", "starts"))
 FORM_WINDOW = 5
 HORIZON = 5  # upcoming_fixtures: the target GW and the next HORIZON GWs
-OUTCOMES = ["home", "draw", "away"]
-ODDS_GROUP = ["fixture_key", "source", "bookmaker", "market", "outcome", "line"]
+OUTCOMES = ("home", "draw", "away")
+ODDS_GROUP = ("fixture_key", "source", "bookmaker", "market", "outcome", "line")
 
 
-def _finish(df: pd.DataFrame, dtypes: dict[str, object], sort_by: list[str]) -> pd.DataFrame:
+def _finish(df: pd.DataFrame, dtypes: Dtypes, sort_by: list[str]) -> pd.DataFrame:
     """Exactly `dtypes`' columns, in that order and with those dtypes, sorted (stable)."""
+    dtypes = dict(dtypes)
     out = df[list(dtypes)].astype(dtypes)
     return out.sort_values(sort_by, kind="mergesort").reset_index(drop=True)
 
@@ -77,7 +83,7 @@ def _newest_snapshot(view: AsOfView, season: int) -> pd.DataFrame:
     """Rows of `season`'s newest player snapshot before the deadline (empty if none). Per
     player the newest row across sources, then only players present at the newest time:
     a player missing from it has left the game."""
-    snaps = view.latest("player_snapshot", by=["player_key"], columns=SNAPSHOT_COLUMNS)
+    snaps = view.latest("player_snapshot", by=["player_key"], columns=list(SNAPSHOT_COLUMNS))
     snaps = snaps[snaps["season"] == season]
     if snaps.empty:
         return snaps
@@ -86,13 +92,13 @@ def _newest_snapshot(view: AsOfView, season: int) -> pd.DataFrame:
 
 # --- players -----------------------------------------------------------------------------
 
-POOL_DTYPES = {
-    "player_key": "int64",
-    "element_type": "int64",
-    "team_key": "int64",
-    "price": "int64",
-    "source": "str",
-}
+POOL_DTYPES = (
+    ("player_key", "int64"),
+    ("element_type", "int64"),
+    ("team_key", "int64"),
+    ("price", "int64"),
+    ("source", "str"),
+)
 
 
 def player_pool(view: AsOfView) -> pd.DataFrame:
@@ -146,14 +152,14 @@ def _pool(view: AsOfView) -> pd.DataFrame:
     return _finish(pool, POOL_DTYPES, ["player_key"])
 
 
-COVERAGE_DTYPES = {
-    "season": "int64",
-    "gw": "int64",
-    "team_key": "int64",
-    "n_fixtures": "int64",
-    "n_fixtures_horizon": "int64",
-    "n_pool_players": "int64",
-}
+COVERAGE_DTYPES = (
+    ("season", "int64"),
+    ("gw", "int64"),
+    ("team_key", "int64"),
+    ("n_fixtures", "int64"),
+    ("n_fixtures_horizon", "int64"),
+    ("n_pool_players", "int64"),
+)
 
 
 def _coverage(view: AsOfView, pool: pd.DataFrame) -> pd.DataFrame:
@@ -184,12 +190,12 @@ def pool_coverage(view: AsOfView) -> pd.DataFrame:
     return _coverage(view, _pool(view))
 
 
-AVAILABILITY_DTYPES = {
-    "player_key": "int64",
-    "status": "str",
-    "chance_of_playing_next_round": "Int64",
-    "news_added": UTC_US,
-}
+AVAILABILITY_DTYPES = (
+    ("player_key", "int64"),
+    ("status", "str"),
+    ("chance_of_playing_next_round", "Int64"),
+    ("news_added", UTC_US),
+)
 
 
 def _pool_with_snapshot(view: AsOfView, columns: list[str]) -> pd.DataFrame:
@@ -245,7 +251,7 @@ def _form_dtypes() -> dict[str, object]:
     return dtypes
 
 
-FORM_DTYPES = _form_dtypes()
+FORM_DTYPES = tuple(_form_dtypes().items())
 
 
 def recent_form(view: AsOfView) -> pd.DataFrame:
@@ -266,19 +272,19 @@ def recent_form(view: AsOfView) -> pd.DataFrame:
 
 # --- teams -------------------------------------------------------------------------------
 
-UPCOMING_DTYPES = {
-    "season": "int64",
-    "team_key": "int64",
-    "gw": "int64",
-    "gw_index": "int64",
-    "horizon": "int64",
-    "n_fixtures": "int64",
-    "fixture_key": "Int64",
-    "opponent_team_key": "Int64",
-    "is_home": "boolean",
-    "kickoff_time": UTC_US,
-    "schedule_source": "str",
-}
+UPCOMING_DTYPES = (
+    ("season", "int64"),
+    ("team_key", "int64"),
+    ("gw", "int64"),
+    ("gw_index", "int64"),
+    ("horizon", "int64"),
+    ("n_fixtures", "int64"),
+    ("fixture_key", "Int64"),
+    ("opponent_team_key", "Int64"),
+    ("is_home", "boolean"),
+    ("kickoff_time", UTC_US),
+    ("schedule_source", "str"),
+)
 
 
 def _sides(fixtures: pd.DataFrame) -> pd.DataFrame:
@@ -318,26 +324,26 @@ def upcoming_fixtures(view: AsOfView) -> pd.DataFrame:
     return _finish(out, UPCOMING_DTYPES, sort_by)
 
 
-STRENGTH_DTYPES = {
-    "season": "int64",
-    "gw": "int64",
-    "fixture_key": "int64",
-    "kickoff_time": UTC_US,
-    "team_key": "int64",
-    "opponent_team_key": "int64",
-    "is_home": "bool",
-    "elo": "Float64",
-    "opponent_elo": "Float64",
-    "p_win": "Float64",
-    "p_draw": "Float64",
-    "p_loss": "Float64",
-    "odds_source": "str",
-}
+STRENGTH_DTYPES = (
+    ("season", "int64"),
+    ("gw", "int64"),
+    ("fixture_key", "int64"),
+    ("kickoff_time", UTC_US),
+    ("team_key", "int64"),
+    ("opponent_team_key", "int64"),
+    ("is_home", "bool"),
+    ("elo", "Float64"),
+    ("opponent_elo", "Float64"),
+    ("p_win", "Float64"),
+    ("p_draw", "Float64"),
+    ("p_loss", "Float64"),
+    ("odds_source", "str"),
+)
 
 
 def _complete(prices: pd.DataFrame) -> pd.DataFrame:
     """fixture_key x OUTCOMES prices, only fixtures with all three known and positive."""
-    prices = prices.reindex(columns=OUTCOMES)
+    prices = prices.reindex(columns=list(OUTCOMES))
     return prices[(prices > 0).all(axis=1)]
 
 
@@ -345,7 +351,7 @@ def _match_probabilities(view: AsOfView, fixture_keys: list[int]) -> pd.DataFram
     """Per fixture: overround-normalised h2h probabilities (p_home, p_draw, p_away) from the
     newest odds before the deadline: football-data's market average if complete, else the
     median across Odds API bookmakers of the fixture's newest Odds API snapshot."""
-    odds = view.latest("odds_snapshot", by=ODDS_GROUP, columns=["price", "snapshot_at"])
+    odds = view.latest("odds_snapshot", by=list(ODDS_GROUP), columns=["price", "snapshot_at"])
     odds = odds[
         (odds["market"] == "h2h")
         & odds["fixture_key"].isin(fixture_keys)
@@ -358,7 +364,7 @@ def _match_probabilities(view: AsOfView, fixture_keys: list[int]) -> pd.DataFram
     api = _complete(api.pivot_table("price", "fixture_key", "outcome", aggfunc="median"))
     api = api[~api.index.isin(fd.index)]
     prices = pd.concat([fd.assign(odds_source="football-data"), api.assign(odds_source="odds-api")])
-    implied = 1 / prices[OUTCOMES].astype("float64")
+    implied = 1 / prices[list(OUTCOMES)].astype("float64")
     probabilities = implied.div(implied.sum(axis=1), axis=0)
     probabilities.columns = ["p_home", "p_draw", "p_away"]
     probabilities["odds_source"] = prices["odds_source"]

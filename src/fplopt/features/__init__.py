@@ -1,5 +1,7 @@
 """Point-in-time features. Every builder takes one argument, an `AsOfView`
-(`DataStore(data_dir).as_of(deadline)`), and reads only through it (PLAN §4)."""
+(`fplopt.features.store.DataStore(data_dir).as_of(deadline)`), and reads only through it
+(PLAN §4). Feature modules import only `AsOfView` from the store, never `DataStore`
+(tests/test_features_architecture.py)."""
 
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from fplopt.features.baseline import (
     team_strength,
     upcoming_fixtures,
 )
-from fplopt.features.store import AsOfView, DataStore
+from fplopt.features.store import AsOfView
 
 FeatureBuilder = Callable[[AsOfView], pd.DataFrame]
 
@@ -36,4 +38,4 @@ def compute_features(view: AsOfView) -> dict[str, pd.DataFrame]:
     return {name: builder(view) for name, builder in FEATURES.items()}
 
 
-__all__ = ["FEATURES", "AsOfView", "DataStore", "FeatureBuilder", "compute_features"]
+__all__ = ("FEATURES", "AsOfView", "FeatureBuilder", "compute_features")

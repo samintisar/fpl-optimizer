@@ -11,11 +11,17 @@ sorted by `available_at` (for snapshot tables: ties ordered so the preferred sou
 last). A view's visible rows are therefore a prefix found with `searchsorted`, and `latest()`
 uses a per-(table, by) group index built once per store, so a per-deadline call never scans or
 copies a whole table. Stores are not invalidated: build a new one after `data/` changes.
+
+`files_blocked()`: while it is active (in the current context), opening `data/` through a
+`DataStore` raises `FilesBlockedError`; the leakage harness runs the feature builders inside
+it, so a builder cannot read the real tables behind the view it is given.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +44,30 @@ SCHEDULE_COLUMNS = [
     "away_team_key",
     "schedule_source",
 ]
+
+
+_FILES_BLOCKED: ContextVar[str | None] = ContextVar("fplopt_files_blocked", default=None)
+
+
+class FilesBlockedError(RuntimeError):
+    """A `DataStore` tried to read `data/` while `files_blocked()` was active."""
+
+
+@contextmanager
+def files_blocked(reason: str) -> Iterator[None]:
+    """While active, `DataStore(data_dir=...)` (and loading a table of an existing data_dir
+    store) raises FilesBlockedError naming `reason`. In-memory stores still work."""
+    token = _FILES_BLOCKED.set(reason)
+    try:
+        yield
+    finally:
+        _FILES_BLOCKED.reset(token)
+
+
+def _check_files_allowed() -> None:
+    reason = _FILES_BLOCKED.get()
+    if reason is not None:
+        raise FilesBlockedError(f"reading data/ through a DataStore is blocked {reason}")
 
 
 def _utc(deadline: Any) -> pd.Timestamp:
@@ -138,6 +168,8 @@ class DataStore:
     ) -> None:
         if (data_dir is None) == (tables is None):
             raise ValueError("pass exactly one of data_dir and tables")
+        if data_dir is not None:
+            _check_files_allowed()
         self.data_dir = None if data_dir is None else Path(data_dir)
         self._frames: dict[str, pd.DataFrame] | None = None
         if tables is not None:
@@ -166,13 +198,19 @@ class DataStore:
                 )
             frame = self._frames[spec.name].reset_index(drop=True)
             return _Table(spec, list(frame.columns), lambda cols: frame[cols])
+        _check_files_allowed()
         path = self.data_dir / f"{spec.name}.parquet"
         if not path.exists():
             raise FileNotFoundError(
                 f"table {spec.name!r} has not been built ({path}); run `fplopt build all`"
             )
         names = [n for n in pq.read_schema(path).names if not n.startswith("__index_level_")]
-        return _Table(spec, names, lambda cols: pd.read_parquet(path, columns=cols))
+
+        def load(columns: list[str]) -> pd.DataFrame:
+            _check_files_allowed()  # columns load lazily, possibly later
+            return pd.read_parquet(path, columns=columns)
+
+        return _Table(spec, names, load)
 
 
 class AsOfView:

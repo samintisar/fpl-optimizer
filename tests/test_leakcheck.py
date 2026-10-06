@@ -1,4 +1,4 @@
-"""Corrupt-the-future harness (PLAN Â§4): the harness itself, deliberately leaky builders it
+"""Corrupt-the-future harness (PLAN §4): the harness itself, deliberately leaky builders it
 must catch, the registered features on the synthetic world (CI) and on the real data
 (`-m realdata`)."""
 
@@ -20,8 +20,9 @@ from fplopt.features.leakcheck import (
     run_leakage_check,
     sample_deadlines,
     truncate_future,
+    variant_order,
 )
-from fplopt.features.store import AsOfView
+from fplopt.features.store import AsOfView, DataStore, FilesBlockedError, files_blocked
 from fplopt.seasons import HOLDOUT_SEASONS
 
 UTC_US = pd.DatetimeTZDtype("us", "UTC")
@@ -270,6 +271,60 @@ def test_a_builder_that_fails_only_on_one_variant_is_a_leak(tables):
 
     leaks = check_leakage(tables, [deadline_of(tables, 2023, 10)], seed=0, features={"f": fragile})
     assert leaks and all("RuntimeError" in leak.detail for leak in leaks)
+
+
+def test_builders_cannot_open_the_data_directory_during_the_check(tables, tmp_path):
+    for name in ("gameweek", "player_match"):
+        tables[name].to_parquet(tmp_path / f"{name}.parquet")
+    opened = DataStore(data_dir=tmp_path)  # outside the check: allowed
+    opened.as_of(deadline_of(tables, 2023, 10)).table("gameweek")
+
+    def own_store(view):
+        """Reads the real tables itself instead of through the view."""
+        store = DataStore(data_dir=tmp_path).as_of(view.deadline)
+        return store.table("player_match", columns=["player_key"]).head(1)
+
+    def kept_store(view):
+        """Reuses a data_dir store opened before the check (a not-yet-loaded table)."""
+        return opened.as_of(view.deadline).table("player_match", columns=["player_key"]).head(1)
+
+    deadline = deadline_of(tables, 2023, 10)
+    features = {"own_store": own_store, "kept_store": kept_store}
+    leaks = check_leakage(tables, [deadline], seed=0, features=features)
+    assert flagged(leaks) == {("own_store", "clean"), ("kept_store", "clean")}
+    assert all("FilesBlockedError" in leak.detail for leak in leaks)
+    DataStore(data_dir=tmp_path).as_of(deadline).table("player_match")  # allowed again
+
+
+def test_files_blocked_is_scoped_and_leaves_in_memory_stores_alone(tables, tmp_path):
+    with files_blocked("in this test"):
+        with pytest.raises(FilesBlockedError, match="in this test"):
+            DataStore(data_dir=tmp_path)
+        DataStore(tables={"gameweek": tables["gameweek"]}).as_of(DEADLINE).table("gameweek")
+    DataStore(data_dir=tmp_path)
+
+
+def test_variants_run_in_a_seeded_random_order_per_deadline(tables, monkeypatch):
+    orders = [variant_order(0, i) for i in range(40)]
+    assert all(sorted(order) == ["clean", "corrupted", "truncated"] for order in orders)
+    assert {order[0] for order in orders} == {"clean", "corrupted", "truncated"}
+    assert orders == [variant_order(0, i) for i in range(40)]
+    assert orders != [variant_order(1, i) for i in range(40)]
+
+    # check_leakage follows it: tell the variants apart by their (test-only) raw tables.
+    seen = []
+    n_rows = len(tables["player_match"])
+
+    def spy(view):
+        rows = len(backdoor(view, "player_match"))
+        seen.append("clean" if rows == n_rows else "truncated" if rows < n_rows else "corrupted")
+        return pd.DataFrame({"ok": [True]})
+
+    deadlines = [deadline_of(tables, 2023, gw) for gw in (5, 10, 15, 20, 25, 30)]
+    assert check_leakage(tables, deadlines, seed=3, features={"spy": spy}) == []
+    expected = [run for i in range(len(deadlines)) for run in variant_order(3, i)]
+    assert seen == expected
+    assert {seen[3 * i] for i in range(len(deadlines))} != {"clean"}
 
 
 # --- check_leakage: the registered features ----------------------------------------------
