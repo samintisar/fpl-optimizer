@@ -39,8 +39,10 @@ class OddsSource(Protocol):
 def snapshot_fpl(store: RawStore, fpl: FplSource, now: Clock = utc_now) -> list[Path]:
     """Fixtures first, bootstrap last: the tick treats a bootstrap snapshot inside a
     pre-deadline window as done, so a failure part-way must leave the window open."""
-    fixtures = store.write("fpl", "fixtures", fpl.fixtures(), now())
-    bootstrap = store.write("fpl", "bootstrap-static", fpl.bootstrap_static(), now())
+    fixtures_content = fpl.fixtures()
+    fixtures = store.write("fpl", "fixtures", fixtures_content, now())
+    bootstrap_content = fpl.bootstrap_static()
+    bootstrap = store.write("fpl", "bootstrap-static", bootstrap_content, now())
     return [fixtures, bootstrap]
 
 
@@ -48,14 +50,35 @@ def snapshot_odds(store: RawStore, odds: OddsSource | None, now: Clock = utc_now
     if odds is None:
         log.warning("ODDS_API_KEY not set; skipping odds snapshot")
         return None
-    return store.write("odds", "soccer_epl", odds.epl_odds(), now())
+    content = odds.epl_odds()
+    return store.write("odds", "soccer_epl", content, now())
+
+
+class SnapshotError(RuntimeError):
+    """One or more sources failed; the others were still archived."""
+
+
+def _run_independently(steps: list[tuple[str, Callable[[], object]]]) -> None:
+    errors: list[str] = []
+    for name, step in steps:
+        try:
+            step()
+        except Exception as exc:
+            log.exception("%s snapshot failed", name)
+            errors.append(f"{name}: {type(exc).__name__}: {exc}")
+    if errors:
+        raise SnapshotError("; ".join(errors))
 
 
 def run_daily(
     store: RawStore, fpl: FplSource, odds: OddsSource | None, now: Clock = utc_now
 ) -> None:
-    snapshot_fpl(store, fpl, now)
-    snapshot_odds(store, odds, now)
+    _run_independently(
+        [
+            ("fpl", lambda: snapshot_fpl(store, fpl, now)),
+            ("odds", lambda: snapshot_odds(store, odds, now)),
+        ]
+    )
 
 
 def run_tick(
@@ -75,12 +98,14 @@ def run_tick(
         odds is not None
         and pre_deadline_due(current, deadlines, store.times("odds", "soccer_epl")) is not None
     )
+    steps: list[tuple[str, Callable[[], object]]] = []
     if fpl_deadline is not None:
         log.info("pre-deadline FPL snapshot for deadline %s", fpl_deadline.isoformat())
-        snapshot_fpl(store, fpl, now)
+        steps.append(("fpl", lambda: snapshot_fpl(store, fpl, now)))
     if odds_due:
         log.info("pre-deadline odds snapshot")
-        snapshot_odds(store, odds, now)
+        steps.append(("odds", lambda: snapshot_odds(store, odds, now)))
+    _run_independently(steps)
     return fpl_deadline is not None or odds_due
 
 
@@ -97,9 +122,12 @@ def backfill_element_summaries(
     Writes `<run>/_manifest.json.gz` (expected, written and failed ids) even when aborted,
     so incomplete runs are identifiable. The bootstrap it archives counts as a snapshot for
     the pre-deadline tick, so avoid running this inside a pre-deadline window.
+
+    Element summaries in a run share `run_at` but are fetched later; treat the manifest's
+    `finished_at` as the run's `available_at`.
     """
-    run_at = now()
     bootstrap = fpl.bootstrap_static()
+    run_at = now()
     store.write("fpl", "bootstrap-static", bootstrap, run_at)
     ids = [element["id"] for element in json.loads(bootstrap)["elements"]]
     written: list[int] = []
@@ -130,9 +158,12 @@ def backfill_element_summaries(
             "written": written,
             "failed": failed,
         }
-        store.write(
-            "fpl", "element-summary", json.dumps(manifest).encode(), run_at, name="_manifest"
-        )
+        try:
+            store.write(
+                "fpl", "element-summary", json.dumps(manifest).encode(), run_at, name="_manifest"
+            )
+        except Exception:
+            log.exception("could not write backfill manifest")
     if failed:
         raise RuntimeError(f"{len(failed)} of {len(ids)} element summaries failed: {failed}")
     log.info("archived %d element summaries", len(ids))

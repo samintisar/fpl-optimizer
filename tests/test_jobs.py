@@ -10,13 +10,17 @@ DEADLINE = datetime(2026, 10, 10, 10, 0, tzinfo=UTC)
 
 
 class FakeFpl:
-    def __init__(self, fail_ids=(), element_ids=(1, 2), fail_fixtures=False):
+    def __init__(self, fail_ids=(), element_ids=(1, 2), fail_fixtures=False, clock=None):
         self.fail_ids = set(fail_ids)
         self.element_ids = list(element_ids)
         self.fail_fixtures = fail_fixtures
+        self.clock = clock
+        self.fetched = []
         self.summary_calls = []
 
     def bootstrap_static(self):
+        if self.clock:
+            self.fetched.append(("bootstrap", self.clock()))
         return json.dumps(
             {
                 "events": [{"deadline_time": "2026-10-10T10:00:00Z"}],
@@ -27,6 +31,8 @@ class FakeFpl:
     def fixtures(self):
         if self.fail_fixtures:
             raise RuntimeError("fixtures down")
+        if self.clock:
+            self.fetched.append(("fixtures", self.clock()))
         return b"[]"
 
     def element_summary(self, element_id):
@@ -89,6 +95,33 @@ def test_failed_fixtures_leaves_window_open(tmp_path):
             store, FakeFpl(fail_fixtures=True), None, Clock(DEADLINE - timedelta(minutes=110))
         )
     assert store.times("fpl", "bootstrap-static") == []
+
+
+def test_fpl_failure_does_not_block_odds(tmp_path):
+    store = RawStore(tmp_path)
+    with pytest.raises(RuntimeError, match="fixtures down"):
+        run_daily(
+            store, FakeFpl(fail_fixtures=True), FakeOdds(), Clock(DEADLINE - timedelta(hours=8))
+        )
+    assert len(store.times("odds", "soccer_epl")) == 1
+
+
+def test_timestamps_are_taken_after_each_fetch(tmp_path):
+    clock = Clock(DEADLINE - timedelta(hours=8))
+    fpl = FakeFpl(clock=clock)
+    store = RawStore(tmp_path)
+    run_daily(store, fpl, None, clock)
+    fetched = dict(fpl.fetched)
+    assert store.times("fpl", "fixtures")[0] > fetched["fixtures"]
+    assert store.times("fpl", "bootstrap-static")[0] > fetched["bootstrap"]
+
+
+def test_backfill_run_timestamp_is_after_bootstrap_fetch(tmp_path):
+    clock = Clock(DEADLINE)
+    fpl = FakeFpl(clock=clock)
+    store = RawStore(tmp_path)
+    backfill_element_summaries(store, fpl, clock, sleep=no_sleep)
+    assert store.times("fpl", "bootstrap-static")[0] > dict(fpl.fetched)["bootstrap"]
 
 
 def test_tick_snapshots_an_empty_store(tmp_path):

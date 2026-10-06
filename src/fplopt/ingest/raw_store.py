@@ -25,6 +25,17 @@ def parse_ts(text: str) -> datetime:
     return datetime.strptime(text, TS_FORMAT).replace(tzinfo=UTC)
 
 
+def _fsync_dir(directory: Path) -> None:
+    """Persist a new directory entry. POSIX only (Windows cannot open directories)."""
+    if os.name != "posix":
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 class RawStore:
     """Writes each response exactly once; existing files are never overwritten.
 
@@ -60,6 +71,7 @@ class RawStore:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.link(tmp, path)  # atomic, and raises FileExistsError instead of overwriting
+            _fsync_dir(path.parent)
         finally:
             tmp.unlink(missing_ok=True)
         return path
