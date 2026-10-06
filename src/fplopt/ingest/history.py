@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import lzma
 import re
+import tarfile
 import time
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager
+from datetime import UTC, datetime
 from typing import Protocol
 
 from fplopt.adapters.vaastav import PINNED_COMMIT
@@ -31,6 +35,12 @@ class VaastavSource(Protocol):
     def tree(self, commit: str) -> dict[str, str]: ...
 
     def file(self, commit: str, path: str, blob_sha: str) -> bytes: ...
+
+
+class FplcacheSource(Protocol):
+    def head_commit(self) -> str: ...
+
+    def tarball(self, commit: str) -> AbstractContextManager[tarfile.TarFile]: ...
 
 
 def backfill_football_data(
@@ -165,3 +175,113 @@ def backfill_vaastav(
         )
     log.info("archived %d vaastav files at %s", len(paths), commit)
     return len(written)
+
+
+# --- fplcache ----------------------------------------------------------------------------
+
+_FPLCACHE_MEMBER = re.compile(
+    r"^[^/]+/cache/(?P<y>\d{4})/(?P<m>\d{1,2})/(?P<d>\d{1,2})/(?P<H>\d{2})(?P<M>\d{2})\.json\.xz$"
+)
+MAX_FPLCACHE_MEMBER_BYTES = 64 << 20  # real snapshots are ~0.1-0.3 MB compressed
+FPLCACHE_PROGRESS_EVERY = 500
+
+
+def fplcache_snapshot_time(member_name: str) -> datetime | None:
+    """'fplcache-<sha>/cache/2021/4/18/1641.json.xz' -> 2021-04-18 16:41 UTC; None for any
+    other file. A snapshot-shaped name with an impossible date raises ValueError."""
+    match = _FPLCACHE_MEMBER.match(member_name)
+    if match is None:
+        return None
+    y, m, d, hh, mm = (int(match[key]) for key in ("y", "m", "d", "H", "M"))
+    return datetime(y, m, d, hh, mm, tzinfo=UTC)
+
+
+def _archive_fplcache_member(
+    store: RawStore, tar: tarfile.TarFile, member: tarfile.TarInfo, snapshot_at: datetime
+) -> bool:
+    """Archive one snapshot member. True if written, False if an identical copy exists;
+    raises if it cannot be archived."""
+    if member.size > MAX_FPLCACHE_MEMBER_BYTES:
+        raise ValueError(f"member too large: {member.size} bytes")
+    handle = tar.extractfile(member)
+    if handle is None:
+        raise ValueError("member has no content")
+    data = handle.read()
+    path = store.path_for("fplcache", "bootstrap-static", snapshot_at, suffix=".json.xz")
+    if path.exists():
+        if path.read_bytes() == data:
+            return False
+        raise ValueError("differs from the archived copy (upstream rewrote history?)")
+    json.loads(lzma.decompress(data))
+    store.write_bytes("fplcache", "bootstrap-static", data, snapshot_at, suffix=".json.xz")
+    return True
+
+
+def backfill_fplcache(store: RawStore, fplcache: FplcacheSource, now: Clock = utc_now) -> int:
+    """Mirror every fplcache snapshot into raw/fplcache/bootstrap-static/<snapshot time>.json.xz,
+    byte-for-byte. Idempotent: identical files already present are skipped; a present file with
+    different bytes is a failure (upstream rewrote history). Each new file must decompress to
+    JSON. Writes a run manifest raw/fplcache/runs/<run_at>.json.gz with commit, written,
+    skipped, failed (member names + reason) and error (a download/tar failure that stopped the
+    run, else null) — also when failures occurred — then raises if anything failed.
+    Returns the number of files written."""
+    commit = fplcache.head_commit()
+    run_at = now()
+    written = skipped = 0
+    failed: list[dict[str, str]] = []
+    error: str | None = None
+    try:
+        with fplcache.tarball(commit) as tar:
+            for member in tar:
+                if not member.isfile():
+                    continue
+                try:
+                    snapshot_at = fplcache_snapshot_time(member.name)
+                    if snapshot_at is None:
+                        continue
+                    if _archive_fplcache_member(store, tar, member, snapshot_at):
+                        written += 1
+                    else:
+                        skipped += 1
+                except Exception as exc:
+                    log.exception("fplcache %s failed", member.name)
+                    failed.append({"member": member.name, "reason": _one_line(exc)})
+                done = written + skipped + len(failed)
+                if done % FPLCACHE_PROGRESS_EVERY == 0:
+                    log.info(
+                        "fplcache: %d snapshots (%d written, %d skipped, %d failed)",
+                        done,
+                        written,
+                        skipped,
+                        len(failed),
+                    )
+    except BaseException as exc:
+        error = _one_line(exc)
+        raise
+    finally:
+        manifest = {
+            "commit": commit,
+            "run_at": run_at.isoformat(),
+            "finished_at": now().isoformat(),
+            "written": written,
+            "skipped": skipped,
+            "failed": failed,
+            "error": error,
+        }
+        try:
+            store.write("fplcache", "runs", json.dumps(manifest).encode(), run_at)
+        except Exception:
+            log.exception("could not write fplcache run manifest")
+    total = written + skipped + len(failed)
+    if failed:
+        raise RuntimeError(
+            f"{len(failed)} of {total} fplcache snapshots failed "
+            f"(first: {[entry['member'] for entry in failed[:5]]})"
+        )
+    log.info("fplcache at %s: %d written, %d already archived", commit, written, skipped)
+    return written
+
+
+def _one_line(exc: BaseException) -> str:
+    lines = str(exc).splitlines()
+    return f"{type(exc).__name__}: {lines[0]}" if lines else type(exc).__name__

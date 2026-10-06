@@ -1,12 +1,20 @@
+import io
+import json
+import lzma
+import tarfile
 from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 
+from fplopt.adapters.fplcache import FplcacheClient
+from fplopt.adapters.http import make_client
 from fplopt.adapters.vaastav import git_blob_sha
 from fplopt.ingest.history import (
     backfill_football_data,
+    backfill_fplcache,
     backfill_vaastav,
+    fplcache_snapshot_time,
     select_vaastav_paths,
     vaastav_name,
 )
@@ -220,3 +228,143 @@ def test_backfill_vaastav_refuses_an_empty_selection(tmp_path):
     with pytest.raises(RuntimeError, match="no vaastav files"):
         backfill_vaastav(RawStore(tmp_path), fake, "abc123", Clock(NOW), sleep=no_sleep)
     assert not (tmp_path / "vaastav").exists()
+
+
+# --- fplcache ----------------------------------------------------------------------------
+
+FC_SHA = "0123456789abcdef0123456789abcdef01234567"
+FC_PREFIX = f"fplcache-{FC_SHA}"
+SNAP_A = lzma.compress(json.dumps({"events": [{"id": 1}], "n": "a"}).encode())
+SNAP_B = lzma.compress(json.dumps({"events": [{"id": 1}], "n": "b"}).encode())
+NAME_A = f"{FC_PREFIX}/cache/2021/4/18/1641.json.xz"
+NAME_B = f"{FC_PREFIX}/cache/2021/12/3/0905.json.xz"
+TS_A = datetime(2021, 4, 18, 16, 41, tzinfo=UTC)
+TS_B = datetime(2021, 12, 3, 9, 5, tzinfo=UTC)
+FC_MEMBERS = {
+    FC_PREFIX: None,
+    f"{FC_PREFIX}/README.md": b"# fplcache",
+    f"{FC_PREFIX}/cache": None,
+    NAME_A: SNAP_A,
+    f"{FC_PREFIX}/cache/2021/4/18/notes.txt": b"notes",
+    NAME_B: SNAP_B,
+}
+
+
+def make_tarball(members):
+    """An in-memory .tar.gz; a None value makes a directory member."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            if data is None:
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            else:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def fplcache_client(members, broken_after=None):
+    """FplcacheClient over MockTransport serving the commits API and a streamed tarball."""
+    body = make_tarball(members)
+
+    def chunks():
+        for start in range(0, len(body), 4096):
+            if broken_after is not None and start >= broken_after:
+                raise httpx.ReadError("connection reset")
+            yield body[start : start + 4096]
+
+    def handler(request):
+        if request.url.path == "/repos/Randdalf/fplcache/commits/main":
+            return httpx.Response(200, json={"sha": FC_SHA})
+        if request.url.path == f"/Randdalf/fplcache/tar.gz/{FC_SHA}":
+            return httpx.Response(200, content=chunks())
+        return httpx.Response(404)
+
+    return FplcacheClient(make_client(httpx.MockTransport(handler)))
+
+
+def snapshot_path(store, ts):
+    return store.path_for("fplcache", "bootstrap-static", ts, suffix=".json.xz")
+
+
+def latest_fplcache_manifest(store):
+    return RawStore.read_json(store.latest("fplcache", "runs"))
+
+
+def test_fplcache_snapshot_time_parses_unpadded_and_padded_dates():
+    assert fplcache_snapshot_time(NAME_A) == TS_A
+    assert fplcache_snapshot_time("x/cache/2022/08/05/0000.json.xz") == datetime(
+        2022, 8, 5, tzinfo=UTC
+    )
+
+
+def test_fplcache_snapshot_time_ignores_other_files():
+    assert fplcache_snapshot_time(f"{FC_PREFIX}/README.md") is None
+    assert fplcache_snapshot_time(f"{FC_PREFIX}/cache/2021/4/18/notes.txt") is None
+    assert fplcache_snapshot_time("cache/2021/4/18/1641.json.xz") is None
+
+
+def test_fplcache_snapshot_time_rejects_an_impossible_date():
+    with pytest.raises(ValueError):
+        fplcache_snapshot_time(f"{FC_PREFIX}/cache/2021/13/1/0000.json.xz")
+
+
+def test_backfill_fplcache_mirrors_snapshots_byte_for_byte(tmp_path):
+    store = RawStore(tmp_path)
+    assert backfill_fplcache(store, fplcache_client(FC_MEMBERS), Clock(NOW)) == 2
+    assert snapshot_path(store, TS_A).read_bytes() == SNAP_A
+    assert snapshot_path(store, TS_B).read_bytes() == SNAP_B
+    assert store.times("fplcache", "bootstrap-static", suffix=".json.xz") == [TS_A, TS_B]
+    manifest = latest_fplcache_manifest(store)
+    assert manifest["commit"] == FC_SHA
+    assert (manifest["written"], manifest["skipped"], manifest["failed"]) == (2, 0, [])
+    assert manifest["error"] is None
+
+
+def test_backfill_fplcache_second_run_skips_identical_files(tmp_path):
+    store = RawStore(tmp_path)
+    backfill_fplcache(store, fplcache_client(FC_MEMBERS), Clock(NOW))
+    later = Clock(NOW + timedelta(days=1))
+    assert backfill_fplcache(store, fplcache_client(FC_MEMBERS), later) == 0
+    manifest = latest_fplcache_manifest(store)
+    assert (manifest["written"], manifest["skipped"], manifest["failed"]) == (0, 2, [])
+    assert len(store.times("fplcache", "runs")) == 2
+
+
+def test_backfill_fplcache_records_bad_members_and_raises(tmp_path):
+    store = RawStore(tmp_path)
+    corrupt = f"{FC_PREFIX}/cache/2021/5/1/0000.json.xz"
+    not_json = f"{FC_PREFIX}/cache/2021/5/2/0000.json.xz"
+    members = FC_MEMBERS | {corrupt: b"not xz at all", not_json: lzma.compress(b"<html>")}
+    with pytest.raises(RuntimeError, match="2 of 4 fplcache snapshots failed"):
+        backfill_fplcache(store, fplcache_client(members), Clock(NOW))
+    assert snapshot_path(store, TS_A).read_bytes() == SNAP_A
+    assert snapshot_path(store, TS_B).read_bytes() == SNAP_B
+    assert not snapshot_path(store, datetime(2021, 5, 1, tzinfo=UTC)).exists()
+    manifest = latest_fplcache_manifest(store)
+    assert manifest["commit"] == FC_SHA
+    assert manifest["written"] == 2
+    assert [entry["member"] for entry in manifest["failed"]] == [corrupt, not_json]
+    assert all(entry["reason"] for entry in manifest["failed"])
+
+
+def test_backfill_fplcache_fails_when_archived_copy_differs(tmp_path):
+    store = RawStore(tmp_path)
+    store.write_bytes("fplcache", "bootstrap-static", b"older bytes", TS_A, suffix=".json.xz")
+    with pytest.raises(RuntimeError, match="1 of 2 fplcache snapshots failed"):
+        backfill_fplcache(store, fplcache_client(FC_MEMBERS), Clock(NOW))
+    assert snapshot_path(store, TS_A).read_bytes() == b"older bytes"
+    assert snapshot_path(store, TS_B).read_bytes() == SNAP_B
+    manifest = latest_fplcache_manifest(store)
+    assert [entry["member"] for entry in manifest["failed"]] == [NAME_A]
+
+
+def test_backfill_fplcache_writes_manifest_when_the_download_breaks(tmp_path):
+    store = RawStore(tmp_path)
+    with pytest.raises(httpx.ReadError):
+        backfill_fplcache(store, fplcache_client(FC_MEMBERS, broken_after=0), Clock(NOW))
+    manifest = latest_fplcache_manifest(store)
+    assert manifest["commit"] == FC_SHA
+    assert "ReadError" in manifest["error"]
