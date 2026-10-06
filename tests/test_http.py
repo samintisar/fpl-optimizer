@@ -7,7 +7,9 @@ from fplopt.adapters.http import (
     InvalidPayload,
     default_wait,
     get_json_response,
+    get_response,
     make_client,
+    require_json,
 )
 
 URL = "https://example.test/api"
@@ -91,3 +93,46 @@ def test_default_wait_honours_retry_after_on_429():
     assert default_wait(retry_state_for(httpx.Response(429, headers={"Retry-After": "30"}))) == 30
     assert default_wait(retry_state_for(httpx.Response(429, headers={"Retry-After": "999"}))) == 120
     assert 0 < default_wait(retry_state_for(httpx.Response(503))) <= 60
+
+
+def test_get_response_without_validator_returns_any_body():
+    client, calls = client_with([httpx.Response(200, text="a,b\n1,2")])
+    assert get_response(client, URL, wait=wait_none()).content == b"a,b\n1,2"
+    assert len(calls) == 1
+
+
+def test_get_response_retries_invalid_payload_then_gives_up():
+    seen = []
+
+    def reject(content):
+        seen.append(content)
+        raise InvalidPayload("not a CSV")
+
+    client, calls = client_with([httpx.Response(200, text="<html>oops</html>")])
+    with pytest.raises(InvalidPayload, match="not a CSV"):
+        get_response(client, URL, validate=reject, attempts=3, wait=wait_none())
+    assert len(calls) == 3
+    assert seen == [b"<html>oops</html>"] * 3
+
+
+def test_get_response_validator_passes_good_body():
+    client, calls = client_with(
+        [httpx.Response(200, text="<html>oops</html>"), httpx.Response(200, json=[1])]
+    )
+    response = get_response(client, URL, validate=require_json, wait=wait_none())
+    assert response.json() == [1]
+    assert len(calls) == 2
+
+
+def test_invalid_payload_message_names_url_but_not_params():
+    client, _ = client_with([httpx.Response(200, text="<html>oops</html>")])
+    with pytest.raises(InvalidPayload) as info:
+        get_json_response(client, URL, params={"apiKey": "s3cret"}, attempts=1, wait=wait_none())
+    assert URL in str(info.value)
+    assert "s3cret" not in str(info.value)
+
+
+def test_require_json():
+    require_json(b'{"a": 1}')
+    with pytest.raises(InvalidPayload):
+        require_json(b"<html></html>")

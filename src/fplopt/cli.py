@@ -1,34 +1,79 @@
-"""Command-line entry point: `fplopt snapshot daily|tick`, `fplopt backfill element-summary`."""
+"""Command-line entry point.
+
+`fplopt snapshot daily|tick` (archiver timers), `fplopt backfill element-summary|football-data|
+vaastav|fplcache` (one-off backfills into raw/), `fplopt rules export SEASON [--out DIR]`
+(config/scoring/<season>.json from an archived bootstrap). Every job gets a `Context`;
+failures are logged and alerted to Telegram, and the exit code is 1.
+"""
 
 from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import socket
 import sys
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 
+from fplopt.adapters.football_data import FootballDataClient
 from fplopt.adapters.fpl import FplClient
+from fplopt.adapters.fplcache import FplcacheClient
 from fplopt.adapters.http import make_client
 from fplopt.adapters.odds import OddsClient
+from fplopt.adapters.vaastav import VaastavClient
 from fplopt.alerts import send_admin_alert
-from fplopt.ingest import jobs
+from fplopt.build import rules
+from fplopt.ingest import history, jobs
 from fplopt.ingest.raw_store import RawStore
 from fplopt.redact import redact
+from fplopt.seasons import parse_season_label
 from fplopt.settings import Settings
 
 log = logging.getLogger("fplopt")
 
-Job = Callable[[RawStore, FplClient, OddsClient | None], object]
+
+@dataclass
+class Context:
+    """What a job needs: the raw store, a shared HTTP client, settings and parsed arguments."""
+
+    store: RawStore
+    http: httpx.Client
+    settings: Settings
+    args: argparse.Namespace
+
+    @property
+    def fpl(self) -> FplClient:
+        return FplClient(self.http)
+
+    @property
+    def odds(self) -> OddsClient | None:
+        key = self.settings.odds_api_key
+        return OddsClient(self.http, key) if key else None
+
+
+Job = Callable[[Context], object]
 
 JOBS: dict[str, Job] = {
-    "snapshot daily": lambda store, fpl, odds: jobs.run_daily(store, fpl, odds),
-    "snapshot tick": lambda store, fpl, odds: jobs.run_tick(store, fpl, odds),
-    "backfill element-summary": lambda store, fpl, odds: jobs.backfill_element_summaries(
-        store, fpl
+    "snapshot daily": lambda c: jobs.run_daily(
+        c.store, c.fpl, c.odds, football_data=FootballDataClient(c.http)
+    ),
+    "snapshot tick": lambda c: jobs.run_tick(c.store, c.fpl, c.odds),
+    "backfill element-summary": lambda c: jobs.backfill_element_summaries(c.store, c.fpl),
+    "backfill football-data": lambda c: history.backfill_football_data(
+        c.store, FootballDataClient(c.http)
+    ),
+    "backfill vaastav": lambda c: history.backfill_vaastav(c.store, VaastavClient(c.http)),
+    "backfill fplcache": lambda c: history.backfill_fplcache(c.store, FplcacheClient(c.http)),
+    # The season label is parsed inside the job, so a bad label is alerted like any failure.
+    "rules export": lambda c: rules.export_rules(
+        c.store, parse_season_label(c.args.season), Path(c.args.out)
     ),
 }
 
@@ -39,7 +84,15 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot = groups.add_parser("snapshot", help="archive API snapshots into raw/")
     snapshot.add_argument("command", choices=["daily", "tick"])
     backfill = groups.add_parser("backfill", help="one-off backfills into raw/")
-    backfill.add_argument("command", choices=["element-summary"])
+    backfill.add_argument(
+        "command", choices=["element-summary", "football-data", "vaastav", "fplcache"]
+    )
+    rules_group = groups.add_parser("rules", help="per-season rules config")
+    rules_group.add_argument("command", choices=["export"])
+    rules_group.add_argument("season", help="season label, e.g. 2026-27")
+    rules_group.add_argument(
+        "--out", default="config/scoring", help="output directory (default: config/scoring)"
+    )
     return parser
 
 
@@ -50,6 +103,27 @@ def configure_logging() -> None:
     # httpx logs full request URLs at INFO, which would expose API keys and bot tokens.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+def _exit_on_sigterm(signum: int, frame: object) -> None:
+    raise SystemExit(143)  # 128 + SIGTERM, the status a shell reports for a TERM-killed process
+
+
+@contextmanager
+def _sigterm_raises_system_exit() -> Iterator[None]:
+    """Turn SIGTERM (systemd stop or TimeoutStartSec) into SystemExit while a job runs, so its
+    `finally` blocks still write run manifests; the default action kills the process without
+    unwinding. Restores the previous handler afterwards. A no-op where there is no SIGTERM
+    or off the main thread (signal handlers can only be set there)."""
+    sigterm = getattr(signal, "SIGTERM", None)
+    if sigterm is None or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(sigterm, _exit_on_sigterm)
+    try:
+        yield
+    finally:
+        signal.signal(sigterm, previous)
 
 
 def main(argv: Sequence[str] | None = None, settings: Settings | None = None) -> int:
@@ -66,10 +140,8 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
     log.info("job %r starting (raw dir %s)", job_name, settings.raw_dir)
     try:
         store = RawStore(settings.raw_dir)
-        with make_client() as http:
-            fpl = FplClient(http)
-            odds = OddsClient(http, settings.odds_api_key) if settings.odds_api_key else None
-            JOBS[job_name](store, fpl, odds)
+        with make_client() as http, _sigterm_raises_system_exit():
+            JOBS[job_name](Context(store=store, http=http, settings=settings, args=args))
     except Exception as exc:
         log.exception("job %r failed", job_name)
         summary = str(exc).splitlines()[0] if str(exc) else ""

@@ -8,10 +8,12 @@
 - `uv run pytest` — tests
 - `uv run ruff check . && uv run ruff format .` — lint/format
 - `uv run fplopt snapshot daily|tick` / `uv run fplopt backfill element-summary` — archiver jobs (see `deploy/README.md`)
+- `uv run fplopt backfill football-data|vaastav|fplcache` — one-off historical backfills into `raw/` (run on the server, see `deploy/README.md`)
+- `uv run fplopt rules export <season>` (e.g. `2026-27`, `--out` default `config/scoring`) — rules config from an archived bootstrap
 
 ## Invariants (do not break)
 
-- `raw/` is append-only, never edited. Snapshots are gzipped JSON with a timestamp in the path.
+- `raw/` is append-only, never edited. Every file is compressed (`.json.gz`, `.csv.gz`; fplcache `.json.xz` copied verbatim) with a timestamp in the path.
 - Derived tables are rebuilt from `raw/`; never hand-patch Parquet.
 - Every derived row has `event_time` and `available_at`. Feature builders and the backtester take a `deadline` and read only via `as_of(df, deadline)`.
 - Never key on FPL player ids (they reset each season); use `player_key` from `player_dim`.

@@ -34,8 +34,8 @@ Put these in a local `.env` (gitignored) or set them as env vars on the server:
 
 ```
 src/fplopt/
-  adapters/   one module per data source (fpl, understat, odds, football_data)
-  ingest/     raw snapshot writers, backfill
+  adapters/   one module per data source (fpl, odds, football_data, vaastav, fplcache)
+  ingest/     raw snapshot writers (daily/tick jobs), one-off historical backfills
   build/      raw -> Parquet tables, ID mapping
   features/   point-in-time feature builders (all take a deadline)
   models/     team, shares, minutes, bonus, defcon, assemble_xp
@@ -58,14 +58,14 @@ data/         (gitignored) Parquet tables, SQLite user state
 
 ## Build phases
 
-| # | Phase |
-|---|---|
-| 0 | Snapshot archiver |
-| 1 | Backfill + ID mapping + Parquet tables |
-| 2 | `as_of` layer + leakage tests |
-| 3 | Backtester + baselines + greedy policy |
-| 4 | Optimizer |
-| 5 | Real models (market-implied team model first) |
-| 6 | Holdout evaluation |
-| 7 | Telegram bot + go live |
-| 8 | Distributions, sensitivity analysis, polish |
+| # | Phase | Status |
+|---|---|---|
+| 0 | Snapshot archiver | done, running on the server |
+| 1 | Backfill + ID mapping + Parquet tables | in progress: 1a (raw backfills) built, server run pending; 1b (Parquet tables) next |
+| 2 | `as_of` layer + leakage tests | |
+| 3 | Backtester + baselines + greedy policy | |
+| 4 | Optimizer | |
+| 5 | Real models (market-implied team model first) | |
+| 6 | Holdout evaluation | |
+| 7 | Telegram bot + go live | |
+| 8 | Distributions, sensitivity analysis, polish | |

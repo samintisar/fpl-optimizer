@@ -20,10 +20,12 @@ def test_endpoints_hit_expected_urls():
     fpl.bootstrap_static()
     fpl.fixtures()
     fpl.element_summary(17)
+    fpl.event_live(5)
     assert seen == [
         "https://fantasy.premierleague.com/api/bootstrap-static/",
         "https://fantasy.premierleague.com/api/fixtures/",
         "https://fantasy.premierleague.com/api/element-summary/17/",
+        "https://fantasy.premierleague.com/api/event/5/live/",
     ]
 
 

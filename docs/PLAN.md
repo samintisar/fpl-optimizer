@@ -74,10 +74,10 @@ fpl-optimizer/
 | FPL `event/{gw}/live/`, `element-summary/{id}/` | Per-player GW stats/points (incl. CBIT/recoveries/defensive_contribution) | After GW lockdown (09:00 UK the day after the GW's last match); `event-status/` confirms bonus is final |
 | FPL `entry/{id}/…` | User picks, history, transfers, chips | Pre-deadline, per registered user |
 | fplcache | Historical `bootstrap-static` snapshots ~4×/day, April 2021 → today | One-time backfill (2021/22–2025/26), copied into `raw/` |
-| Understat | Per-match player + team xG/xA; per-shot data (minute, xG, penalty flag) via JSON endpoints `/getLeagueData/EPL/{season}`, `/getMatchData/{id}` (header `X-Requested-With: XMLHttpRequest`) | After each GW; polite throttling, explicit User-Agent |
+| Understat (via vaastav's mirror only) | Per-team match xG/npxG/xGA (2019/20–2024/25); per-player career match logs with npxG, xA, minutes (files exist 2021/22–2024/25; rows reach back to 2014 for players still active then) | Part of the vaastav backfill. **No direct Understat requests:** its robots.txt disallows all crawling |
 | The Odds API (free tier: 500 credits/month, live odds only) | EPL h2h + totals (2 credits/call, ~80/month) | Daily + pre-deadline |
 | vaastav/Fantasy-Premier-League | Historical FPL per-GW data, 2016/17+ | One-time backfill, pinned to a commit, copied into `raw/` |
-| football-data.co.uk | Historical results + match odds (1X2, O/U 2.5, Asian handicap) | One-time backfill |
+| football-data.co.uk | Historical results + match odds (1X2, O/U 2.5, Asian handicap); team match xG (`HxG`/`AxG`) from 2026/27 | One-time backfill; current season re-fetched daily |
 
 **Odds columns (football-data):** use an **explicit allowlist** of pre-match columns, never a regex. Closing columns carry a `C` after the bookmaker code (`B365CH`, `PSCH`, `AvgC>2.5`, `AHCh`) from 2019/20 (2018/19: `PSC*` only) — but `CLH` is Coral, not closing. Prefer market averages (`Avg*`) or Betfair Exchange (`BFE*`); Pinnacle (`PS*`) is sparse in 2025/26. Pre-match odds are collected Friday afternoon (weekend) / Tuesday afternoon (midweek), i.e. close to the deadline — treated as as-of-deadline odds.
 
@@ -109,7 +109,9 @@ User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, c
 ### Backfill rules
 - Backfill from 2016/17. Snapshot-derived fields (status flags, news, ownership, `ep_next`, set-piece orders) exist from 2021/22 via fplcache; earlier seasons lack them.
 - Store raw stat components and **re-score every season under the current season's rules** (scoring config per season in `config/`). Exception: seasons before 2025/26 have no CBIT/recoveries data in our sources, so they are re-scored **without** defensive-contribution points.
-- Use Understat for xG throughout (FPL's own xG fields only exist in recent seasons).
+- **xG coverage** (no direct Understat — see §12):
+  - Player npxG/xA: Understat mirror, complete 2021/22–2024/25, partial before (players active in 2021/22+). From 2025/26: FPL's own `expected_goals` / `expected_assists` (Opta, in vaastav and our `element-summary` archive; available 2022/23+, so it overlaps the mirror for calibration). FPL xG includes penalties; npxG for 2025/26+ subtracts penalty xG using penalty attempts inferred from takers — approximate, **VERIFY** against the 2022/23–2024/25 overlap.
+  - Team xG: Understat mirror 2019/20–2024/25, football-data `HxG`/`AxG` 2026/27, summed FPL player xG otherwise. 2016/17–2018/19: goals only.
 - Weight older seasons lower in training rather than dropping them.
 - Handle quirks: 2019/20 COVID GWs (numbered 39–47), postponed GWs (e.g. 2022/23).
 - `available_at` for GW outcomes: from 2026/27, the official lockdown. Earlier seasons: kickoff + fixed delay (approximate). Snapshots (ours and fplcache) are exact to their timestamp.
@@ -225,12 +227,12 @@ log λ_away = base            + attack[away] − defence[home]
 
 ### 6.2 Player shares
 - Goal share = player **npxG**/90 ÷ team npxG/90 **while he's on the pitch**; same for xA → assists. Non-penalty xG avoids double-counting with the penalty term.
-- "Team npxG while on the pitch" is built from Understat per-shot data (shot minute vs the player's minutes).
+- "Team npxG while on the pitch" is approximated as team npxG × minutes/90 (no per-shot data without direct Understat access).
 - **Hierarchical (Marcel-style) prior:** the player's own previous seasons (weights 2-1-1) plus ~480 minutes of league-average for his position; for new players, position + FPL price. Shrinkage is strong — per-90 npxG/xA are unreliable within half a season.
 - Players who change club keep their old share with extra shrinkage.
 - **Team consistency:** normalize shares over the minutes-weighted expected XI so Σ players' E[goals] = team non-penalty λ.
 - **FPL assists ≠ xA:** FPL awards assists Understat never counts (penalties won, rebounds, deflections). Team E[FPL assists] = λ_team × empirical fraction of goals with an FPL assist; distribute by xA share.
-- Penalty term: P(on pitch) × P(penalty taker) × team penalties per match × conversion. Taker order as-of from `penalties_order` (2021/22+), from Understat penalty history before that.
+- Penalty term: P(on pitch) × P(penalty taker) × team penalties per match × conversion. Taker order as-of from `penalties_order` (2021/22+); before that, a team-level prior.
 - E[goals] = λ_team(non-penalty) × goal_share × E[fraction of match on pitch] + penalty term.
 
 ### 6.3 Minutes model (LightGBM)
@@ -368,7 +370,7 @@ Horizon, decay and FT value are confounded — tune them jointly.
 | # | Phase | Done when |
 |---|---|---|
 | 0 | Snapshot archiver (systemd timers) + 2026/27 GW1–5 stats backfill | Daily bootstrap/fixtures/odds snapshots landing in `raw/` |
-| 1 | Backfill (vaastav, fplcache, Understat, football-data) + ID mapping + Parquet tables + rules config + Elo | All seasons 2016/17+ built from raw; mapping validation passes; `config/scoring/` per season |
+| 1 | Backfill (vaastav incl. its Understat mirror, fplcache, football-data) + ID mapping + Parquet tables + rules config + Elo | All seasons 2016/17+ built from raw; mapping validation passes; `config/scoring/` per season |
 | 2 | `as_of` layer + leakage tests | Corrupt-the-future test passes |
 | 3 | Backtester + baselines (rolling avg, `ep_next`) + greedy policy + paired evaluation | Simulated seasons from arbitrary states; baselines scored per §5 |
 | 4 | Optimizer (transfers, captain, bench, chip scenarios, top-3) | Backtest runs end-to-end; beats greedy; matches open-fpl-solver on no-chip cases; solve times acceptable |
@@ -389,7 +391,7 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 
 - Payments: Telegram requires **Telegram Stars** for digital goods sold in bots.
 - Move hosting off the home server before anyone pays.
-- **Data licensing review** before charging: FPL API terms, Understat (no published terms; contact support@understat.com), odds providers' commercial terms, fplcache (public domain), FPL-Core-Insights (no licence, likely FotMob-derived — research only, must not be needed by the product).
+- **Data licensing review** before charging: FPL API terms, Understat data via vaastav (no published terms; contact support@understat.com), odds providers' commercial terms, fplcache (public domain), FPL-Core-Insights (no licence, likely FotMob-derived — research only, must not be needed by the product).
 - open-fpl-solver is Apache-2.0: if any of its code is ever copied, keep LICENSE/NOTICE and mark changes.
 - Benchmark against existing paid tools' public track records.
 
@@ -432,3 +434,4 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-05 | Own thin adapters; no `soccerdata` dependency; own Elo instead of ClubElo. | soccerdata needs a browser + CAPTCHA solving; ClubElo API is down. |
 | 2026-10-05 | Drop PyMC; models use scipy MLE + closed-form shrinkage. PuLP builds the MILP on HiGHS; switch to `highspy` bulk API only if model build time dominates. | Hundreds of walk-forward refits per backtest make MCMC impractical; one modelling layer, decided by measurement. |
 | 2026-10-05 | systemd user timers instead of cron; pre-deadline snapshots via a 15-min tick that reads deadlines from the latest archived bootstrap and tracks FPL and odds windows separately. | Ubuntu cron has no per-job timezone (daily run follows UK time); deadlines change, so they are read, not scheduled. |
+| 2026-10-06 | No direct Understat requests; use vaastav's Understat mirror (≤2024/25) and FPL's Opta xG (2022/23+). No per-shot data. | Understat's robots.txt disallows all crawling and it publishes no API or terms. |
