@@ -109,7 +109,7 @@ fpl-optimizer/
 - `player_match` — minutes, starts, goals, assists, CS, saves, cards, BPS, bonus, CBIT/recoveries (where available), npxG, xA, penalties.
 - `team_match` — per fixture and side: goals, Understat xG/npxG (`us_*`), football-data xG (`fd_*`, 2026/27), summed FPL xG (`fpl_*`, 2022/23 GW16+; FPL published zeros before GW16, stored as null).
 - `understat_map` / `understat_player_match` — Understat id ↔ `player_key` (matched on per-fixture minutes + names; 100% agreement with vaastav's `id_dict` for 2021/22–2022/23) and the per-match Understat rows behind `player_match.us_*`.
-- `team_rating` — our Elo ratings from football-data results, per date. Burn-in from 2005/06 (football-data E0 backfilled back to 2005/06 for this only); promoted clubs enter at the mean rating of the clubs they replace.
+- `team_rating` — our Elo ratings from football-data results, per date. Burn-in from 2005/06 (football-data E0 backfilled back to 2005/06 for this only); promoted clubs enter at the mean rating of the clubs they replace. One pre-season row per club and season carries the season-start rating (available 1 June, or after the previous season's last result if later), so every club has a rating at GW1.
 - `odds_snapshot` — long format: fixture, source, bookmaker (`avg`/`pinnacle`/`betfair_ex` from football-data; Odds API bookmaker keys), market (`h2h`/`totals` 2.5/`ah`), outcome, line, price, `is_closing`, snapshot time. football-data pre-match odds get `available_at` = the Friday (weekend) / Tuesday (midweek) 15:00 UK collection time, capped at kickoff − 1h; closing odds `available_at` = kickoff.
 
 User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, chips remaining, per GW), `user_overrides`, `user_settings`.

@@ -51,7 +51,7 @@ TABLES: dict[str, TableSpec] = _specs(
     TableSpec("team_match", "event", ("fixture_key", "team_key")),
     TableSpec("player_gw", "event", ("player_key", "season", "gw")),
     TableSpec("player_gw_ownership", "event", ("player_key", "season", "gw")),
-    TableSpec("team_rating", "event", ("team_key", "kickoff_time")),
+    TableSpec("team_rating", "event", ("team_key", "event_time")),
     # snapshot
     TableSpec(
         "player_snapshot", "snapshot", ("snapshot_at", "source", "player_key"), "snapshot_at"

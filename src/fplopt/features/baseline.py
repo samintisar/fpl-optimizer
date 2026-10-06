@@ -305,8 +305,8 @@ def team_strength(view: AsOfView) -> pd.DataFrame:
     schedule = view.schedule(season)
     fixtures = schedule[schedule["gw"] == gw].astype({"gw": "int64"})
     sides = _sides(fixtures)
-    ratings = view.table("team_rating", columns=["team_key", "kickoff_time", "rating_after"])
-    ratings = ratings.sort_values(["team_key", "kickoff_time"], kind="mergesort")
+    ratings = view.table("team_rating", columns=["team_key", "event_time", "rating_after"])
+    ratings = ratings.sort_values(["team_key", "event_time"], kind="mergesort")
     elo = ratings.drop_duplicates("team_key", keep="last").set_index("team_key")["rating_after"]
     probabilities = _match_probabilities(view, fixtures["fixture_key"].tolist())
     out = sides.merge(probabilities, on="fixture_key", how="left", validate="many_to_one")

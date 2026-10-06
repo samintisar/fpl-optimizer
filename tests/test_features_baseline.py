@@ -360,8 +360,17 @@ def test_team_strength_elo_and_as_of_odds(tables):
     assert np.allclose(sums, 1.0)
 
     ratings = tables["team_rating"]
-    ratings = ratings[ratings["available_at"] < d].sort_values("kickoff_time")
+    ratings = ratings[ratings["available_at"] < d].sort_values("event_time")
     elo = ratings.groupby("team_key")["rating_after"].last()
     for row in strength.itertuples():
         assert row.elo == pytest.approx(elo[row.team_key])
         assert row.opponent_elo == pytest.approx(elo[row.opponent_team_key])
+
+
+def test_team_strength_has_elo_for_every_club_at_gameweek_one(tables):
+    """Pre-season team_rating rows give every club (promoted ones too) a rating before its
+    first match."""
+    for season in (2023, 2024, 2026):
+        strength = team_strength(view(tables, season, 1))
+        assert len(strength) == 20, season
+        assert strength["elo"].notna().all() and strength["opponent_elo"].notna().all(), season
