@@ -8,7 +8,9 @@ folders are career match logs across leagues. A row is an EPL match when both `h
 home, away), unique per season. EPL rows before 2016/17 have no fixture and are dropped
 (counted in the log). The same (understat_id, match) appears in several folders with equal
 values (±5e-6): the newest folder wins. Names come from the folders' `understat_player`
-aggregates (HTML entities unescaped), else the file name.
+aggregates (HTML entities unescaped), else the file name. `event_time` = the fixture's
+kickoff, `available_at` = the fixture's `available_at` (GW lockdown). understat_map is
+reference data like team_dim (`event_time` = `available_at` = 1970-01-01).
 
 Mapping understat_id -> player_key (all seasons at once):
 - Candidates: an Understat appearance and an FPL appearance (minutes > 0) in the same
@@ -68,7 +70,7 @@ import pandas as pd
 import pandera.pandas as pa
 from rapidfuzz import fuzz
 
-from fplopt.build.common import UK, UTC_US, BuildContext, read_raw_csv, write_table
+from fplopt.build.common import EPOCH, UK, UTC_US, BuildContext, read_raw_csv, write_table
 from fplopt.build.fixtures import FIRST_SEASON, vaastav_run
 from fplopt.build.players import (
     MAX_MINUTES,
@@ -164,6 +166,8 @@ UPM_COLUMNS = [
     "us_match_id",
     *US_SOURCE_COLUMNS.values(),
     "understat_name",
+    "event_time",
+    "available_at",
 ]
 
 UPM_SCHEMA = pa.DataFrameSchema(
@@ -183,12 +187,15 @@ UPM_SCHEMA = pa.DataFrameSchema(
         "us_key_passes": pa.Column("int64", pa.Check.ge(0)),
         "us_position": pa.Column(str),
         "understat_name": pa.Column(str),
+        "event_time": pa.Column(UTC_US),
+        "available_at": pa.Column(UTC_US),
     },
     checks=[
         pa.Check(
             lambda df: ~df.duplicated(["understat_id", "fixture_key"]),
             error="(understat_id, fixture_key) unique",
         ),
+        pa.Check(lambda df: df["available_at"] > df["event_time"], error="available_at order"),
         pa.Check(
             lambda df: df.groupby("us_match_id")["fixture_key"].transform("nunique") == 1,
             error="us_match_id -> one fixture",
@@ -211,7 +218,9 @@ def understat_player_match(
     )
     epl = epl.sort_values("folder_season", ascending=False, kind="mergesort")
     epl = epl.drop_duplicates(["understat_id", "id"])
-    keys = fixture[["season", "home_team_key", "away_team_key", "fixture_key", "kickoff_time"]]
+    keys = fixture[
+        ["season", "home_team_key", "away_team_key", "fixture_key", "kickoff_time", "available_at"]
+    ]
     merged = epl.merge(
         keys.astype({"home_team_key": "Int64", "away_team_key": "Int64"}),
         on=["season", "home_team_key", "away_team_key"],
@@ -242,6 +251,8 @@ def understat_player_match(
     ]
     out["fixture_key"] = out["fixture_key"].astype("int64")
     out["us_position"] = out["us_position"].astype(str)
+    out["event_time"] = out["kickoff_time"].astype(UTC_US)
+    out["available_at"] = out["available_at"].astype(UTC_US)
     return out[UPM_COLUMNS].reset_index(drop=True)
 
 
@@ -398,6 +409,8 @@ MAP_COLUMNS = [
     "overlap",
     "coverage",
     "name_score",
+    "event_time",
+    "available_at",
 ]
 
 MAP_SCHEMA = pa.DataFrameSchema(
@@ -411,6 +424,8 @@ MAP_SCHEMA = pa.DataFrameSchema(
         "overlap": pa.Column("Float64", nullable=True),
         "coverage": pa.Column("Float64", nullable=True),
         "name_score": pa.Column("Float64", nullable=True),
+        "event_time": pa.Column(UTC_US, pa.Check.eq(EPOCH)),
+        "available_at": pa.Column(UTC_US, pa.Check.eq(EPOCH)),
     },
     strict=True,
     ordered=True,
@@ -446,6 +461,8 @@ def map_understat(pairs: pd.DataFrame, overrides: pd.DataFrame) -> pd.DataFrame:
             "name_score": chosen["name_score"].astype("Float64"),
         }
     )
+    out["event_time"] = pd.Series(EPOCH, index=out.index, dtype=UTC_US)
+    out["available_at"] = out["event_time"]
     return out[MAP_COLUMNS].reset_index(drop=True)
 
 

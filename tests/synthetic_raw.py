@@ -182,6 +182,11 @@ def bootstrap(season: int, fixtures: pd.DataFrame, finished_through: int = 38) -
                 "team": int(p.team),
                 "team_code": int(p.team_code),
                 "element_type": int(p.element_type),
+                "now_cost": 50,
+                "status": "a",
+                "transfers_in_event": 0,
+                "transfers_out_event": 0,
+                "cost_change_event": 0,
             }
             for p in players.itertuples(index=False)
         ],
