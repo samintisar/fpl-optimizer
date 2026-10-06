@@ -302,3 +302,13 @@ def test_unknown_element_and_leftover_duplicates_fail():
     doubled = pd.concat([merged, merged.assign(minutes=[5, 5])])
     with pytest.raises(PlayerMatchError, match="duplicate"):
         assemble(doubled, fixture, gameweek, player_season, team_codes, resolver)
+
+
+def test_phantom_drop_never_loses_an_element_fixture_pair():
+    # Both rows of (element 1, fixture 100) are filed under GW29, not the fixture's GW10:
+    # dropping them as phantoms would silently lose the pair.
+    merged, *rest = small_inputs(gw=10)
+    filed_elsewhere = merged.iloc[[0]].assign(round=29)
+    rows = pd.concat([filed_elsewhere, filed_elsewhere.assign(minutes=5), merged.iloc[[1]]])
+    with pytest.raises(PlayerMatchError, match="would be lost"):
+        assemble(rows, *rest)

@@ -34,7 +34,8 @@ season without such a run has no rows if none of its fixtures is finished, else 
 - Cleaning: exact duplicate rows dropped (2025-26: 10); managers dropped (2024-25: 20
   elements, position "AM"); for a duplicated (element, fixture) the row whose `round` equals
   the fixture's GW is kept (2019-20: 59 phantom GW29 copies of fixture 275); any other
-  duplicate fails.
+  duplicate fails, and so does a pair none of whose rows is filed under the fixture's GW
+  (dropping them all would lose the pair).
 - Team: from the fixture (`home_team_key` if `was_home` else `away_team_key`), checked
   against `opponent_team` (season id -> code) and, where present (2020-21+), the `team` name.
   Kickoff, GW and timing come from `fixture`; `available_at` = the GW's lockdown.
@@ -473,13 +474,16 @@ def assemble_player_match(
     # A duplicated (element, fixture): keep the row filed under the fixture's GW.
     keys = ["season", "element_id", "fpl_fixture_id"]
     phantom = df.duplicated(keys, keep=False) & (df["round"] != df["gw"])
+    # Every (element, fixture) must keep a row: one whose copies are all phantoms fails.
+    lost = phantom.groupby([df[k] for k in keys]).transform("all")
+    _fail_if(lost, df, "duplicate row(s) filed under another GW only (the pair would be lost)")
     if phantom.any():
         log.info("dropped %d duplicate row(s) filed under another GW", int(phantom.sum()))
     df = df[~phantom]
     _fail_if(df.duplicated(keys, keep=False), df, "duplicate (element, fixture) row(s)")
 
-    keys = players[["season", "element_id", "player_key"]]
-    df = df.merge(keys, on=["season", "element_id"], how="left", validate="many_to_one")
+    player_keys = players[["season", "element_id", "player_key"]]
+    df = df.merge(player_keys, on=["season", "element_id"], how="left", validate="many_to_one")
     _fail_if(df["player_key"].isna(), df, "row(s) whose element is not a registered player")
 
     home = df["was_home"]
