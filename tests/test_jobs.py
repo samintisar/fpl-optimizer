@@ -524,6 +524,41 @@ def test_post_lockdown_without_any_bootstrap_is_a_no_op(tmp_path):
     assert fpl.summary_calls == []
 
 
+def archive_bootstrap(store, when, checked):
+    store.write("fpl", "bootstrap-static", FakeFpl(checked=checked).bootstrap_static(), when)
+
+
+def test_post_lockdown_skips_a_stale_bootstrap(tmp_path, caplog):
+    # e.g. today's FPL step failed during the July reset: the newest bootstrap is last
+    # season's, but event/{gw}/live would return new-season data under the old season's label.
+    store = RawStore(tmp_path)
+    archive_bootstrap(store, DAILY, checked=(1,))
+    fpl = FakeFpl(checked=(1,))
+    snapshot_post_lockdown(store, fpl, Clock(DAILY + timedelta(hours=7)), sleep=no_sleep)
+    assert fpl.live_calls == []
+    assert fpl.summary_calls == []
+    assert "stale" in caplog.text
+
+
+def test_post_lockdown_uses_a_bootstrap_from_the_last_six_hours(tmp_path):
+    store = RawStore(tmp_path)
+    archive_bootstrap(store, DAILY, checked=(1,))
+    fpl = FakeFpl(checked=(1,))
+    snapshot_post_lockdown(store, fpl, Clock(DAILY + timedelta(hours=5)), sleep=no_sleep)
+    assert fpl.live_calls == [1]
+    assert fpl.summary_calls == [1, 2]
+
+
+def test_daily_with_failed_fpl_step_skips_post_lockdown_on_a_stale_bootstrap(tmp_path):
+    store = RawStore(tmp_path)
+    archive_bootstrap(store, DAILY, checked=(1,))
+    fpl = FakeFpl(checked=(1,), fail_fixtures=True)
+    with pytest.raises(SnapshotError) as info:
+        run_daily(store, fpl, None, Clock(DAILY + timedelta(days=1)), sleep=no_sleep)
+    assert "post-lockdown" not in str(info.value)
+    assert fpl.live_calls == []
+
+
 def test_tick_on_empty_store_does_not_run_post_lockdown(tmp_path):
     store = RawStore(tmp_path)
     fpl = FakeFpl(checked=(1,))

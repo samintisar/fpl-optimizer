@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -23,6 +23,9 @@ Clock = Callable[[], datetime]
 MAX_CONSECUTIVE_FAILURES = 10
 
 FOOTBALL_DATA_GRACE_MONTHS = (7, 8)  # new-season CSV may not exist yet in July/August
+
+# Post-lockdown only trusts a bootstrap this recent (normally the daily run's own FPL step).
+POST_LOCKDOWN_MAX_BOOTSTRAP_AGE = timedelta(hours=6)
 
 
 def utc_now() -> datetime:
@@ -361,10 +364,22 @@ def snapshot_post_lockdown(
     """After GW lockdown: event-live for new finalised GWs, and one fresh element-summary run
     (all players' per-GW history) if a GW was finalised since the last complete run. Reads the
     latest archived bootstrap; the two steps fail independently. A no-op when nothing new is
-    finalised."""
-    latest = store.latest("fpl", "bootstrap-static")
-    if latest is None:
+    finalised.
+
+    Skipped (warning, not an error) unless that bootstrap is under
+    POST_LOCKDOWN_MAX_BOOTSTRAP_AGE old: event/{gw}/live has no season in its URL, so a stale
+    bootstrap (say today's FPL step failed during the July reset) would file new-season data
+    under the old season."""
+    entries = store.entries("fpl", "bootstrap-static")
+    if not entries:
         log.warning("no archived bootstrap yet; skipping post-lockdown ingest")
+        return
+    fetched_at, latest = entries[-1]
+    if now() - fetched_at > POST_LOCKDOWN_MAX_BOOTSTRAP_AGE:
+        log.warning(
+            "latest bootstrap (%s) is stale; skipping post-lockdown ingest",
+            fetched_at.isoformat(),
+        )
         return
     bootstrap = store.read_json(latest)
     if not checked_events(bootstrap):
