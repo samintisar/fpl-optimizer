@@ -10,8 +10,14 @@ import pandas as pd
 import pytest
 from synthetic_season import synthetic_tables
 
+from fplopt.backtest.policies import RollPolicy
+from fplopt.backtest.probes import PROBES, run_probe
+from fplopt.backtest.rules import Rules
+from fplopt.backtest.start_states import template_state
+from fplopt.backtest.state import Holding, SquadState
 from fplopt.build.tables import TABLES
 from fplopt.features import FEATURES
+from fplopt.features.baseline import player_pool
 from fplopt.features.leakcheck import (
     Leak,
     check_leakage,
@@ -346,11 +352,18 @@ def test_registered_features_do_not_leak_on_the_synthetic_world(built):
         assert check_leakage(built, deadlines, seed=seed) == []
 
 
-def test_checked_builders_are_the_features_and_the_models():
+def test_checked_builders_are_the_features_models_and_probes():
     builders = checked_builders()
-    assert list(builders) == [*FEATURES, *(f"model:{name}" for name in MODELS)]
+    assert list(builders) == [
+        *FEATURES,
+        *(f"model:{name}" for name in MODELS),
+        *(f"probe:{name}" for name in PROBES),
+    ]
     assert builders["model:rolling"] is MODELS["rolling"]
-    assert describe_builders(builders) == f"{len(FEATURES)} feature(s), {len(MODELS)} model(s)"
+    assert builders["probe:greedy_rolling_random0"] is PROBES["greedy_rolling_random0"]
+    assert describe_builders(builders) == (
+        f"{len(FEATURES)} feature(s), {len(MODELS)} model(s), {len(PROBES)} probe(s)"
+    )
     assert describe_builders({"a": 1, "probe:x": 2, "probe:y": 3}) == "1 feature(s), 2 probe(s)"
 
 
@@ -392,14 +405,105 @@ def test_the_default_check_catches_a_leaky_model(monkeypatch):
     assert ("model:leaky", "truncated") in flagged(leaks)
 
 
+# --- decision probes (fplopt.backtest.probes) ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "gameweeks"),
+    [
+        # Snapshots: GW1 (template from the pre-season snapshot), mid-season, a blank target
+        # next to a double, the last GW; the previous season feeds the rolling model.
+        (
+            {"seasons": (2022, 2023), "blank": (2023, 10, 1), "double": (2023, 11, 4)},
+            [(2023, 1), (2023, 2), (2023, 10), (2023, 11), (2023, 38)],
+        ),
+        # No snapshots: the template is refused at GW1 (no ownership), from GW2 it uses
+        # player_gw_ownership; ep_next is 0 everywhere.
+        ({"snapshots": False}, [(2023, 1), (2023, 2), (2023, 20)]),
+    ],
+)
+def test_probes_do_not_leak_on_the_synthetic_league(kwargs, gameweeks):
+    tables = synthetic_tables(**kwargs)
+    deadlines = [deadline_of(tables, season, gw) for season, gw in gameweeks]
+    probes = {name: b for name, b in checked_builders().items() if name.startswith("probe:")}
+    assert len(probes) == len(PROBES) == 3
+    assert check_leakage(tables, deadlines, seed=0, features=probes) == []
+    view = DataStore(tables=tables).as_of(deadlines[0])
+    frames = {name: probe(view) for name, probe in probes.items()}
+    if kwargs.get("snapshots", True):
+        assert all(len(frame) >= 35 for frame in frames.values())
+        assert (frames["probe:greedy_rolling_random0"]["kind"] == "held").sum() == 15
+    else:
+        refused = frames["probe:roll_rolling_template"]
+        assert refused["kind"].tolist() == ["refused"]
+        assert "no ownership" in refused["note"].iloc[0]
+        assert len(frames["probe:greedy_rolling_random0"]) >= 35
+
+
+def test_probes_are_refused_on_a_coverage_gap_and_still_compare():
+    tables = synthetic_tables(snapshots=False)
+    rows = tables["player_gw"]
+    club1 = (rows["season"] == 2023) & (rows["gw"] == 1) & (rows["team_key"] == 1)
+    tables["player_gw"] = rows[~club1].reset_index(drop=True)
+    deadlines = [deadline_of(tables, 2023, 1)]
+    view = DataStore(tables=tables).as_of(deadlines[0])
+    frame = PROBES["greedy_rolling_random0"](view)
+    assert frame["kind"].tolist() == ["refused"] and "coverage gap" in frame["note"].iloc[0]
+    probes = {f"probe:{name}": probe for name, probe in PROBES.items()}
+    assert check_leakage(tables, deadlines, seed=0, features=probes) == []
+
+
+def test_probes_refuse_the_holdout_season():
+    tables = synthetic_tables(seasons=(2025,))
+    view = DataStore(tables=tables).as_of(deadline_of(tables, 2025, 5))
+    for probe in PROBES.values():
+        with pytest.raises(ValueError, match="holdout"):
+            probe(view)
+
+
+def leaky_start(view: AsOfView, rules: Rules) -> SquadState:
+    """The template squad, but its first player swapped for the same-position player who
+    scores the most points in the target GW itself (an outcome after the deadline)."""
+    state = template_state(view, rules)
+    first = state.holdings[0]
+    season, gw = view.gameweek_for_deadline()
+    matches = backdoor(view, "player_match")
+    matches = matches[(matches["season"] == season) & (matches["gw"] == gw)]
+    points = matches.groupby("player_key")["total_points"].sum()
+    pool = player_pool(view)
+    candidates = pool[
+        (pool["element_type"] == first.element_type) & ~pool["player_key"].isin(state.player_keys)
+    ]
+    candidates = candidates.assign(points=candidates["player_key"].map(points).fillna(0))
+    best = candidates.sort_values(["points", "player_key"], ascending=[False, True]).iloc[0]
+    swapped = Holding(
+        int(best["player_key"]), first.element_type, int(best["team_key"]), first.price, first.price
+    )
+    return SquadState(state.season, state.gw_index, (swapped, *state.holdings[1:]), state.bank, 1)
+
+
+def leaky_probe(view: AsOfView) -> pd.DataFrame:
+    return run_probe(view, RollPolicy("rolling"), leaky_start)
+
+
+def test_the_default_check_catches_a_leaky_probe(monkeypatch):
+    tables = synthetic_tables()
+    monkeypatch.setitem(PROBES, "leaky", leaky_probe)
+    deadlines = [deadline_of(tables, 2023, 10)]
+    leaks = check_leakage(tables, deadlines, seed=0)
+    assert {feature for feature, _ in flagged(leaks)} == {"probe:leaky"}
+
+
 def test_run_leakage_check_logs_what_it_checks(tmp_path, built, caplog):
     for name, df in built.items():
         df.to_parquet(tmp_path / f"{name}.parquet")
     with caplog.at_level("INFO", logger="fplopt.features.leakcheck"):
         deadlines = run_leakage_check(tmp_path, n_deadlines=0)
-    counts = f"{len(FEATURES)} feature(s), {len(MODELS)} model(s)"
+    builders = checked_builders()
+    counts = describe_builders(builders)
+    assert "probe(s)" in counts
     assert f"{len(deadlines)} deadline(s)" in caplog.text and counts in caplog.text
-    assert f"x {len(FEATURES) + len(MODELS)} builder(s) ({counts})" in caplog.text
+    assert f"x {len(builders)} builder(s) ({counts})" in caplog.text
 
 
 # --- deadline sampling -------------------------------------------------------------------
