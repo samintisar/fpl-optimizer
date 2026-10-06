@@ -347,11 +347,8 @@ def test_each_chip_id_used_once():
     assert record.chip_id == 8
 
 
-def test_one_chip_per_gameweek_and_unknown_chip():
-    state = make_state(gw_index=5, chips_used=((4, 5),))
-    assert not chip_available(state, "3xc", RULES)
-    with pytest.raises(InvalidDecision, match="already played"):
-        run(state, chip="3xc")
+def test_unknown_chip():
+    """(One chip per GW is structural: `Decision.chip` is a single chip.)"""
     assert not chip_available(make_state(), "doubletrouble", RULES)
     with pytest.raises(InvalidDecision, match="unknown chip"):
         run(make_state(), chip="doubletrouble")

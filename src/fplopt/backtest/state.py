@@ -25,8 +25,9 @@ FPL rules implemented here (values come from the rules config, PLAN §3):
   top-ups (`ft_topups`, e.g. 2025/26 AFCON) are added at their `gw_index`. Always capped.
 - **Chips:** a chip is a window (`chip_id`, name, start..stop on `gw_index`); each `chip_id`
   can be used once, so a set-1 chip not played by its last GW is lost. At most one chip per
-  GW. A Free Hit can't follow a Free Hit in the next GW unless `freehit_consecutive`. A Free
-  Hit's squad lasts one GW: the pre-transfer squad and bank come back at `next_state`.
+  GW (a `Decision` holds one chip). A Free Hit can't follow a Free Hit in the next GW unless
+  `freehit_consecutive`. A Free Hit's squad lasts one GW: the pre-transfer squad and bank
+  come back at `next_state`.
 
 Pure: no I/O, no pandas beyond reading the pool frame. States are frozen and updated with
 `dataclasses.replace`.
@@ -198,8 +199,8 @@ def _refreshed(holding: Holding, players: Mapping[int, _PoolPlayer]) -> Holding:
 
 
 def chip_available(state: SquadState, name: str, rules: Rules) -> bool:
-    """Whether chip `name` can be played at `state.gw_index` (window open and unused, no chip
-    already played this GW, Free Hit not right after a Free Hit unless allowed)."""
+    """Whether chip `name` can be played at `state.gw_index` (window open and unused, Free Hit
+    not right after a Free Hit unless allowed)."""
     try:
         _chip_window(state, name, rules)
     except InvalidDecision:
@@ -213,8 +214,8 @@ def _chip_window(state: SquadState, name: str, rules: Rules) -> int:
     if name not in names.values():
         raise InvalidDecision(f"unknown chip {name!r} (rules have {sorted(set(names.values()))})")
     gw = state.gw_index
-    if any(g == gw for _, g in state.chips_used):
-        raise InvalidDecision(f"a chip was already played in gw_index {gw}")
+    # One chip per GW needs no check: a Decision holds a single chip, and `chips_used` only
+    # records chips of earlier GWs (next_state moves on to the following gw_index).
     if (
         name == "freehit"
         and not rules.freehit_consecutive
