@@ -25,3 +25,6 @@ class FplClient:
 
     def element_summary(self, element_id: int) -> bytes:
         return self._get(f"element-summary/{element_id}/")
+
+    def event_live(self, gw: int) -> bytes:
+        return self._get(f"event/{gw}/live/")
