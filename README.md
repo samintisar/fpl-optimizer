@@ -63,7 +63,7 @@ data/         (gitignored) Parquet tables, SQLite user state
 |---|---|---|
 | 0 | Snapshot archiver | done, running on the server |
 | 1 | Backfill + ID mapping + Parquet tables | done: raw backfills on the server; `fplopt build all` builds every table |
-| 2 | `as_of` layer + leakage tests | |
+| 2 | `as_of` layer + leakage tests | done: `DataStore(...).as_of(deadline)`, baseline features, corrupt-the-future check (CI + `fplopt check leakage`) |
 | 3 | Backtester + baselines + greedy policy | |
 | 4 | Optimizer | |
 | 5 | Real models (market-implied team model first) | |
