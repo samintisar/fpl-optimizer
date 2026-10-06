@@ -49,8 +49,10 @@ def backfill_football_data(
     now: Clock = utc_now,
     sleep: Callable[[float], None] = time.sleep,
     pause_s: float = 1.0,
+    first_season: int = FIRST_SEASON,
 ) -> int:
-    """Every EPL season CSV from 2016/17 to the current season. All seasons are attempted;
+    """Every EPL season CSV from `first_season` (default 2016/17; seasons before 2016/17 are
+    only used for Elo burn-in) to the current season. All seasons are attempted;
     failures are collected and raised together (SnapshotError, one line). The current season
     follows the daily job's rule: a 404 in July/August means "not published yet", not an error.
     Returns the number of seasons written."""
@@ -59,7 +61,7 @@ def backfill_football_data(
 
     def step(start_year: int) -> Callable[[], None]:
         def run() -> None:
-            if start_year > FIRST_SEASON:
+            if start_year > first_season:
                 sleep(pause_s)
             if start_year == current:
                 path = snapshot_football_data_current(store, fd, now)
@@ -73,7 +75,7 @@ def backfill_football_data(
     run_independently(
         [
             (f"E0/{football_data_code(year)}", step(year))
-            for year in range(FIRST_SEASON, current + 1)
+            for year in range(first_season, current + 1)
         ]
     )
     log.info("archived %d football-data seasons", len(written))

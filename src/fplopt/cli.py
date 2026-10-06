@@ -1,10 +1,10 @@
 """Command-line entry point.
 
 `fplopt snapshot daily|tick` (archiver timers), `fplopt backfill element-summary|football-data|
-vaastav|fplcache` (one-off backfills into raw/), `fplopt rules export SEASON [--out DIR]`
-(config/scoring/<season>.json from an archived bootstrap), `fplopt build TABLE|all`
-(raw/ -> data/<table>.parquet; no network). Every job gets a `Context`; failures are logged
-and alerted to Telegram, and the exit code is 1.
+vaastav|fplcache` (one-off backfills into raw/; football-data takes `--from-season YEAR`),
+`fplopt rules export SEASON [--out DIR]` (config/scoring/<season>.json from an archived
+bootstrap), `fplopt build TABLE|all` (raw/ -> data/<table>.parquet; no network). Every job
+gets a `Context`; failures are logged and alerted to Telegram, and the exit code is 1.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ JOBS: dict[str, Job] = {
     "snapshot tick": lambda c: jobs.run_tick(c.store, c.fpl, c.odds),
     "backfill element-summary": lambda c: jobs.backfill_element_summaries(c.store, c.fpl),
     "backfill football-data": lambda c: history.backfill_football_data(
-        c.store, FootballDataClient(c.http)
+        c.store, FootballDataClient(c.http), first_season=c.args.from_season
     ),
     "backfill vaastav": lambda c: history.backfill_vaastav(c.store, VaastavClient(c.http)),
     "backfill fplcache": lambda c: history.backfill_fplcache(c.store, FplcacheClient(c.http)),
@@ -91,6 +91,13 @@ def build_parser() -> argparse.ArgumentParser:
     backfill = groups.add_parser("backfill", help="one-off backfills into raw/")
     backfill.add_argument(
         "command", choices=["element-summary", "football-data", "vaastav", "fplcache"]
+    )
+    backfill.add_argument(
+        "--from-season",
+        type=int,
+        default=history.FIRST_SEASON,
+        metavar="YEAR",
+        help=f"football-data only: first season's start year (default {history.FIRST_SEASON})",
     )
     rules_group = groups.add_parser("rules", help="per-season rules config")
     rules_group.add_argument("command", choices=["export"])

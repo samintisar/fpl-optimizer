@@ -135,6 +135,22 @@ def test_backfill_commands_are_valid(tmp_path, monkeypatch, command):
     assert ran == [tmp_path]
 
 
+def test_backfill_football_data_from_season(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        cli.history,
+        "backfill_football_data",
+        lambda store, fd, **kw: seen.append((type(fd), kw)),
+    )
+    settings = make_settings(tmp_path)
+    assert cli.main(["backfill", "football-data"], settings=settings) == 0
+    assert cli.main(["backfill", "football-data", "--from-season", "2005"], settings=settings) == 0
+    assert seen == [
+        (FootballDataClient, {"first_season": 2016}),
+        (FootballDataClient, {"first_season": 2005}),
+    ]
+
+
 def test_every_parsed_command_has_a_job():
     parser = cli.build_parser()
     extras = {"rules export": ["2026-27"], "build": ["fixture"]}
