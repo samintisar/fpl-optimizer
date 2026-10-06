@@ -1,0 +1,10 @@
+[Unit]
+Description=fpl-optimizer daily snapshot (bootstrap, fixtures, odds)
+After=network-online.target
+OnFailure=fplopt-failure@%n.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=20min
+WorkingDirectory=%h/fpl-optimizer
+ExecStart=%h/fpl-optimizer/.venv/bin/fplopt snapshot daily

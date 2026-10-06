@@ -21,6 +21,9 @@ optimize = ["highspy", "pulp"]
 bot = ["python-telegram-bot"]
 all = ["fplopt[models,optimize,bot]"]
 
+[project.scripts]
+fplopt = "fplopt.cli:main"
+
 [dependency-groups]
 dev = ["pytest", "ruff", "ipykernel"]
 

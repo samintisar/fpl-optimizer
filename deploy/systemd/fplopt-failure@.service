@@ -1,0 +1,7 @@
+[Unit]
+Description=fpl-optimizer failure alert for %i
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/fpl-optimizer/.env
+ExecStart=/bin/sh -c 'curl -fsS --max-time 20 "https://api.telegram.org/bot$${TELEGRAM_BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=$${TELEGRAM_ADMIN_CHAT_ID}" --data-urlencode "text=systemd unit %i failed on %H - see: journalctl --user -u %i" >/dev/null'

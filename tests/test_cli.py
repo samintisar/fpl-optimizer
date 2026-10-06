@@ -1,0 +1,109 @@
+import logging
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from fplopt import cli
+from fplopt.adapters.odds import OddsClient
+from fplopt.settings import Settings
+
+
+def make_settings(tmp_path):
+    return Settings(
+        raw_dir=tmp_path,
+        odds_api_key=None,
+        telegram_bot_token="T",
+        telegram_admin_chat_id="42",
+    )
+
+
+def test_successful_job_returns_zero(tmp_path, monkeypatch):
+    ran = []
+    monkeypatch.setitem(cli.JOBS, "snapshot daily", lambda store, fpl, odds: ran.append(odds))
+    assert cli.main(["snapshot", "daily"], settings=make_settings(tmp_path)) == 0
+    assert ran == [None]  # no odds key -> no odds client
+
+
+def test_failed_job_alerts_and_returns_one(tmp_path, monkeypatch):
+    def boom(store, fpl, odds):
+        raise RuntimeError("fpl down")
+
+    alerts = []
+    monkeypatch.setitem(cli.JOBS, "snapshot tick", boom)
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append((text, kw)))
+    assert cli.main(["snapshot", "tick"], settings=make_settings(tmp_path)) == 1
+    text, kw = alerts[0]
+    assert "snapshot tick failed" in text
+    assert "fpl down" in text
+    assert kw == {"token": "T", "chat_id": "42"}
+
+
+def test_unknown_command_exits():
+    with pytest.raises(SystemExit):
+        cli.main(["snapshot", "weekly"])
+
+
+@pytest.fixture(autouse=True)
+def restore_logging():
+    names = ["", "httpx", "httpcore"]
+    levels = {name: logging.getLogger(name).level for name in names}
+    yield
+    for name, level in levels.items():
+        logging.getLogger(name).setLevel(level)
+
+
+def test_logging_hides_httpx_request_urls():
+    cli.configure_logging()
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
+
+
+def test_settings_from_env():
+    env = {"FPLOPT_RAW_DIR": "/srv/raw", "ODDS_API_KEY": "", "TELEGRAM_ADMIN_CHAT_ID": " 42 \n"}
+    s = Settings.from_env(env)
+    assert s.raw_dir == Path("/srv/raw").resolve()
+    assert s.odds_api_key is None
+    assert s.telegram_admin_chat_id == "42"
+    assert Settings.from_env({}).raw_dir == Path("raw").resolve()
+
+
+def test_alert_text_is_redacted_and_single_line(tmp_path, monkeypatch):
+    def boom(store, fpl, odds):
+        raise RuntimeError("GET https://x.test/?apiKey=SECRET failed\nsecond line")
+
+    alerts = []
+    monkeypatch.setitem(cli.JOBS, "snapshot daily", boom)
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    assert cli.main(["snapshot", "daily"], settings=make_settings(tmp_path)) == 1
+    assert "SECRET" not in alerts[0]
+    assert "second line" not in alerts[0]
+
+
+def test_odds_client_built_when_key_set(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setitem(cli.JOBS, "snapshot daily", lambda store, fpl, odds: seen.append(odds))
+    settings = replace(make_settings(tmp_path), odds_api_key="K")
+    assert cli.main(["snapshot", "daily"], settings=settings) == 0
+    assert isinstance(seen[0], OddsClient)
+
+
+def test_unconfigured_telegram_warns_and_still_fails(tmp_path, monkeypatch, caplog):
+    def boom(store, fpl, odds):
+        raise RuntimeError("x")
+
+    monkeypatch.setitem(cli.JOBS, "snapshot tick", boom)
+    settings = replace(make_settings(tmp_path), telegram_bot_token=None)
+    assert cli.main(["snapshot", "tick"], settings=settings) == 1
+    assert "will not be alerted" in caplog.text
+
+
+def test_setup_failure_is_alerted(tmp_path, monkeypatch):
+    def broken_client():
+        raise OSError("bad CA bundle")
+
+    alerts = []
+    monkeypatch.setattr(cli, "make_client", broken_client)
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    assert cli.main(["snapshot", "daily"], settings=make_settings(tmp_path)) == 1
+    assert "bad CA bundle" in alerts[0]
