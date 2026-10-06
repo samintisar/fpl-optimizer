@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import socket
 import sys
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -102,6 +105,27 @@ def configure_logging() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
+def _exit_on_sigterm(signum: int, frame: object) -> None:
+    raise SystemExit(143)  # 128 + SIGTERM, the status a shell reports for a TERM-killed process
+
+
+@contextmanager
+def _sigterm_raises_system_exit() -> Iterator[None]:
+    """Turn SIGTERM (systemd stop or TimeoutStartSec) into SystemExit while a job runs, so its
+    `finally` blocks still write run manifests; the default action kills the process without
+    unwinding. Restores the previous handler afterwards. A no-op where there is no SIGTERM
+    or off the main thread (signal handlers can only be set there)."""
+    sigterm = getattr(signal, "SIGTERM", None)
+    if sigterm is None or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(sigterm, _exit_on_sigterm)
+    try:
+        yield
+    finally:
+        signal.signal(sigterm, previous)
+
+
 def main(argv: Sequence[str] | None = None, settings: Settings | None = None) -> int:
     args = build_parser().parse_args(argv)
     job_name = f"{args.group} {args.command}"
@@ -116,7 +140,7 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
     log.info("job %r starting (raw dir %s)", job_name, settings.raw_dir)
     try:
         store = RawStore(settings.raw_dir)
-        with make_client() as http:
+        with make_client() as http, _sigterm_raises_system_exit():
             JOBS[job_name](Context(store=store, http=http, settings=settings, args=args))
     except Exception as exc:
         log.exception("job %r failed", job_name)

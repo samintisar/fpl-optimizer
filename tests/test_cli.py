@@ -1,4 +1,5 @@
 import logging
+import signal
 from dataclasses import replace
 from pathlib import Path
 
@@ -163,3 +164,25 @@ def test_daily_job_archives_football_data(tmp_path, monkeypatch):
     assert isinstance(fpl, FplClient)
     assert odds is None
     assert isinstance(kw["football_data"], FootballDataClient)
+
+
+def test_sigterm_during_a_job_raises_system_exit_and_handler_is_restored(tmp_path, monkeypatch):
+    if not hasattr(signal, "SIGTERM"):
+        pytest.skip("no SIGTERM on this platform")
+    before = signal.getsignal(signal.SIGTERM)
+    seen = []
+
+    def job(c):
+        handler = signal.getsignal(signal.SIGTERM)
+        seen.append(handler)
+        handler(signal.SIGTERM, None)  # what systemd's stop/timeout would deliver
+
+    alerts = []
+    monkeypatch.setitem(cli.JOBS, "snapshot daily", job)
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    with pytest.raises(SystemExit) as info:
+        cli.main(["snapshot", "daily"], settings=make_settings(tmp_path))
+    assert info.value.code == 143
+    assert callable(seen[0]) and seen[0] is not before
+    assert signal.getsignal(signal.SIGTERM) is before
+    assert alerts == []  # systemd's OnFailure unit reports a killed run

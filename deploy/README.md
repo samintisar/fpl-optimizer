@@ -56,6 +56,10 @@ Runs as your normal user with systemd **user** timers. Raw data lands in `~/fpl-
 - Timers: `systemctl --user list-timers 'fplopt-*'`
 - Logs: `journalctl --user -u fplopt-daily.service -u fplopt-tick.service --since today`
 - Update: `cd ~/fpl-optimizer && git pull && uv sync --locked` (re-copy units if `deploy/systemd/` changed, then `systemctl --user daemon-reload`)
+- **Units changed in Phase 1a:** `fplopt-daily.service` now has `TimeoutStartSec=40min` (was 20min). On a server set up before that, re-copy the units and reload when deploying:
+  ```bash
+  cp deploy/systemd/* ~/.config/systemd/user/ && systemctl --user daemon-reload
+  ```
 - Odds credits: each odds snapshot logs `credits remaining=…`; a warning is logged below 50 (free tier: 500/month; ~80 used).
 
 ### What the daily job archives
@@ -70,7 +74,7 @@ Steps run independently: one failing doesn't stop the others, and the job fails 
    - A fresh element-summary run (all players' per-GW history, about 700 requests, ~5 minutes) when a GW has been finalised since the newest *complete* run. Its manifest also records `season` and `through_event`. A run with failures, without a manifest, or with an older manifest that lacks these keys doesn't count, so the next day tries again. The first daily run after deploying Phase 1a therefore does a full run.
    - Does nothing on days when no new GW has been finalised.
 
-The element-summary run has to fit in the daily unit's `TimeoutStartSec=20min`. If a run gets killed, it leaves no manifest and is redone the next day.
+The element-summary run has to fit in the daily unit's `TimeoutStartSec=40min`. If systemd stops the job (timeout or `systemctl stop`), the CLI turns SIGTERM into a normal exit so the run still writes its manifest; the run is incomplete, so the next day redoes it. A run killed outright (SIGKILL, power loss) leaves no manifest and is likewise redone.
 
 ## Historical backfills (one-off, Phase 1a)
 
