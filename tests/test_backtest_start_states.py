@@ -11,6 +11,7 @@ from synthetic_season import synthetic_tables
 
 from fplopt.backtest.rules import backtest_rules
 from fplopt.backtest.start_states import (
+    MAX_BANK,
     StartStateError,
     check_coverage,
     ownership,
@@ -80,11 +81,21 @@ def test_random_states_are_deterministic_per_seed_and_differ_across_seeds(league
     assert len({s.player_keys for s in states}) == len(states)
 
 
-def test_random_states_spend_realistically(league):
-    """Drawn ∝ price: on average they spend clearly more than uniform cheap squads."""
-    view = view_at(league, 2023, 10)
+@pytest.mark.parametrize("gw", [1, 10, 30])
+def test_random_states_spend_realistically(league, gw):
+    """Minimum spend: at most MAX_BANK (£2m) left, for every seed (on real data the
+    price-weighted draws alone left £16–31m on average)."""
+    view = view_at(league, 2023, gw)
     banks = [random_state(view, RULES, seed).bank for seed in range(20)]
-    assert sum(banks) / len(banks) < 150  # spends > 85% of the 100.0m budget on average
+    assert max(banks) <= MAX_BANK
+
+
+def test_random_state_spend_bound_is_a_parameter(league):
+    view = view_at(league, 2023, 10)
+    for seed in range(5):
+        state = random_state(view, RULES, seed, max_bank=5)
+        assert_valid(state, view)
+        assert state.bank <= 5
 
 
 def test_template_is_the_most_owned_feasible_squad(league):

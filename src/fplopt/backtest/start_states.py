@@ -11,8 +11,12 @@ at a deadline, built from what is visible in the deadline view:
   the cheapest eligible players. Before 2021/22 no ownership is visible at GW1, so template
   starts begin at GW2 there.
 - `random_state`: a seeded random valid squad. Slots are visited in random order and each
-  is filled with a feasible player (same test) drawn with probability ∝ price, so squads
-  spend realistically. `numpy.random.default_rng(seed)`; deterministic per (view, seed).
+  is filled with a feasible player drawn with probability ∝ price. Feasible = the test above
+  plus a minimum spend: the money left after the pick must be spendable down to `max_bank`
+  (default £2m) with the most expensive eligible players, so squads spend like real ones
+  (drawing ∝ price alone left £16–31m in the bank on real data). The spend bound ignores
+  club caps among the remaining picks, so a draw can dead-end; it is then redrawn (up to
+  `ATTEMPTS` times). `numpy.random.default_rng(seed)`; deterministic per (view, seed).
 
 Both return a `SquadState` for the view's GW: purchase price = price, bank = budget − cost,
 1 free transfer (0 at `gw_index == 1`, where transfers are unlimited anyway), no chips used.
@@ -44,6 +48,10 @@ __all__ = (
     "target_gameweek",
     "template_state",
 )
+
+
+ATTEMPTS = 20  # random_state redraws after a dead end
+MAX_BANK = 20  # random_state: at most £2m left in the bank
 
 
 class StartStateError(ValueError):
@@ -113,7 +121,7 @@ class _Builder:
         self.clubs: Counter[int] = Counter()
         self.spent = 0
         # Per position: pool positions sorted by price (then key) for the cheapest fill.
-        self.by_price = {
+        self.by_price = {  # cheapest first; reversed for the dearest fill
             et: np.flatnonzero(self.et == et)[
                 np.lexsort((self.keys[self.et == et], self.price[self.et == et]))
             ]
@@ -124,22 +132,24 @@ class _Builder:
     def full(self) -> bool:
         return sum(self.slots.values()) == 0
 
-    def _fill_cost(self, slots: Counter[int], blocked: np.ndarray) -> float:
-        """Cheapest cost of filling `slots` with players not `blocked` (inf if impossible)."""
+    def _fill_cost(self, slots: Counter[int], blocked: np.ndarray, dearest: bool = False) -> float:
+        """Cheapest (or, with `dearest`, the most expensive) cost of filling `slots` with
+        players not `blocked` (inf if impossible)."""
         total = 0
         for et, n in slots.items():
             if n <= 0:
                 continue
-            idx = self.by_price[et]
+            idx = self.by_price[et][::-1] if dearest else self.by_price[et]
             idx = idx[~blocked[idx]][:n]
             if len(idx) < n:
                 return float("inf")
             total += int(self.price[idx].sum())
         return total
 
-    def feasible(self, i: int) -> bool:
+    def feasible(self, i: int, max_bank: int | None = None) -> bool:
         """Player i fits: his position has a slot, his club is under the cap, and the
-        remaining budget can fill the remaining slots with the cheapest eligible players."""
+        remaining budget can fill the remaining slots with the cheapest eligible players
+        (and, with `max_bank`, the dearest eligible fill leaves at most `max_bank`)."""
         et, team = int(self.et[i]), int(self.team[i])
         if self.chosen[i] or self.slots[et] <= 0 or self.clubs[team] >= self.rules.team_limit:
             return False
@@ -156,7 +166,9 @@ class _Builder:
             full.append(team)
         if full:
             blocked |= np.isin(self.team, full)
-        return self._fill_cost(slots, blocked) <= left
+        if self._fill_cost(slots, blocked) > left:
+            return False
+        return max_bank is None or left - self._fill_cost(slots, blocked, dearest=True) <= max_bank
 
     def add(self, i: int) -> None:
         self.chosen[i] = True
@@ -217,21 +229,30 @@ def template_state(view: AsOfView, rules: Rules) -> SquadState:
     return builder.state(view)
 
 
-def random_state(view: AsOfView, rules: Rules, seed: int) -> SquadState:
-    """A seeded random valid squad at the view's deadline, players drawn ∝ price (see the
-    module docstring)."""
+def random_state(
+    view: AsOfView, rules: Rules, seed: int, max_bank: int | None = MAX_BANK
+) -> SquadState:
+    """A seeded random valid squad at the view's deadline, players drawn ∝ price, leaving at
+    most `max_bank` in the bank (see the module docstring)."""
     pool = _pool(view)
-    builder = _Builder(pool, rules)
     rng = np.random.default_rng(seed)
-    slots = [et for et, n in sorted(builder.slots.items()) for _ in range(n)]
-    for k in rng.permutation(len(slots)):
-        et = slots[int(k)]
-        candidates = [int(i) for i in np.flatnonzero(builder.et == et) if builder.feasible(int(i))]
-        if not candidates:
-            raise _no_squad(view, builder)
-        weights = builder.price[candidates].astype("float64")
-        weights = np.where(weights > 0, weights, 0.0)
-        if weights.sum() <= 0:
-            weights = np.ones(len(candidates))
-        builder.add(candidates[int(rng.choice(len(candidates), p=weights / weights.sum()))])
-    return builder.state(view)
+    for _ in range(ATTEMPTS):
+        builder = _Builder(pool, rules)
+        slots = [et for et, n in sorted(builder.slots.items()) for _ in range(n)]
+        for k in rng.permutation(len(slots)):
+            et = slots[int(k)]
+            candidates = [
+                int(i)
+                for i in np.flatnonzero(builder.et == et)
+                if builder.feasible(int(i), max_bank)
+            ]
+            if not candidates:
+                break
+            weights = builder.price[candidates].astype("float64")
+            weights = np.where(weights > 0, weights, 0.0)
+            if weights.sum() <= 0:
+                weights = np.ones(len(candidates))
+            builder.add(candidates[int(rng.choice(len(candidates), p=weights / weights.sum()))])
+        if builder.full:
+            return builder.state(view)
+    raise _no_squad(view, builder)
