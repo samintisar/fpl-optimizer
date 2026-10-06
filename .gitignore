@@ -24,6 +24,9 @@ __pycache__/
 # Notebooks / experiments
 .ipynb_checkpoints/
 mlruns/
+# Backtest outputs; the experiment log is the tracked audit trail (PLAN §5)
+/results/*
+!/results/experiments.csv
 
 # OS / editors
 .DS_Store
