@@ -100,7 +100,8 @@ fpl-optimizer/
 - `player_season` — per player and season: FPL id (`element_id`), position, names; no club (per-match club in `player_match`, as-of club in `player_snapshot`). `available_at` = deadline of the GW of the player's first `player_match` row that season.
 - `team_dim` — `team_key` (= FPL team `code`, stable across seasons; synthetic codes ≥ 1000 for clubs never in FPL's era, needed for Elo burn-in) ↔ names in every source, from the hand-maintained `config/teams.csv`.
 - `fixture` — every EPL match: season, FPL fixture id and GW, kickoff (from FPL), teams, result; football-data and Understat match ids.
-- `gameweek` — per season and GW: deadline (from bootstrap snapshots; 2016/17–2019/20 approximated as first kickoff − 90 min and flagged), lockdown time, `average_entry_score`.
+- `gameweek` — per season and GW: deadline (from bootstrap snapshots; 2016/17–2019/20 approximated as first kickoff − 90 min and flagged), lockdown time.
+- `gameweek_result` — per season and GW outcomes known at lockdown (`available_at` = lockdown): `average_entry_score`.
 - `player_snapshot` — price, position, status, chance_of_playing, news, ownership, `ep_next`, penalty / set-piece order, `team_join_date` per snapshot time.
 - `fixture_snapshot` — the fixture list as it looked at each snapshot. **Only from our own archive (2026-10-05 on):** fplcache has bootstrap only, so earlier seasons have just the final fixture list — the as-of blank/double leak (§4) cannot be fully avoided historically.
 - `player_match` — minutes, starts, goals, assists, CS, saves, cards, BPS, bonus, CBIT/recoveries (where available), npxG, xA, penalties.

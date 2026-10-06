@@ -10,6 +10,7 @@ from fplopt.build.fixtures import (
     UNSCHEDULED_AT,
     FixtureCrossCheckError,
     assemble_fixtures,
+    assemble_gameweek_results,
     assemble_gameweeks,
     attach_football_data,
     fixtures_from_merged_gw,
@@ -209,18 +210,26 @@ def test_assemble_gameweeks_sources_and_bootstrap_event_without_fixtures():
             "average_entry_score": pd.array([45, 0, pd.NA], dtype="Int64"),
         }
     )
-    out = assemble_gameweeks(fixture, {2022: events}, {}).set_index(["season", "gw"])
+    gameweek = assemble_gameweeks(fixture, {2022: events}, {})
+    assert "average_entry_score" not in gameweek.columns  # known at lockdown: gameweek_result
+    out = gameweek.set_index(["season", "gw"])
     assert (2022, 7) not in out.index  # FPL's cancelled 2022-23 GW7: no fixtures, no row
     approx = out.loc[(2016, 1)]
     assert approx["deadline_source"] == "approx"
     assert approx["deadline_time"] == utc("2016-08-13T10:15")
     assert approx["first_kickoff"] == utc("2016-08-13T11:45")
     assert approx["lockdown_time"] == utc("2016-08-15T08:00")  # Monday 09:00 BST
-    assert pd.isna(approx["average_entry_score"])
     gw6 = out.loc[(2022, 6)]
-    assert gw6["deadline_source"] == "bootstrap" and gw6["average_entry_score"] == 45
+    assert gw6["deadline_source"] == "bootstrap"
     assert gw6["available_at"] == gw6["deadline_time"]
-    assert gw6["average_entry_score_available_at"] == gw6["lockdown_time"]
+
+    results = assemble_gameweek_results(gameweek, {2022: events}).set_index(["season", "gw"])
+    assert list(results.index) == list(out.index)
+    assert results.loc[(2022, 6), "average_entry_score"] == 45
+    assert pd.isna(results.loc[(2016, 1), "average_entry_score"])
+    assert pd.isna(results.loc[(2022, 8), "average_entry_score"])  # not finished
+    assert (results["event_time"] == out["lockdown_time"]).all()
+    assert (results["available_at"] == out["lockdown_time"]).all()
 
 
 def test_last_bootstrap_per_season_uses_payload_season_not_timestamp(world):
@@ -248,7 +257,7 @@ def test_build_fixture_and_gameweek_end_to_end(world):
     fx23 = world.add_vaastav_season(2023)
     world.add_fplcache_bootstrap(datetime(2024, 6, 1, tzinfo=UTC), bootstrap(2023, fx23))
     world.add_current_season()
-    build(["fixture", "gameweek"], world.ctx)
+    build(["fixture", "gameweek", "gameweek_result"], world.ctx)
 
     fixture = world.ctx.table("fixture")
     assert fixture.groupby("season").size().to_dict() == {2016: 380, 2023: 380, 2026: 380}
@@ -269,9 +278,12 @@ def test_build_fixture_and_gameweek_end_to_end(world):
     sources = gameweek.groupby("season")["deadline_source"].unique().map(list).to_dict()
     assert sources == {2016: ["approx"], 2023: ["bootstrap"], 2026: ["bootstrap"]}
     gw26 = gameweek[gameweek["season"] == 2026].set_index("gw")
-    assert gw26.loc[2, "average_entry_score"] == 52
-    assert pd.isna(gw26.loc[3, "average_entry_score"])
     assert len(gw26) == 38
+    result = world.ctx.table("gameweek_result")
+    r26 = result[result["season"] == 2026].set_index("gw")
+    assert r26.loc[2, "average_entry_score"] == 52
+    assert pd.isna(r26.loc[3, "average_entry_score"])
+    assert (r26["available_at"] == gw26["lockdown_time"]).all()
 
 
 def test_fixture_build_fails_when_a_team_misses_matches(world):

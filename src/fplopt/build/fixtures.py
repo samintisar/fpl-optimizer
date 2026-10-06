@@ -1,4 +1,5 @@
-"""`fixture` (one row per EPL match, 2016/17 →) and `gameweek` (one row per season and GW).
+"""`fixture` (one row per EPL match, 2016/17 →), `gameweek` (one row per season and GW) and
+`gameweek_result` (per GW outcomes: `average_entry_score`).
 
 fixture sources:
 - 2016-17, 2017-18 (no fixtures.csv): vaastav merged_gw. Per `fixture` id, the home side's
@@ -26,9 +27,10 @@ gameweek: GWs that have fixtures. Deadlines from the newest bootstrap of each se
 else first kickoff − 90 min ('approx': 2016-17, 2017-18, 2019-20). Measured leads (first
 kickoff − deadline): 2018-19 always 60 min, 2020-21 … 2026-27 90 min (one 240-min GW in
 2024-25); so 'approx' is at or before the true deadline — conservative for as-of reads.
-`average_entry_score`
-only from bootstraps and only for finished events; it is known at lockdown
-(`average_entry_score_available_at`).
+
+gameweek_result: one row per gameweek row; `average_entry_score` only from bootstraps and
+only for finished events (null otherwise). An outcome, so `event_time` = `available_at` =
+the GW's lockdown (`gameweek` rows are available at their deadline).
 
 2022-23 GW7: FPL's bootstrap keeps event 7 (deadline 2022-09-10 10:00 UTC,
 average_entry_score 0, no fixtures: the round was cancelled after the Queen's death and its
@@ -536,8 +538,6 @@ GAMEWEEK_COLUMNS = [
     "first_kickoff",
     "last_kickoff",
     "lockdown_time",
-    "average_entry_score",
-    "average_entry_score_available_at",
     "event_time",
     "available_at",
 ]
@@ -568,8 +568,6 @@ GAMEWEEK_SCHEMA = pa.DataFrameSchema(
         "first_kickoff": pa.Column(UTC_US),
         "last_kickoff": pa.Column(UTC_US),
         "lockdown_time": pa.Column(UTC_US),
-        "average_entry_score": pa.Column("Int64", pa.Check.ge(0), nullable=True),
-        "average_entry_score_available_at": pa.Column(UTC_US),
         "event_time": pa.Column(UTC_US),
         "available_at": pa.Column(UTC_US),
     },
@@ -640,7 +638,9 @@ def assemble_gameweeks(
                 log.info(
                     "season %d: bootstrap event(s) %s have no fixtures; skipped", season, extra
                 )
-            rows = rows.merge(events, on="gw", how="left", validate="one_to_one")
+            rows = rows.merge(
+                events[["gw", "deadline_time"]], on="gw", how="left", validate="one_to_one"
+            )
             if rows["deadline_time"].isna().any():
                 missing = rows.loc[rows["deadline_time"].isna(), "gw"].tolist()
                 raise ValueError(f"season {season}: GW(s) {missing} missing from the bootstrap")
@@ -649,11 +649,9 @@ def assemble_gameweeks(
             rows = rows.merge(csv_deadlines[season], on="gw", how="left", validate="one_to_one")
             if rows["deadline_time"].isna().any():
                 raise ValueError(f"season {season}: fixtures.csv lacks deadlines for some GWs")
-            rows["average_entry_score"] = pd.NA
             rows["deadline_source"] = "fixtures_csv"
         else:
             rows["deadline_time"] = rows["first_kickoff"] - APPROX_DEADLINE_LEAD
-            rows["average_entry_score"] = pd.NA
             rows["deadline_source"] = "approx"
         frames.append(rows)
     df = pd.concat(frames, ignore_index=True)
@@ -661,23 +659,26 @@ def assemble_gameweeks(
     df["deadline_time"] = df["deadline_time"].astype(UTC_US)
     df["first_kickoff"] = df["first_kickoff"].astype(UTC_US)
     df["last_kickoff"] = df["last_kickoff"].astype(UTC_US)
-    df["average_entry_score"] = df["average_entry_score"].astype("Int64")
     df["deadline_source"] = df["deadline_source"].astype(str)
     df["lockdown_time"] = lockdown_times(df["last_kickoff"])
-    df["average_entry_score_available_at"] = df["lockdown_time"]
     df["event_time"] = df["deadline_time"]
     df["available_at"] = df["deadline_time"]
     return df[GAMEWEEK_COLUMNS]
 
 
-def build_gameweek(ctx: BuildContext) -> pd.DataFrame:
-    fixture = ctx.table("fixture")
-    seasons = set(fixture["season"].unique())
-    bootstrap_deadlines = {
+def season_bootstrap_events(ctx: BuildContext, seasons: set[int]) -> dict[int, pd.DataFrame]:
+    """`bootstrap_events` of the newest bootstrap of each of `seasons` that has one."""
+    return {
         season: bootstrap_events(RawStore.read_json(path))
         for season, (_, path, _) in last_bootstrap_per_season(ctx.store).items()
         if season in seasons
     }
+
+
+def build_gameweek(ctx: BuildContext) -> pd.DataFrame:
+    fixture = ctx.table("fixture")
+    seasons = set(fixture["season"].unique())
+    bootstrap_deadlines = season_bootstrap_events(ctx, seasons)
     csv_deadlines = {}
     for season, season_dir in vaastav_seasons(vaastav_run(ctx)).items():
         path = season_dir / "fixtures.csv.gz"
@@ -686,3 +687,54 @@ def build_gameweek(ctx: BuildContext) -> pd.DataFrame:
             if "deadline_time" in fixtures.columns:
                 csv_deadlines[season] = fixtures_csv_deadlines(fixtures)
     return assemble_gameweeks(fixture, bootstrap_deadlines, csv_deadlines)
+
+
+# --- gameweek_result ---------------------------------------------------------------------
+
+GAMEWEEK_RESULT_COLUMNS = ["season", "gw", "average_entry_score", "event_time", "available_at"]
+
+GAMEWEEK_RESULT_SCHEMA = pa.DataFrameSchema(
+    {
+        "season": pa.Column("int64", pa.Check.ge(FIRST_SEASON)),
+        "gw": pa.Column("int64", pa.Check.in_range(1, 47)),
+        "average_entry_score": pa.Column("Int64", pa.Check.ge(0), nullable=True),
+        "event_time": pa.Column(UTC_US),
+        "available_at": pa.Column(UTC_US),
+    },
+    checks=[
+        pa.Check(lambda df: ~df.duplicated(["season", "gw"]), error="(season, gw) unique"),
+        pa.Check(lambda df: df["available_at"] == df["event_time"], error="available_at"),
+    ],
+    strict=True,
+    ordered=True,
+)
+GAMEWEEK_RESULT_SORT_BY = ("season", "gw")
+
+
+def assemble_gameweek_results(
+    gameweek: pd.DataFrame, bootstrap_events_by_season: dict[int, pd.DataFrame]
+) -> pd.DataFrame:
+    """One row per gameweek row: average_entry_score (bootstrap seasons, finished events;
+    else null), timed at the GW's lockdown."""
+    events = [
+        frame[["gw", "average_entry_score"]].assign(season=season)
+        for season, frame in bootstrap_events_by_season.items()
+    ]
+    scores = (
+        pd.concat(events, ignore_index=True)
+        if events
+        else pd.DataFrame({"gw": [], "average_entry_score": [], "season": []})
+    ).astype({"season": "int64", "gw": "int64", "average_entry_score": "Int64"})
+    df = gameweek[["season", "gw", "lockdown_time"]].merge(
+        scores, on=["season", "gw"], how="left", validate="one_to_one"
+    )
+    df["average_entry_score"] = df["average_entry_score"].astype("Int64")
+    df["event_time"] = df["lockdown_time"].astype(UTC_US)
+    df["available_at"] = df["event_time"]
+    return df[GAMEWEEK_RESULT_COLUMNS]
+
+
+def build_gameweek_result(ctx: BuildContext) -> pd.DataFrame:
+    gameweek = ctx.table("gameweek")
+    events = season_bootstrap_events(ctx, set(gameweek["season"].unique()))
+    return assemble_gameweek_results(gameweek, events)

@@ -36,6 +36,11 @@ BUILDERS: dict[str, Builder] = {
     "gameweek": Builder(
         fixtures.build_gameweek, fixtures.GAMEWEEK_SCHEMA, fixtures.GAMEWEEK_SORT_BY
     ),
+    "gameweek_result": Builder(
+        fixtures.build_gameweek_result,
+        fixtures.GAMEWEEK_RESULT_SCHEMA,
+        fixtures.GAMEWEEK_RESULT_SORT_BY,
+    ),
     "player_season": Builder(
         players.build_player_season, players.PLAYER_SEASON_SCHEMA, players.PLAYER_SEASON_SORT_BY
     ),
@@ -58,6 +63,7 @@ ORDER: list[str] = [
     "team_dim",
     "fixture",
     "gameweek",
+    "gameweek_result",
     "player_match",
     "player_season",
     "player_dim",
