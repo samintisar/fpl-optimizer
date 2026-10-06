@@ -1,9 +1,18 @@
 import json
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 
-from fplopt.ingest.jobs import backfill_element_summaries, run_daily, run_tick
+from fplopt.ingest.jobs import (
+    SnapshotError,
+    backfill_element_summaries,
+    run_daily,
+    run_independently,
+    run_tick,
+    snapshot_football_data,
+    snapshot_football_data_current,
+)
 from fplopt.ingest.raw_store import RawStore
 
 DEADLINE = datetime(2026, 10, 10, 10, 0, tzinfo=UTC)
@@ -236,3 +245,100 @@ def test_combined_error_is_one_line_naming_every_source(tmp_path):
     assert "\n" not in message
     assert "fixtures down" in message
     assert "odds down" in message
+
+
+CSV = b"Div,Date,HomeTeam,AwayTeam\r\nE0,13/08/16,Burnley,Swansea\r\n"
+
+
+class FakeFootballData:
+    def __init__(self, fail=None):
+        self.fail = fail
+        self.seasons = []
+
+    def epl_season(self, start_year):
+        self.seasons.append(start_year)
+        if self.fail is not None:
+            raise self.fail
+        return CSV
+
+
+def not_found():
+    request = httpx.Request("GET", "https://x")
+    return httpx.HTTPStatusError(
+        "404", request=request, response=httpx.Response(404, request=request)
+    )
+
+
+def test_snapshot_football_data_writes_gzipped_csv_by_season_code(tmp_path):
+    store = RawStore(tmp_path)
+    path = snapshot_football_data(store, FakeFootballData(), 2016, Clock(DEADLINE))
+    assert path.parent == tmp_path / "football-data" / "E0" / "1617"
+    assert path.name.endswith(".csv.gz")
+    assert RawStore.read_bytes(path) == CSV
+    assert len(store.times("football-data", "E0/1617", suffix=".csv.gz")) == 1
+
+
+def test_current_season_404_in_august_is_tolerated(tmp_path):
+    store = RawStore(tmp_path)
+    fd = FakeFootballData(fail=not_found())
+    clock = Clock(datetime(2026, 8, 10, 3, 0, tzinfo=UTC))
+    assert snapshot_football_data_current(store, fd, clock) is None
+    assert fd.seasons == [2026]
+    assert not (tmp_path / "football-data").exists()
+
+
+def test_current_season_404_in_october_raises(tmp_path):
+    fd = FakeFootballData(fail=not_found())
+    with pytest.raises(httpx.HTTPStatusError):
+        snapshot_football_data_current(RawStore(tmp_path), fd, Clock(DEADLINE))
+
+
+def test_current_season_snapshot_uses_season_in_progress(tmp_path):
+    store = RawStore(tmp_path)
+    fd = FakeFootballData()
+    path = snapshot_football_data_current(store, fd, Clock(datetime(2027, 1, 15, tzinfo=UTC)))
+    assert fd.seasons == [2026]
+    assert path.parent.name == "2627"
+
+
+def test_daily_also_archives_current_football_data_csv(tmp_path):
+    store = RawStore(tmp_path)
+    fd = FakeFootballData()
+    run_daily(store, FakeFpl(), FakeOdds(), Clock(DEADLINE - timedelta(hours=8)), football_data=fd)
+    assert len(store.times("fpl", "bootstrap-static")) == 1
+    assert len(store.times("odds", "soccer_epl")) == 1
+    assert len(store.times("football-data", "E0/2627", suffix=".csv.gz")) == 1
+
+
+def test_daily_football_data_failure_does_not_block_fpl_or_odds(tmp_path):
+    store = RawStore(tmp_path)
+    fd = FakeFootballData(fail=RuntimeError("fd down"))
+    with pytest.raises(SnapshotError) as info:
+        run_daily(
+            store, FakeFpl(), FakeOdds(), Clock(DEADLINE - timedelta(hours=8)), football_data=fd
+        )
+    assert "football-data" in str(info.value)
+    assert "fd down" in str(info.value)
+    assert len(store.times("fpl", "bootstrap-static")) == 1
+    assert len(store.times("odds", "soccer_epl")) == 1
+
+
+def test_daily_without_football_data_source_skips_it(tmp_path):
+    store = RawStore(tmp_path)
+    run_daily(store, FakeFpl(), None, Clock(DEADLINE - timedelta(hours=8)))
+    assert not (tmp_path / "football-data").exists()
+
+
+def test_run_independently_runs_every_step_and_names_failures():
+    ran = []
+
+    def fail():
+        ran.append("b")
+        raise ValueError("bad\nsecond line")
+
+    with pytest.raises(SnapshotError) as info:
+        run_independently(
+            [("a", lambda: ran.append("a")), ("b", fail), ("c", lambda: ran.append("c"))]
+        )
+    assert ran == ["a", "b", "c"]
+    assert str(info.value) == "b: ValueError: bad"

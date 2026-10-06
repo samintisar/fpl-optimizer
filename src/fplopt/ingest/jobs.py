@@ -10,14 +10,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from fplopt.ingest.raw_store import RawStore
+import httpx
+
+from fplopt.ingest.raw_store import RawStore, gzip_bytes
 from fplopt.ingest.schedule import deadlines_from_bootstrap, pre_deadline_due
+from fplopt.seasons import football_data_code, season_start_year
 
 log = logging.getLogger(__name__)
 
 Clock = Callable[[], datetime]
 
 MAX_CONSECUTIVE_FAILURES = 10
+
+FOOTBALL_DATA_GRACE_MONTHS = (7, 8)  # new-season CSV may not exist yet in July/August
 
 
 def utc_now() -> datetime:
@@ -34,6 +39,10 @@ class FplSource(Protocol):
 
 class OddsSource(Protocol):
     def epl_odds(self) -> bytes: ...
+
+
+class FootballDataSource(Protocol):
+    def epl_season(self, start_year: int) -> bytes: ...
 
 
 def snapshot_fpl(store: RawStore, fpl: FplSource, now: Clock = utc_now) -> list[Path]:
@@ -58,7 +67,9 @@ class SnapshotError(RuntimeError):
     """One or more sources failed; the others were still archived."""
 
 
-def _run_independently(steps: list[tuple[str, Callable[[], object]]]) -> None:
+def run_independently(steps: list[tuple[str, Callable[[], object]]]) -> None:
+    """Run every step even if earlier ones fail; then raise one SnapshotError naming each
+    failed step (single line)."""
     errors: list[str] = []
     for name, step in steps:
         try:
@@ -73,15 +84,52 @@ def _run_independently(steps: list[tuple[str, Callable[[], object]]]) -> None:
         raise SnapshotError("; ".join(errors))
 
 
-def run_daily(
-    store: RawStore, fpl: FplSource, odds: OddsSource | None, now: Clock = utc_now
-) -> None:
-    _run_independently(
-        [
-            ("fpl", lambda: snapshot_fpl(store, fpl, now)),
-            ("odds", lambda: snapshot_odds(store, odds, now)),
-        ]
+def snapshot_football_data(
+    store: RawStore, fd: FootballDataSource, start_year: int, now: Clock = utc_now
+) -> Path:
+    """Archive one season's football-data CSV under football-data/E0/<code>, e.g. E0/1617."""
+    content = fd.epl_season(start_year)
+    return store.write_bytes(
+        "football-data",
+        f"E0/{football_data_code(start_year)}",
+        gzip_bytes(content),
+        now(),
+        suffix=".csv.gz",
     )
+
+
+def snapshot_football_data_current(
+    store: RawStore, fd: FootballDataSource, now: Clock = utc_now
+) -> Path | None:
+    """Daily: the in-progress season's CSV (results + odds are appended twice a week).
+    A 404 is tolerated in July/August (file not published yet); otherwise it is an error."""
+    current = now()
+    try:
+        return snapshot_football_data(store, fd, season_start_year(current), now)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404 and current.month in FOOTBALL_DATA_GRACE_MONTHS:
+            log.warning("football-data CSV for the new season not published yet")
+            return None
+        raise
+
+
+def run_daily(
+    store: RawStore,
+    fpl: FplSource,
+    odds: OddsSource | None,
+    now: Clock = utc_now,
+    *,
+    football_data: FootballDataSource | None = None,
+) -> None:
+    steps: list[tuple[str, Callable[[], object]]] = [
+        ("fpl", lambda: snapshot_fpl(store, fpl, now)),
+        ("odds", lambda: snapshot_odds(store, odds, now)),
+    ]
+    if football_data is not None:
+        steps.append(
+            ("football-data", lambda: snapshot_football_data_current(store, football_data, now))
+        )
+    run_independently(steps)
 
 
 def run_tick(
@@ -108,7 +156,7 @@ def run_tick(
     if odds_due:
         log.info("pre-deadline odds snapshot")
         steps.append(("odds", lambda: snapshot_odds(store, odds, now)))
-    _run_independently(steps)
+    run_independently(steps)
     return fpl_deadline is not None or odds_due
 
 
