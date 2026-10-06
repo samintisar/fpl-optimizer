@@ -204,7 +204,11 @@ Hyperparameters are chosen by leave-one-season-out within develop, then confirme
 Luck moves a season total by roughly ±80–100 points, so across 9 develop+validate seasons only gaps of ~45+ points/season are detectable from totals alone. Therefore:
 - **Paired comparisons only:** every policy runs from identical start states; report the per-state difference.
 - **Per-decision evaluation:** at each GW, both policies start from the same state and differ only in this GW's decision; score the difference over the next k GWs under a fixed continuation (roll). ~38 paired samples per season per start state. States come from a reference trajectory (default: the baseline policy's own run); k = 4 by default.
-- **Confidence intervals:** GW-block bootstrap clustered by season. Start states within one season share realized outcomes, so more states ≠ more independent samples. Implementation: average the paired diffs over start states per (season, GW), then resample circular blocks of 4 GWs within each season; one-sided p = share of bootstrap means ≤ 0.
+  - **Windows don't overlap:** decisions at gw_index 1, 1+k, 1+2k, … on one grid per season for every start state (stride = k). Every-GW windows share k−1 GWs of outcomes, and an A/A simulation showed the bootstrap rejecting ~17% at nominal 10%.
+  - **Known limitation:** each window starts from the reference state, so a policy's chip or FT spending at t is never charged at t+1, and the roll continuation never uses chips or banked FTs. Judge chips (and FT banking) on full-run paired differences. The go-live test must account for this (pre-register before Phase 6).
+- **Confidence intervals:** GW-block bootstrap clustered by season. Start states within one season share realized outcomes, so more states ≠ more independent samples. Implementation: average the paired diffs over start states per (season, GW or decision window), then resample circular blocks of 4 GWs (one window for k = 4 per-decision) within each season; one-sided p = share of bootstrap means ≤ 0. Reported CI: two-sided 80%, whose lower bound is the one-sided α = 0.10 test.
+  - **Measured size at nominal 0.10** (A/A placebo, 2000 replicates): per-decision (k = 4, non-overlapping) 0.141 / 0.122 / 0.122 for 1 / 4 / 9 seasons; full run 0.131 / 0.124 / 0.122. The circular block bootstrap understates variance by about (n − b)/(n − 1). The single-season holdout gate is therefore ~0.14, not 0.10 (open item, §11).
+  - `realized@xg`: realized points on exactly the sample where the xG metric is defined, so the "same sign" check compares like with like.
 - **xG-scored points** as a second, lower-variance metric: realized minutes, with goals/assists/clean sheets replaced by xG/xA/opponent-xG-based expectations. It favours xG-based models, so its sign must agree with realized points.
   - Goals = xG × goal points and assists = xA × 3.
   - For players with ≥ 60 minutes, CS = P(0 conceded), with conceded ~ Poisson(opponent xG × minutes/90). GK/DEF conceded = −E[floor(G/2)].
@@ -228,6 +232,11 @@ Luck moves a season total by roughly ±80–100 points, so across 9 develop+vali
 - **Rolling average** of points, decisions by the greedy policy.
 - **FPL's own `ep_next`** (2021/22+ via fplcache, live from our archive), decisions by greedy and by the optimizer. Running the optimizer on `ep_next` separates the value of our model from the value of the optimizer.
 - Every model must beat both.
+- **Phase 3 results** (2026-10-06, `results/experiments.csv`; GW1 starts, means over template + 5 random squads):
+  - **greedy(rolling) vs roll(rolling), 2016/17–2024/25:** +11.4 pts/GW full run (80% CI +10.4 to +12.6), +431 per season. Per-decision +9.3 per 4-GW window (+7.6 to +11.1). xG metric agrees (+12.2/GW over the 6 seasons with xG).
+  - Template greedy(rolling) seasons: 1,717–2,117 (mean 1,943). Greedy never takes hits; it changes the squad or lineup at nearly every GW.
+  - **greedy(ep_next) vs greedy(rolling), 2021/22–2024/25:** −0.6 pts/GW full run (−1.8 to +0.5), no detectable difference. Per-decision −0.5 per window (−3.2 to +2.6). xG agrees.
+  - **xG-metric coverage:** a GW's xG score is null if any counted player lacks xG. 2016/17–2018/19 are essentially all null (no team xG; Understat mirror gaps). 2019/20 is partly null: 115 players never got an Understat career log (e.g. David Silva). 2020/21+ is complete.
 
 ---
 
@@ -434,6 +443,7 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 - Free Hit consecutive-GW restriction in 2026/27.
 - FPL-Core-Insights components reproduce FPL CBIT/CBIRT (2026/27 GW1–5) before setting defcon `k`, `r`.
 - Solver performance with chip scenarios over a 6-GW horizon.
+- Go-live test size on a single season (~0.14 at nominal 0.10 with the block bootstrap, §5): choose a size-correct test (e.g. a HAC t-test with t critical values, or calibrate the threshold by A/A placebo) and how chips enter it, before Phase 6.
 
 **Resolved (2026-10-06):**
 - WC/FH GW effect on banked FTs (2026/27): FTs kept, no +1 → §3 *Rules config*, `chip_week_ft: retain` (#9).
@@ -470,3 +480,4 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-05 | systemd user timers instead of cron; pre-deadline snapshots via a 15-min tick that reads deadlines from the latest archived bootstrap and tracks FPL and odds windows separately. | Ubuntu cron has no per-job timezone (daily run follows UK time); deadlines change, so they are read, not scheduled. |
 | 2026-10-06 | No direct Understat requests; use vaastav's Understat mirror (≤2024/25) and FPL's Opta xG (2022/23+). No per-shot data. | Understat's robots.txt disallows all crawling and it publishes no API or terms. |
 | 2026-10-06 | Backtester: outcomes read at lockdown via `as_of`; develop chip windows on `gw_index`; per-decision states from the baseline's own run; greedy never takes hits. | Same single access path as features; GW numbering gaps (2019/20, 2022/23); a neutral, reproducible reference. |
+| 2026-10-06 | Per-decision windows don't overlap (stride = k, one grid per season); bootstrap blocks counted in GWs; 80% two-sided CIs; `realized@xg` companion rows. | Overlapping windows made the bootstrap reject ~17% at nominal 10%; the 80% lower bound is the gate's one-sided α = 0.10; same-sample sign check. |
