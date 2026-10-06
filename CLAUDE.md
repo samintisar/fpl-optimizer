@@ -13,7 +13,7 @@
 
 ## Invariants (do not break)
 
-- `raw/` is append-only, never edited. Snapshots are gzipped JSON with a timestamp in the path.
+- `raw/` is append-only, never edited. Every file is compressed (`.json.gz`, `.csv.gz`; fplcache `.json.xz` copied verbatim) with a timestamp in the path.
 - Derived tables are rebuilt from `raw/`; never hand-patch Parquet.
 - Every derived row has `event_time` and `available_at`. Feature builders and the backtester take a `deadline` and read only via `as_of(df, deadline)`.
 - Never key on FPL player ids (they reset each season); use `player_key` from `player_dim`.
