@@ -2,6 +2,7 @@ import io
 import json
 import lzma
 import tarfile
+import zlib
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -265,9 +266,30 @@ def make_tarball(members):
     return buffer.getvalue()
 
 
-def fplcache_client(members, broken_after=None):
-    """FplcacheClient over MockTransport serving the commits API and a streamed tarball."""
-    body = make_tarball(members)
+def truncated_at_member(members, index, extra=0):
+    """A .tar.gz body that decompresses to exactly the tar bytes before member `index`'s
+    header plus `extra` bytes (a full flush at the cut point), i.e. a download cut there."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            if data is None:
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            else:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    raw = buffer.getvalue()
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r") as tar:
+        cut = tar.getmembers()[index].offset + extra
+    compressor = zlib.compressobj(wbits=31)
+    return compressor.compress(raw[:cut]) + compressor.flush(zlib.Z_FULL_FLUSH)
+
+
+def fplcache_client(members, broken_after=None, body=None):
+    """FplcacheClient over MockTransport serving the commits API and a streamed tarball
+    (`body` overrides the .tar.gz built from `members`)."""
+    body = make_tarball(members) if body is None else body
 
     def chunks():
         for start in range(0, len(body), 4096):
@@ -368,3 +390,23 @@ def test_backfill_fplcache_writes_manifest_when_the_download_breaks(tmp_path):
     manifest = latest_fplcache_manifest(store)
     assert manifest["commit"] == FC_SHA
     assert "ReadError" in manifest["error"]
+
+
+def test_backfill_fplcache_fails_on_a_tarball_truncated_at_a_member_boundary(tmp_path):
+    store = RawStore(tmp_path)
+    body = truncated_at_member(FC_MEMBERS, list(FC_MEMBERS).index(NAME_B))
+    with pytest.raises(EOFError, match="truncated"):
+        backfill_fplcache(store, fplcache_client(FC_MEMBERS, body=body), Clock(NOW))
+    assert not snapshot_path(store, TS_B).exists()
+    manifest = latest_fplcache_manifest(store)
+    assert manifest["commit"] == FC_SHA
+    assert "truncated" in manifest["error"]
+
+
+def test_backfill_fplcache_records_a_download_cut_inside_a_member(tmp_path):
+    store = RawStore(tmp_path)
+    body = truncated_at_member(FC_MEMBERS, list(FC_MEMBERS).index(NAME_B), extra=512 + 10)
+    with pytest.raises(EOFError, match="truncated"):
+        backfill_fplcache(store, fplcache_client(FC_MEMBERS, body=body), Clock(NOW))
+    assert not snapshot_path(store, TS_B).exists()
+    assert "truncated" in latest_fplcache_manifest(store)["error"]
