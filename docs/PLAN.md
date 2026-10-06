@@ -367,7 +367,7 @@ Horizon, decay and FT value are confounded — tune them jointly.
 
 | # | Phase | Done when |
 |---|---|---|
-| 0 | Snapshot archiver (Ubuntu cron) + 2026/27 GW1–5 stats backfill | Daily bootstrap/fixtures/odds snapshots landing in `raw/` |
+| 0 | Snapshot archiver (systemd timers) + 2026/27 GW1–5 stats backfill | Daily bootstrap/fixtures/odds snapshots landing in `raw/` |
 | 1 | Backfill (vaastav, fplcache, Understat, football-data) + ID mapping + Parquet tables + rules config + Elo | All seasons 2016/17+ built from raw; mapping validation passes; `config/scoring/` per season |
 | 2 | `as_of` layer + leakage tests | Corrupt-the-future test passes |
 | 3 | Backtester + baselines (rolling avg, `ep_next`) + greedy policy + paired evaluation | Simulated seasons from arbitrary states; baselines scored per §5 |

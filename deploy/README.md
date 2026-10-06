@@ -19,6 +19,7 @@ Runs as your normal user with systemd **user** timers. Raw data lands in `~/fpl-
    ODDS_API_KEY=...
    ```
    `ODDS_API_KEY` is optional (free tier at the-odds-api.com, 500 credits/month); without it odds are skipped.
+   `FPLOPT_RAW_DIR` is optional (default `raw`, relative to the repo).
 4. Smoke test:
    ```bash
    .venv/bin/fplopt snapshot daily && ls raw/fpl/bootstrap-static
@@ -35,6 +36,7 @@ Runs as your normal user with systemd **user** timers. Raw data lands in `~/fpl-
    systemctl --user enable --now fplopt-daily.timer fplopt-tick.timer
    sudo loginctl enable-linger "$USER"   # keep timers running when logged out
    ```
+   If a unit fails for any reason, including a broken venv where the CLI can't even start, `fplopt-failure@.service` sends a Telegram message. A job failure the CLI already alerted on will therefore alert twice. That's intentional.
 7. One-off backfill of this season's per-GW stats (issue #13, ~5 minutes). Run it **outside** the 2 hours before a deadline (its bootstrap snapshot counts as that window's snapshot):
    ```bash
    .venv/bin/fplopt backfill element-summary
