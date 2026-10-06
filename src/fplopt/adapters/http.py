@@ -23,8 +23,18 @@ RETRY_AFTER_CAP_S = 120.0
 _backoff = wait_exponential_jitter(initial=2, max=60)
 
 
+Validator = Callable[[bytes], None]
+
+
 class InvalidPayload(Exception):
-    """A 2xx response whose body is not JSON (e.g. FPL's 'game is being updated' page)."""
+    """A 2xx response whose body fails validation (e.g. FPL's HTML 'game is being updated' page)."""
+
+
+def require_json(content: bytes) -> None:
+    try:
+        json.loads(content)
+    except ValueError as exc:
+        raise InvalidPayload("response is not JSON") from exc
 
 
 def _retryable(exc: BaseException) -> bool:
@@ -54,15 +64,20 @@ def make_client(transport: httpx.BaseTransport | None = None) -> httpx.Client:
     )
 
 
-def get_json_response(
+def get_response(
     client: httpx.Client,
     url: str,
     params: Mapping[str, str] | None = None,
     *,
+    validate: Validator | None = None,
     attempts: int = 5,
     wait: Callable[[RetryCallState], float] | None = None,
 ) -> httpx.Response:
-    """GET `url`, retrying transient failures. The returned body is guaranteed to be JSON."""
+    """GET `url`, retrying transient failures (429, 5xx, transport errors, invalid payloads).
+
+    If `validate` is given it is called with the body and must raise InvalidPayload for a bad
+    one. InvalidPayload messages name `url` but never `params` (the odds API key travels there).
+    """
     for attempt in Retrying(
         stop=stop_after_attempt(attempts),
         wait=wait if wait is not None else default_wait,
@@ -72,9 +87,22 @@ def get_json_response(
         with attempt:
             response = client.get(url, params=params)
             response.raise_for_status()
-            try:
-                json.loads(response.content)
-            except ValueError as exc:
-                raise InvalidPayload(f"non-JSON response from {url}") from exc
+            if validate is not None:
+                try:
+                    validate(response.content)
+                except InvalidPayload as exc:
+                    raise InvalidPayload(f"{exc}: {url}") from exc
             return response
     raise AssertionError("unreachable: Retrying(reraise=True) always returns or raises")
+
+
+def get_json_response(
+    client: httpx.Client,
+    url: str,
+    params: Mapping[str, str] | None = None,
+    *,
+    attempts: int = 5,
+    wait: Callable[[RetryCallState], float] | None = None,
+) -> httpx.Response:
+    """GET `url`, retrying transient failures. The returned body is guaranteed to be JSON."""
+    return get_response(client, url, params, validate=require_json, attempts=attempts, wait=wait)
