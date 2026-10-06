@@ -161,8 +161,10 @@ def test_every_parsed_command_has_a_job():
 
 def test_build_dispatches_target_with_data_dir(tmp_path, monkeypatch):
     seen = []
+    import fplopt.build
+
     monkeypatch.setattr(
-        cli, "build_tables", lambda names, ctx: seen.append((names, ctx.store.root, ctx.data_dir))
+        fplopt.build, "build", lambda names, ctx: seen.append((names, ctx.store.root, ctx.data_dir))
     )
     settings = replace(make_settings(tmp_path), data_dir=tmp_path / "data")
     assert cli.main(["build", "fixture"], settings=settings) == 0
@@ -228,3 +230,13 @@ def test_sigterm_during_a_job_raises_system_exit_and_handler_is_restored(tmp_pat
     assert callable(seen[0]) and seen[0] is not before
     assert signal.getsignal(signal.SIGTERM) is before
     assert alerts == []  # systemd's OnFailure unit reports a killed run
+
+
+def test_cli_import_does_not_load_pandas():
+    """The 15-minute archiver jobs shouldn't pay for importing the build layer."""
+    import subprocess
+    import sys
+
+    code = "import sys, fplopt.cli; print('pandas' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False"

@@ -30,9 +30,6 @@ from fplopt.adapters.http import make_client
 from fplopt.adapters.odds import OddsClient
 from fplopt.adapters.vaastav import VaastavClient
 from fplopt.alerts import send_admin_alert
-from fplopt.build import build as build_tables
-from fplopt.build import rules
-from fplopt.build.common import BuildContext
 from fplopt.ingest import history, jobs
 from fplopt.ingest.raw_store import RawStore
 from fplopt.redact import redact
@@ -63,6 +60,24 @@ class Context:
 
 Job = Callable[[Context], object]
 
+
+# The build layer pulls in pandas and pandera (~2 s to import), which the archiver jobs that
+# run every 15 minutes don't need, so it is imported only by the jobs that use it.
+def _rules_export(c: Context) -> object:
+    from fplopt.build import rules
+
+    # The season label is parsed inside the job, so a bad label is alerted like any failure.
+    return rules.export_rules(c.store, parse_season_label(c.args.season), Path(c.args.out))
+
+
+def _build(c: Context) -> object:
+    from fplopt.build import build
+    from fplopt.build.common import BuildContext
+
+    # Unknown table names fail inside the job, so they are logged and alerted (exit 1).
+    return build([c.args.target], BuildContext(c.store, c.settings.data_dir))
+
+
 JOBS: dict[str, Job] = {
     "snapshot daily": lambda c: jobs.run_daily(
         c.store, c.fpl, c.odds, football_data=FootballDataClient(c.http)
@@ -74,12 +89,8 @@ JOBS: dict[str, Job] = {
     ),
     "backfill vaastav": lambda c: history.backfill_vaastav(c.store, VaastavClient(c.http)),
     "backfill fplcache": lambda c: history.backfill_fplcache(c.store, FplcacheClient(c.http)),
-    # The season label is parsed inside the job, so a bad label is alerted like any failure.
-    "rules export": lambda c: rules.export_rules(
-        c.store, parse_season_label(c.args.season), Path(c.args.out)
-    ),
-    # Unknown table names fail inside the job, so they are logged and alerted (exit 1).
-    "build": lambda c: build_tables([c.args.target], BuildContext(c.store, c.settings.data_dir)),
+    "rules export": _rules_export,
+    "build": _build,
 }
 
 
