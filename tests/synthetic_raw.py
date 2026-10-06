@@ -131,6 +131,9 @@ def merged_gw(fixtures: pd.DataFrame) -> pd.DataFrame:
                 clean_sheets=int(conceded == 0),
                 total_points=2 + 4 * scored,
                 value=50,
+                selected=1000,
+                transfers_in=0,
+                transfers_out=0,
                 xP=9.9,
             )
             rows.append(row)

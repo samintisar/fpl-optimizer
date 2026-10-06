@@ -25,6 +25,9 @@ UTC_US = pd.DatetimeTZDtype("us", "UTC")
 EPOCH = pd.Timestamp("1970-01-01", tz="UTC").as_unit("us")
 MAX_FAILURES_SHOWN = 20
 MANIFEST = "_manifest.json.gz"
+# State fixed before deadline t (price, registration/club at t) is available this long
+# before it (PLAN §4: FPL prices change overnight).
+KNOWN_BEFORE_DEADLINE = pd.Timedelta(hours=1)
 
 
 class TableValidationError(ValueError):
@@ -201,3 +204,16 @@ def lockdown_times(last_kickoffs: pd.Series) -> pd.Series:
     local_day = last_kickoffs.dt.tz_convert(UK).dt.tz_localize(None).dt.normalize()
     local = local_day + pd.Timedelta(days=1, hours=9)
     return local.dt.tz_localize(UK).dt.tz_convert("UTC").astype(UTC_US)
+
+
+def schedule_published_at(season: int) -> pd.Timestamp:
+    """When a season's schedule (fixture list, GW deadlines) counts as known: 1 June of its
+    start year, 00:00 UTC (FPL publishes mid-June; PLAN §4)."""
+    return pd.Timestamp(year=int(season), month=6, day=1, tz="UTC").as_unit("us")
+
+
+def schedule_published(seasons: pd.Series) -> pd.Series:
+    """Vectorised `schedule_published_at`. Returns datetime64[us, UTC]."""
+    return pd.to_datetime(
+        seasons.astype("int64").astype(str) + "-06-01", utc=True, format="%Y-%m-%d"
+    ).astype(UTC_US)

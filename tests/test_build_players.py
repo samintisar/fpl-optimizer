@@ -30,6 +30,7 @@ def world(tmp_path):
 
 
 LATER_AT = CURRENT_AT + timedelta(days=1)
+HOUR = pd.Timedelta(hours=1)
 
 
 def utc(text):
@@ -134,16 +135,19 @@ def test_player_tables_end_to_end(world):
         2025: 21,
         2026: 21,
     }
-    # available_at = deadline of the GW of the player's first player_match row that season;
-    # a player without rows: the time of the bootstrap that lists him.
+    # event_time = deadline of the GW of the player's first player_match row that season,
+    # available_at an hour earlier (registration is known before that deadline); a player
+    # without rows: the time of the bootstrap that lists him.
     deadline = world.ctx.table("gameweek").set_index(["season", "gw"])["deadline_time"]
     ps = player_season.set_index(["season", "player_key"])
-    assert (ps["event_time"] == ps["available_at"]).all()
-    assert ps.loc[(2025, 100021), "available_at"] == deadline[(2025, 10)]
-    assert ps.loc[(2026, 100022), "available_at"] == pd.Timestamp(LATER_AT).as_unit("us")
+    assert ps.loc[(2025, 100021), "event_time"] == deadline[(2025, 10)]
+    assert ps.loc[(2025, 100021), "available_at"] == deadline[(2025, 10)] - HOUR
+    listed = ps.loc[(2026, 100022)]
+    assert listed["available_at"] == listed["event_time"] == pd.Timestamp(LATER_AT).as_unit("us")
     regular = ps.drop([(2025, 100021), (2026, 100022)])
-    gw1 = [deadline[(season, 1)] for season, _ in regular.index]
-    assert (regular["available_at"] == gw1).all()
+    gw1 = pd.Series([deadline[(season, 1)] for season, _ in regular.index], index=regular.index)
+    assert (regular["event_time"] == gw1).all()
+    assert (regular["available_at"] == gw1 - HOUR).all()
     player_dim = world.ctx.table("player_dim")
     assert len(player_dim) == 22
     assert player_dim["opta_code"].iloc[0] == f"p{player_dim['player_key'].iloc[0]}"
@@ -320,3 +324,82 @@ def test_phantom_drop_never_loses_an_element_fixture_pair():
     rows = pd.concat([filed_elsewhere, filed_elsewhere.assign(minutes=5), merged.iloc[[1]]])
     with pytest.raises(PlayerMatchError, match="would be lost"):
         assemble(rows, *rest)
+
+
+# --- player_gw / player_gw_ownership ----------------------------------------------------
+
+
+def double_gw_world(world, *, conflict: bool = False):
+    """2022-23 with FPL's cancelled GW7 (rounds 7 and 8 both form GW8: a double for every
+    club) and per-GW prices/ownership; 2026-27 through GW2 from element-summary."""
+    fx22 = season_fixtures(2022, gw_numbers=[*range(1, 7), 8, *range(8, 39)])
+    merged = merged_gw(fx22)
+    merged["value"] = 50 + merged["round"]
+    merged["selected"] = 1000 * merged["element"] + merged["round"]
+    merged["transfers_in"] = merged["round"]
+    merged["transfers_out"] = merged["element"]
+    if conflict:
+        first = merged.index[(merged["element"] == 3) & (merged["round"] == 8)][0]
+        merged.loc[first, "value"] = 99
+    world.add_vaastav_season(2022, fixtures=fx22, merged=merged)
+    fx26 = world.add_current_season(finished_through=2, fd_rows=1000)
+    history = current_history(fx26)
+    history["value"] = 60 + history["round"]
+    world.add_element_summary(CURRENT_AT, history, 2026, through_event=2)
+
+
+def test_player_gw_one_row_per_gw_and_double(world):
+    double_gw_world(world)
+    build(["fixture", "gameweek", "player_gw", "player_gw_ownership"], world.ctx)
+
+    gw = world.ctx.table("player_gw")
+    assert list(gw.columns) == [
+        "player_key",
+        "season",
+        "gw",
+        "team_key",
+        "element_type",
+        "value",
+        "event_time",
+        "available_at",
+    ]
+    assert gw.groupby("season").size().to_dict() == {2022: 20 * 37, 2026: 20 * 2}
+    assert not gw.duplicated(["player_key", "season", "gw"]).any()
+    assert 7 not in set(gw.loc[gw["season"] == 2022, "gw"])
+    deadline = world.ctx.table("gameweek").set_index(["season", "gw"])["deadline_time"]
+    g = gw.set_index(["player_key", "season", "gw"])
+    assert g.loc[(100003, 2022, 8), "value"] == 58  # one row for the double
+    assert g.loc[(100003, 2022, 8), "team_key"] == TEAM_CODES[2]
+    assert g.loc[(100003, 2022, 8), "element_type"] == 4  # (3 % 4) + 1
+    assert g.loc[(100005, 2026, 2), "value"] == 62
+    at = pd.Series([deadline[(s, w)] for _, s, w in g.index], index=g.index)
+    # Price at the deadline: fixed before it.
+    assert (g["event_time"] == at).all() and (g["available_at"] == at - HOUR).all()
+
+    own = world.ctx.table("player_gw_ownership")
+    assert list(own.columns) == [
+        "player_key",
+        "season",
+        "gw",
+        "selected",
+        "transfers_in",
+        "transfers_out",
+        "event_time",
+        "available_at",
+    ]
+    o = own.set_index(["player_key", "season", "gw"])
+    assert list(o.index) == list(g.index)
+    assert o.loc[(100003, 2022, 8), ["selected", "transfers_in", "transfers_out"]].tolist() == [
+        3008,
+        8,
+        3,
+    ]
+    # Ownership after GW t's transfers: final only at the deadline.
+    assert (o["event_time"] == at).all() and (o["available_at"] == at).all()
+
+
+def test_player_gw_fails_when_a_double_disagrees(world):
+    double_gw_world(world, conflict=True)
+    build(["fixture", "gameweek"], world.ctx)
+    with pytest.raises(PlayerMatchError, match="differ within a GW"):
+        build(["player_gw"], world.ctx)

@@ -1,4 +1,4 @@
-"""`player_season`, `player_dim` and `player_match`.
+"""`player_season`, `player_dim`, `player_match`, `player_gw` and `player_gw_ownership`.
 
 Keys: `player_key` is the FPL player `code` (stable across seasons); `element_id` is the FPL
 id, which resets every season and is never a key.
@@ -10,12 +10,13 @@ player_keys through them; player_season is built from them after player_match.
 
 player_season: one row per player and season, no club (`players_raw.team_code` is the
 end-of-season club: the club per match is in player_match, the as-of club in
-player_snapshot). `event_time` = `available_at` = the deadline of the GW of the player's
-first player_match row that season (every registered player of a club with a fixture has a
-row, minutes 0 or not, so his registration was public by then). A player without rows: the
-snapshot time of the bootstrap listing him (current seasons), else the season's last
-lockdown (end-of-season players_raw). Measured on raw/ 2026-10-06: every one of the 8,005
-player-seasons has rows.
+player_snapshot). `event_time` = the deadline of the GW of the player's first player_match
+row that season (every registered player of a club with a fixture has a row, minutes 0 or
+not, so his registration was public by then), `available_at` = that deadline − 1h
+(`KNOWN_BEFORE_DEADLINE`: state fixed before the deadline, PLAN §4). A player without rows:
+`event_time` = `available_at` = the snapshot time of the bootstrap listing him (current
+seasons), else the season's last lockdown (end-of-season players_raw). Measured on raw/
+2026-10-06: every one of the 8,005 player-seasons has rows.
 
 player_dim: one row per `player_key`; names from the newest season; `opta_code` = "p" + code;
 `understat_id` is filled by the `understat` builder (null here). Static reference data
@@ -29,8 +30,8 @@ element-summary run whose manifest `season` is that season (runs without a seaso
 skipped with a warning; team ids via the bootstrap archived with that run, else the newest
 bootstrap of the season): only finished fixtures of GWs up to the run's `through_event`. A
 season without such a run has no rows if none of its fixtures is finished, else fails.
-- Dropped on purpose: `value`, `selected`, `transfers_*` (timing unverified, issue #6), `xP`
-  (lookahead leak), ICT.
+- Dropped on purpose: `value`, `selected`, `transfers_*` (per GW, not per match: in
+  `player_gw` / `player_gw_ownership`), `xP` (lookahead leak), ICT.
 - Cleaning: exact duplicate rows dropped (2025-26: 10); managers dropped (2024-25: 20
   elements, position "AM"); for a duplicated (element, fixture) the row whose `round` equals
   the fixture's GW is kept (2019-20: 59 phantom GW29 copies of fixture 275); any other
@@ -54,6 +55,16 @@ FPL caps minutes); every row's fixture, GW and element are known; goal sums: hom
 Σ home goals_scored + Σ away own_goals (and vice versa) for every fixture with player rows —
 measured 0 mismatches over all 3,850 played fixtures, so any mismatch fails the build
 (`MAX_GOAL_SUM_MISMATCHES = 0`).
+
+player_gw / player_gw_ownership: one row per (player_key, season, gw) with player_match rows
+(the same source rows, cleaning and checks; all minutes incl. 0; a blank GW has no row).
+Per-GW fields (verified against fplcache, issue #6): `value` is the price at deadline t, so
+player_gw (with the club of that GW's fixture and the season's `element_type`) has
+`event_time` = deadline t, `available_at` = deadline t − 1h. `selected` / `transfers_in` /
+`transfers_out` include transfers up to deadline t, so player_gw_ownership has `event_time`
+= `available_at` = deadline t (visible from GW t+1). In a double GW both fixture rows must
+carry the same club and values (measured on raw/ 2026-10-06: they always do), else the
+build fails.
 """
 
 from __future__ import annotations
@@ -66,6 +77,7 @@ import pandera.pandas as pa
 
 from fplopt.build.common import (
     EPOCH,
+    KNOWN_BEFORE_DEADLINE,
     MANIFEST,
     UTC_US,
     BuildContext,
@@ -134,7 +146,7 @@ PLAYER_SEASON_SCHEMA = pa.DataFrameSchema(
     checks=[
         pa.Check(lambda df: ~df.duplicated(["player_key", "season"]), error="player per season"),
         pa.Check(lambda df: ~df.duplicated(["season", "element_id"]), error="element per season"),
-        pa.Check(lambda df: df["event_time"] == df["available_at"], error="event_time"),
+        pa.Check(lambda df: df["available_at"] <= df["event_time"], error="available_at order"),
     ],
     strict=True,
     ordered=True,
@@ -218,9 +230,10 @@ def player_season_from(
             df.loc[no_rows, "season"].value_counts().sort_index().to_dict(),
         )
     last_lockdown = gameweek.groupby("season")["lockdown_time"].max()
-    fallback = df["listed_at"].fillna(df["season"].map(last_lockdown))
-    df["available_at"] = df["deadline_time"].fillna(fallback).astype(UTC_US)
-    df["event_time"] = df["available_at"]
+    fallback = df["listed_at"].fillna(df["season"].map(last_lockdown)).astype(UTC_US)
+    deadline = df["deadline_time"].astype(UTC_US)
+    df["event_time"] = deadline.fillna(fallback)
+    df["available_at"] = (deadline - KNOWN_BEFORE_DEADLINE).fillna(fallback)
     return df[PLAYER_SEASON_COLUMNS]
 
 
@@ -322,6 +335,8 @@ OPTIONAL_FLOATS = {
     "expected_assists": "fpl_xa",
     "expected_goals_conceded": "fpl_xgc",
 }
+# Per-GW state on every source row (player_gw / player_gw_ownership; not in player_match).
+GW_STATE = ["value", "selected", "transfers_in", "transfers_out"]
 # Filled by the `understat` builder.
 UNDERSTAT_COLUMNS = {
     "us_minutes": "Int64",
@@ -429,6 +444,9 @@ def match_rows(df: pd.DataFrame, season: int, source: str) -> pd.DataFrame:
     for column, name in OPTIONAL_FLOATS.items():
         values = pd.to_numeric(df[column]) if column in df.columns else pd.NA
         out[name] = pd.Series(values, index=df.index).astype("Float64")
+    for name in GW_STATE:
+        values = df[name] if name in df.columns else pd.Series(pd.NA, index=df.index)
+        out[name] = values.astype("Int64")
     out["source"] = source
     return out.reset_index(drop=True)
 
@@ -459,10 +477,11 @@ def assemble_player_match(
     players: pd.DataFrame,
     team_codes: dict[int, dict[int, int]],
     resolver: TeamResolver,
+    keep: list[str] | tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """player_match rows from raw source rows (`match_rows` shape); `players` maps (season,
     element_id) -> player_key. Fails (PlayerMatchError) on unknown fixtures, GWs or elements,
-    leftover duplicates and team inconsistencies."""
+    leftover duplicates and team inconsistencies. `keep`: raw columns to carry along."""
     fx = fixture[
         ["season", "fpl_fixture_id", "fixture_key", "gw", "kickoff_time"]
         + ["home_team_key", "away_team_key"]
@@ -512,7 +531,7 @@ def assemble_player_match(
         df[name] = pd.Series(pd.NA, index=df.index, dtype=dtype)
     df["player_key"] = df["player_key"].astype("int64")
     df["fixture_key"] = df["fixture_key"].astype("int64")
-    return df[PLAYER_MATCH_COLUMNS].reset_index(drop=True)
+    return df[[*PLAYER_MATCH_COLUMNS, *keep]].reset_index(drop=True)
 
 
 def goal_sum_mismatches(player_match: pd.DataFrame, fixture: pd.DataFrame) -> pd.DataFrame:
@@ -636,7 +655,10 @@ def element_summary_match_rows(
     return rows[keep], bootstrap_team_codes(element_summary_bootstrap(ctx, run, season))
 
 
-def build_player_match(ctx: BuildContext) -> pd.DataFrame:
+def assembled_match_rows(
+    ctx: BuildContext, keep: list[str] | tuple[str, ...] = ()
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(`assemble_player_match` over every source season, `registered_players`)."""
     fixture = ctx.table("fixture")
     players = registered_players(ctx)
     resolver = TeamResolver(ctx.table("team_dim"))
@@ -648,7 +670,145 @@ def build_player_match(ctx: BuildContext) -> pd.DataFrame:
         rows, team_codes[season] = element_summary_match_rows(ctx, season, fixture)
         frames.append(rows)
     raw = pd.concat([f for f in frames if len(f)] or frames[:1], ignore_index=True)
-    df = assemble_player_match(raw, fixture, ctx.table("gameweek"), players, team_codes, resolver)
+    gameweek = ctx.table("gameweek")
+    df = assemble_player_match(raw, fixture, gameweek, players, team_codes, resolver, keep)
+    return df, players
+
+
+def build_player_match(ctx: BuildContext) -> pd.DataFrame:
+    df, _ = assembled_match_rows(ctx)
+    fixture = ctx.table("fixture")
     check_goal_sums(df, fixture)
     check_placeholder_zeros(df)
     return df
+
+
+# --- player_gw / player_gw_ownership -----------------------------------------------------
+
+GW_KEY = ["player_key", "season", "gw"]
+PLAYER_GW_COLUMNS = [*GW_KEY, "team_key", "element_type", "value", "event_time", "available_at"]
+PLAYER_GW_OWNERSHIP_COLUMNS = [
+    *GW_KEY,
+    "selected",
+    "transfers_in",
+    "transfers_out",
+    "event_time",
+    "available_at",
+]
+
+
+def _gw_key_columns() -> dict[str, pa.Column]:
+    return {
+        "player_key": pa.Column("int64", pa.Check.gt(0)),
+        "season": pa.Column("int64", pa.Check.ge(FIRST_SEASON)),
+        "gw": pa.Column("int64", pa.Check.in_range(1, 47)),
+    }
+
+
+def _gw_key_unique(df: pd.DataFrame) -> pd.Series:
+    return ~df.duplicated(GW_KEY)
+
+
+PLAYER_GW_SCHEMA = pa.DataFrameSchema(
+    {
+        **_gw_key_columns(),
+        "team_key": pa.Column("int64"),
+        "element_type": pa.Column("int64", pa.Check.in_range(1, 4)),
+        "value": pa.Column("int64", pa.Check.gt(0)),
+        "event_time": pa.Column(UTC_US),
+        "available_at": pa.Column(UTC_US),
+    },
+    checks=[
+        pa.Check(_gw_key_unique, error="(player_key, season, gw) unique"),
+        pa.Check(
+            lambda df: df["available_at"] == df["event_time"] - KNOWN_BEFORE_DEADLINE,
+            error="available_at = deadline - 1h",
+        ),
+    ],
+    strict=True,
+    ordered=True,
+)
+PLAYER_GW_OWNERSHIP_SCHEMA = pa.DataFrameSchema(
+    {
+        **_gw_key_columns(),
+        "selected": pa.Column("int64", pa.Check.ge(0)),
+        "transfers_in": pa.Column("int64", pa.Check.ge(0)),
+        "transfers_out": pa.Column("int64", pa.Check.ge(0)),
+        "event_time": pa.Column(UTC_US),
+        "available_at": pa.Column(UTC_US),
+    },
+    checks=[
+        pa.Check(_gw_key_unique, error="(player_key, season, gw) unique"),
+        pa.Check(lambda df: df["available_at"] == df["event_time"], error="available_at"),
+    ],
+    strict=True,
+    ordered=True,
+)
+PLAYER_GW_SORT_BY = ("season", "gw", "player_key")
+
+
+def player_gw_from(
+    rows: pd.DataFrame, players: pd.DataFrame, gameweek: pd.DataFrame
+) -> pd.DataFrame:
+    """One row per (player_key, season, gw) of assembled match rows carrying `GW_STATE`:
+    club, `element_type`, the GW state and the GW's `deadline_time`. Fails (PlayerMatchError)
+    if a GW's rows (a double) disagree, a value is missing or a GW is not in `gameweek`."""
+    columns = ["team_key", *GW_STATE]
+    groups = rows.groupby(GW_KEY, sort=True)
+    distinct = groups[columns].nunique(dropna=False)
+    differ = distinct[(distinct > 1).any(axis=1)]
+    if len(differ):
+        which = ", ".join(c for c in columns if (differ[c] > 1).any())
+        raise PlayerMatchError(
+            f"{len(differ)} (player, season, GW)(s) whose rows differ within a GW ({which}):\n"
+            f"{differ.head(10)}"
+        )
+    df = groups[columns].first().reset_index()
+    missing = [c for c in GW_STATE if df[c].isna().any()]
+    if missing:
+        raise PlayerMatchError(f"player GW row(s) without {', '.join(missing)}")
+    df = df.astype(dict.fromkeys(GW_STATE, "int64"))
+    df = df.merge(
+        players[["season", "player_key", "element_type"]],
+        on=["season", "player_key"],
+        how="left",
+        validate="many_to_one",
+    )
+    df = df.merge(
+        gameweek[["season", "gw", "deadline_time"]],
+        on=["season", "gw"],
+        how="left",
+        validate="many_to_one",
+    )
+    _fail_if(df["deadline_time"].isna(), df, "player GW row(s) whose GW is not in gameweek")
+    df["element_type"] = df["element_type"].astype("int64")
+    df["deadline_time"] = df["deadline_time"].astype(UTC_US)
+    return df
+
+
+def player_gw_table(gw: pd.DataFrame) -> pd.DataFrame:
+    """player_gw: price at deadline t, known an hour before it."""
+    df = gw.assign(
+        event_time=gw["deadline_time"],
+        available_at=gw["deadline_time"] - KNOWN_BEFORE_DEADLINE,
+    )
+    return df[PLAYER_GW_COLUMNS]
+
+
+def player_gw_ownership_table(gw: pd.DataFrame) -> pd.DataFrame:
+    """player_gw_ownership: final only at deadline t."""
+    df = gw.assign(event_time=gw["deadline_time"], available_at=gw["deadline_time"])
+    return df[PLAYER_GW_OWNERSHIP_COLUMNS]
+
+
+def player_gw_rows(ctx: BuildContext) -> pd.DataFrame:
+    rows, players = assembled_match_rows(ctx, keep=GW_STATE)
+    return player_gw_from(rows, players, ctx.table("gameweek"))
+
+
+def build_player_gw(ctx: BuildContext) -> pd.DataFrame:
+    return player_gw_table(player_gw_rows(ctx))
+
+
+def build_player_gw_ownership(ctx: BuildContext) -> pd.DataFrame:
+    return player_gw_ownership_table(player_gw_rows(ctx))

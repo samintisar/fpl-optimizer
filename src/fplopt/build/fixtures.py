@@ -1,5 +1,6 @@
-"""`fixture` (one row per EPL match, 2016/17 →), `gameweek` (one row per season and GW) and
-`gameweek_result` (per GW outcomes: `average_entry_score`).
+"""`fixture` (one row per EPL match, 2016/17 →), `gameweek` (one row per season and GW),
+`gameweek_result` (per GW outcomes: `average_entry_score`), `schedule` (the final fixture
+list without results) and `fixture_snapshot` (every archived fixture list).
 
 fixture sources:
 - 2016-17, 2017-18 (no fixtures.csv): vaastav merged_gw. Per `fixture` id, the home side's
@@ -14,7 +15,7 @@ Season team ids -> FPL team codes via vaastav `teams.csv` (2019-20+) or `players
 
 `available_at` is the lockdown of the fixture's GW (when results and stats are final); a
 fixture without a GW/kickoff (postponed, not yet rescheduled) gets 2100-01-01. That the
-*schedule* was known earlier is Phase 2's concern (`fixture_snapshot`).
+*schedule* was known earlier is in `schedule` / `fixture_snapshot`.
 
 football-data cross-check (fails the build): every football-data row joins one fixture on
 (season, home, away); its date must equal the UK-local kickoff date and its goals the FPL
@@ -29,10 +30,24 @@ gameweek: GWs that have fixtures. Deadlines from the newest bootstrap of each se
 else first kickoff − 90 min ('approx': 2016-17, 2017-18, 2019-20). Measured leads (first
 kickoff − deadline): 2018-19 always 60 min, 2020-21 … 2026-27 90 min (one 240-min GW in
 2024-25); so 'approx' is at or before the true deadline — conservative for as-of reads.
+A schedule: `event_time` = the deadline, `available_at` = publication (1 June of the
+season's start year, PLAN §4; the final deadlines leak rescheduling — accepted, PLAN §3).
+
+schedule: one row per `fixture` row with its scheduling columns only (no results), from the
+final fixture list (`schedule_source='final'`); `event_time` = kickoff (2100-01-01 when
+unscheduled), `available_at` = publication. The as-of fallback where no `fixture_snapshot`
+of the season precedes a deadline.
+
+fixture_snapshot: every own `raw/fpl/fixtures` snapshot (2026-10-05 →; fplcache has
+bootstrap only), one row per fixture and snapshot, no scores; `gw` / `kickoff_time` null for
+a postponed fixture. Season as for `fixture` (earliest kickoff); team ids -> codes via the
+newest archived bootstrap of that season (ids are stable within a season).
+`event_time` = `available_at` = `snapshot_at`. Checks: 380 fixtures per snapshot, unique
+(snapshot_at, fixture_key).
 
 gameweek_result: one row per gameweek row; `average_entry_score` only from bootstraps and
 only for finished events (null otherwise). An outcome, so `event_time` = `available_at` =
-the GW's lockdown (`gameweek` rows are available at their deadline).
+the GW's lockdown (`gameweek` rows are available from publication).
 
 2022-23 GW7: FPL's bootstrap keeps event 7 (deadline 2022-09-10 10:00 UTC,
 average_entry_score 0, no fixtures: the round was cancelled after the Queen's death and its
@@ -60,6 +75,7 @@ from fplopt.build.common import (
     latest_complete_run,
     lockdown_times,
     read_raw_csv,
+    schedule_published,
 )
 from fplopt.build.teams import TeamResolver
 from fplopt.ingest.raw_store import RawStore
@@ -601,6 +617,7 @@ GAMEWEEK_SCHEMA = pa.DataFrameSchema(
         pa.Check(lambda df: df["deadline_time"] < df["first_kickoff"], error="deadline < kickoff"),
         pa.Check(lambda df: df["first_kickoff"] <= df["last_kickoff"], error="kickoff order"),
         pa.Check(lambda df: df["lockdown_time"] > df["last_kickoff"], error="lockdown order"),
+        pa.Check(lambda df: df["available_at"] < df["event_time"], error="published by deadline"),
     ],
     strict=True,
     ordered=True,
@@ -685,7 +702,7 @@ def assemble_gameweeks(
     df["deadline_source"] = df["deadline_source"].astype(str)
     df["lockdown_time"] = lockdown_times(df["last_kickoff"])
     df["event_time"] = df["deadline_time"]
-    df["available_at"] = df["deadline_time"]
+    df["available_at"] = schedule_published(df["season"])
     return df[GAMEWEEK_COLUMNS]
 
 
@@ -761,3 +778,181 @@ def build_gameweek_result(ctx: BuildContext) -> pd.DataFrame:
     gameweek = ctx.table("gameweek")
     events = season_bootstrap_events(ctx, set(gameweek["season"].unique()))
     return assemble_gameweek_results(gameweek, events)
+
+
+# --- schedule ----------------------------------------------------------------------------
+
+SCHEDULE_COLUMNS = [
+    "fixture_key",
+    "season",
+    "gw",
+    "gw_index",
+    "kickoff_time",
+    "home_team_key",
+    "away_team_key",
+    "schedule_source",
+    "event_time",
+    "available_at",
+]
+
+
+def _schedule_rows_ok(df: pd.DataFrame) -> pd.Series:
+    scheduled = df["gw"].notna()
+    return (
+        (scheduled == df["kickoff_time"].notna())
+        & (scheduled == df["gw_index"].notna())
+        & (df["home_team_key"] != df["away_team_key"])
+        & (df["event_time"] == df["kickoff_time"].fillna(UNSCHEDULED_AT))
+        & (df["available_at"] < df["event_time"])
+    )
+
+
+SCHEDULE_SCHEMA = pa.DataFrameSchema(
+    {
+        "fixture_key": pa.Column("int64", unique=True),
+        "season": pa.Column("int64", pa.Check.ge(FIRST_SEASON)),
+        "gw": pa.Column("Int64", pa.Check.in_range(1, 47), nullable=True),
+        "gw_index": pa.Column("Int64", pa.Check.in_range(1, GWS_PER_SEASON), nullable=True),
+        "kickoff_time": pa.Column(UTC_US, nullable=True),
+        "home_team_key": pa.Column("int64"),
+        "away_team_key": pa.Column("int64"),
+        "schedule_source": pa.Column(str, pa.Check.isin(["final"])),
+        "event_time": pa.Column(UTC_US),
+        "available_at": pa.Column(UTC_US),
+    },
+    checks=[
+        pa.Check(_schedule_rows_ok, error="schedule row consistency"),
+        pa.Check(_season_counts_ok, error="380 fixtures per season, 38 per team"),
+    ],
+    strict=True,
+    ordered=True,
+)
+SCHEDULE_SORT_BY = ("fixture_key",)
+
+
+def schedule_from_fixture(fixture: pd.DataFrame) -> pd.DataFrame:
+    """The final fixture list (no results), available from the season's publication."""
+    df = fixture[SCHEDULE_COLUMNS[:7]].copy()
+    df["schedule_source"] = "final"
+    df["event_time"] = df["kickoff_time"].fillna(UNSCHEDULED_AT).astype(UTC_US)
+    df["available_at"] = schedule_published(df["season"])
+    return df[SCHEDULE_COLUMNS].reset_index(drop=True)
+
+
+def build_schedule(ctx: BuildContext) -> pd.DataFrame:
+    return schedule_from_fixture(ctx.table("fixture"))
+
+
+# --- fixture_snapshot --------------------------------------------------------------------
+
+FIXTURE_SNAPSHOT_FLAGS = ("started", "finished", "finished_provisional")
+FIXTURE_SNAPSHOT_DTYPES = {
+    "snapshot_at": UTC_US,
+    "season": "int64",
+    "fixture_key": "int64",
+    "fpl_fixture_id": "int64",
+    "gw": "Int64",
+    "kickoff_time": UTC_US,
+    "home_team_key": "int64",
+    "away_team_key": "int64",
+    **dict.fromkeys(FIXTURE_SNAPSHOT_FLAGS, "boolean"),
+    "event_time": UTC_US,
+    "available_at": UTC_US,
+}
+
+
+def _snapshot_counts_ok(df: pd.DataFrame) -> bool:
+    if not (df.groupby("snapshot_at").size() == FIXTURES_PER_SEASON).all():
+        return False
+    sides = pd.concat(
+        [
+            df[["snapshot_at", "home_team_key"]].set_axis(["snapshot_at", "team"], axis=1),
+            df[["snapshot_at", "away_team_key"]].set_axis(["snapshot_at", "team"], axis=1),
+        ]
+    )
+    return bool((sides.groupby(["snapshot_at", "team"]).size() == MATCHES_PER_TEAM).all())
+
+
+FIXTURE_SNAPSHOT_SCHEMA = pa.DataFrameSchema(
+    {
+        "snapshot_at": pa.Column(UTC_US),
+        "season": pa.Column("int64", pa.Check.ge(FIRST_SEASON)),
+        "fixture_key": pa.Column("int64"),
+        "fpl_fixture_id": pa.Column("int64", pa.Check.in_range(1, 999)),
+        "gw": pa.Column("Int64", pa.Check.in_range(1, 47), nullable=True),
+        "kickoff_time": pa.Column(UTC_US, nullable=True),
+        "home_team_key": pa.Column("int64"),
+        "away_team_key": pa.Column("int64"),
+        **{flag: pa.Column("boolean", nullable=True) for flag in FIXTURE_SNAPSHOT_FLAGS},
+        "event_time": pa.Column(UTC_US),
+        "available_at": pa.Column(UTC_US),
+    },
+    checks=[
+        pa.Check(
+            lambda df: ~df.duplicated(["snapshot_at", "fixture_key"]),
+            error="(snapshot_at, fixture_key) unique",
+        ),
+        pa.Check(
+            lambda df: (
+                (df["fixture_key"] == df["season"] * 1000 + df["fpl_fixture_id"])
+                & (df["home_team_key"] != df["away_team_key"])
+                & (df["event_time"] == df["snapshot_at"])
+                & (df["available_at"] == df["snapshot_at"])
+            ),
+            error="fixture_snapshot row consistency",
+        ),
+        pa.Check(_kickoff_in_season, error="kickoff outside its season"),
+        pa.Check(_snapshot_counts_ok, error="380 fixtures per snapshot, 38 per team"),
+    ],
+    strict=True,
+    ordered=True,
+)
+FIXTURE_SNAPSHOT_SORT_BY = ("snapshot_at", "fixture_key")
+
+
+def fixture_snapshot_rows(
+    records: list[dict], snapshot_at: datetime, season: int, team_codes: dict[int, int]
+) -> pd.DataFrame:
+    """fixture_snapshot rows of one FPL fixtures payload (scores are never read)."""
+    fixtures = pd.DataFrame(records)
+    out = pd.DataFrame(
+        {
+            "fpl_fixture_id": fixtures["id"].astype("int64"),
+            "gw": fixtures["event"].astype("Int64"),
+            "kickoff_time": to_utc(fixtures["kickoff_time"]),
+            "home_id": fixtures["team_h"].astype("int64"),
+            "away_id": fixtures["team_a"].astype("int64"),
+        }
+    )
+    out = _codes(out, team_codes)
+    at = pd.Timestamp(snapshot_at).tz_convert("UTC").as_unit("us")
+    out["snapshot_at"] = at
+    out["season"] = season
+    out["fixture_key"] = season * 1000 + out["fpl_fixture_id"]
+    for flag in FIXTURE_SNAPSHOT_FLAGS:
+        out[flag] = fixtures[flag] if flag in fixtures.columns else pd.NA
+    out["event_time"] = at
+    out["available_at"] = at
+    return out[list(FIXTURE_SNAPSHOT_DTYPES)].astype(FIXTURE_SNAPSHOT_DTYPES)
+
+
+def build_fixture_snapshot(ctx: BuildContext) -> pd.DataFrame:
+    frames = []
+    bootstraps: dict[int, tuple[datetime, Path, str]] | None = None
+    team_codes: dict[int, dict[int, int]] = {}
+    for snapshot_at, path in ctx.store.entries("fpl", "fixtures"):
+        records = RawStore.read_json(path)
+        season = fixtures_snapshot_season(records, snapshot_at)
+        if season not in team_codes:
+            bootstraps = (
+                bootstraps if bootstraps is not None else last_bootstrap_per_season(ctx.store)
+            )
+            if season not in bootstraps:
+                raise LookupError(f"no archived bootstrap for season {season} (team ids of {path})")
+            team_codes[season] = bootstrap_team_codes(RawStore.read_json(bootstraps[season][1]))
+        frames.append(fixture_snapshot_rows(records, snapshot_at, season, team_codes[season]))
+    if not frames:
+        return pd.DataFrame(
+            {name: pd.Series(dtype=dtype) for name, dtype in FIXTURE_SNAPSHOT_DTYPES.items()}
+        )
+    return pd.concat(frames, ignore_index=True)

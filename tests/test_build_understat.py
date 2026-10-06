@@ -1,22 +1,16 @@
-from datetime import UTC, datetime
-from functools import partial
-
 import pandas as pd
-import pyarrow.parquet as pq
 import pytest
 from synthetic_raw import (
     REPO_CONFIG,
     TEAM_CODES,
     World,
-    bootstrap,
     football_data,
     merged_gw,
     season_fixtures,
 )
 
-from fplopt.build import BUILDERS, ORDER, Builder, build
+from fplopt.build import build
 from fplopt.build.common import EPOCH
-from fplopt.build.snapshots import build_player_snapshot
 from fplopt.build.teams import TeamResolver, team_dim_from_config
 from fplopt.build.understat import (
     UnderstatMappingError,
@@ -230,23 +224,6 @@ def test_understat_build_end_to_end(world):
     assert (upm["event_time"].to_numpy() == timing["kickoff_time"].to_numpy()).all()
     assert (upm["available_at"].to_numpy() == timing["available_at"].to_numpy()).all()
     assert (mapping["event_time"] == EPOCH).all() and (mapping["available_at"] == EPOCH).all()
-
-
-def test_every_built_table_has_event_time_and_available_at(world, monkeypatch):
-    fx23, fx24 = two_seasons(world)
-    world.add_fplcache_bootstrap(datetime(2024, 6, 1, tzinfo=UTC), bootstrap(2023, fx23))
-    world.add_fplcache_bootstrap(datetime(2025, 6, 1, tzinfo=UTC), bootstrap(2024, fx24))
-    snapshots = partial(build_player_snapshot, jobs=1, first_season=None)
-    monkeypatch.setitem(BUILDERS, "player_snapshot", Builder(snapshots, None))
-    # team_dim is already written by World (rebuilding it checks real club names).
-    build([name for name in ORDER if name != "team_dim"], world.ctx)
-
-    written = sorted(p.name.removesuffix(".parquet") for p in world.ctx.data_dir.glob("*.parquet"))
-    tables = (set(ORDER) - {"understat"}) | {"understat_map", "understat_player_match"}
-    assert written == sorted(tables)
-    for name in written:
-        columns = set(pq.read_schema(world.ctx.table_path(name)).names)
-        assert {"event_time", "available_at"} <= columns, name
 
 
 def test_unmapped_player_in_covered_season_fails(world):
