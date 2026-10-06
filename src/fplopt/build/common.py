@@ -118,17 +118,11 @@ def fplcache_and_own_bootstraps(store: RawStore) -> list[tuple[datetime, Path, s
     return sorted(entries, key=lambda entry: (entry[0], entry[2]))
 
 
-def write_table(
-    df: pd.DataFrame,
-    name: str,
-    schema: pa.DataFrameSchema,
-    data_dir: Path,
-    sort_by: list[str] | tuple[str, ...],
-) -> Path:
-    """Validate `df` against `schema` (all failures collected), sort by `sort_by` and write
-    `<data_dir>/<name>.parquet` (zstd) atomically. Same input -> byte-identical file."""
+def validate_table(df: pd.DataFrame, name: str, schema: pa.DataFrameSchema) -> pd.DataFrame:
+    """`schema.validate(df)` with all failures collected; raises TableValidationError whose
+    first line names the table and the failing columns, followed by the first cases."""
     try:
-        df = schema.validate(df, lazy=True)
+        return schema.validate(df, lazy=True)
     except pa.errors.SchemaErrors as exc:
         cases = exc.failure_cases
         columns = sorted({str(c) for c in cases["column"].dropna()}) or ["<frame>"]
@@ -139,6 +133,18 @@ def write_table(
                 ["column", "check", "failure_case", "index"]
             ].to_string()
         ) from None
+
+
+def write_table(
+    df: pd.DataFrame,
+    name: str,
+    schema: pa.DataFrameSchema,
+    data_dir: Path,
+    sort_by: list[str] | tuple[str, ...],
+) -> Path:
+    """Validate `df` against `schema` (all failures collected), sort by `sort_by` and write
+    `<data_dir>/<name>.parquet` (zstd) atomically. Same input -> byte-identical file."""
+    df = validate_table(df, name, schema)
     df = df.sort_values(list(sort_by), kind="mergesort").reset_index(drop=True)
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
