@@ -21,7 +21,8 @@ Mapping understat_id -> player_key (all seasons at once):
   token_set_ratio of normalised names (unescaped, accents stripped/transliterated, lower
   case, letters/digits only), best over the FPL full names and web_names of all seasons.
 - Accept (any): overlap ≥ 0.8 and shared ≥ 3; overlap ≥ 0.5 and name ≥ 85; together ≥ 1 and
-  name ≥ 95. Greedy one-to-one by (coverage, shared, name) descending.
+  name ≥ 95 — and always name ≥ 50. Greedy one-to-one by (coverage, shared, name)
+  descending.
 - Overrides: `config/overrides.csv` rows with source=understat are applied last and win:
   `source_id` + `player_key` = force the pair; `player_key` blank = the Understat id maps to
   nobody; `source_id` blank = the FPL player has no Understat id (exempt from validation).
@@ -30,16 +31,20 @@ Mapping understat_id -> player_key (all seasons at once):
   pair contradicted, and every pair whose players both appear (Understat EPL rows, FPL
   minutes) is mapped; every FPL player with minutes > 0 in 2020/21 – 2023/24 is mapped
   (the mirror covers those seasons fully: team files for every side, a player file for
-  every FPL player with minutes).
+  every FPL player with minutes); goal oracle, for every season including those without
+  id_dict: each auto pair's `us_goals` == FPL `goals_scored` in ≥ 90% of their common
+  appearances (Understat row and FPL minutes > 0 in the same fixture).
 
 Results on raw/ 2026-10-06 (2,805 player files, 1,213 Understat ids with EPL rows from
 2016/17 on; 7,190 EPL rows from 2014/15–2015/16 have no fixture): all 1,213 mapped, no
 overrides; 1,051 by the minutes rule, 158 by overlap + name, 4 by name alone (2 of them —
 Klaesson 2021-22 and Ben Parkinson 2023-24, single substitute appearances — share no
 fixture within 5 minutes: Understat 24'/18' vs FPL 35'/24'); 2 mapped with name < 85
-(Zambo Anguissa as "Franck Zambo", "Vinicius Souza" as "Vini de Souza Costa"; minutes agree
-in 58/58 and 35/36). id_dict: 1,229 rows (818 distinct pairs), 1,205 rows where both
-players appear — all agree; the other 24 never played. Share of FPL minutes with Understat
+(Zambo Anguissa as "Franck Zambo", name 61.5, "Vinicius Souza" as "Vini de Souza Costa",
+83.3; minutes agree in 58/58 and 35/36); the lowest auto name score is 61.5. id_dict: 1,229
+rows (818 distinct pairs), 1,205 rows where both players appear — all agree; the other 24
+never played. Goal oracle: 80,783 common appearances, 5 disagree (5 pairs below 100%, the
+lowest 33/34 = 97.1%); no pair below 90%. Share of FPL minutes with Understat
 data: 2016 47%, 2017 62%, 2018 75%, 2019 91%, 2020–2023 100%, 2024 79% (mirror stops
 2025-04-07), 2025– 0%.
 Deviations from the plan's starting point, both forced by the oracle/coverage checks:
@@ -90,6 +95,8 @@ MINUTES_TOLERANCE = 5
 # Accepted if (overlap >= 0.8 and shared >= 3) or (overlap >= 0.5 and name >= 85) or
 # (together >= 1 and name >= 95); see the module docstring.
 ACCEPT_RULES = ((0.8, 3), (0.5, 85.0), (1, 95.0))
+MIN_AUTO_NAME_SCORE = 50.0  # every auto pair, whatever rule accepts it
+MIN_GOAL_AGREEMENT = 0.9  # auto pairs: share of common appearances with equal goals
 VALIDATED_SEASONS = range(2020, 2024)
 OVERRIDES_FILE = "overrides.csv"
 
@@ -273,9 +280,10 @@ def normalise_name(name: str) -> str:
 
 
 def fpl_appearances(player_match: pd.DataFrame) -> pd.DataFrame:
-    """FPL appearances (minutes > 0): player_key, fixture_key, season, minutes."""
+    """FPL appearances (minutes > 0): player_key, fixture_key, season, minutes, goals."""
     played = player_match[player_match["minutes"] > 0]
-    return played[["player_key", "fixture_key", "season", "minutes"]].reset_index(drop=True)
+    columns = ["player_key", "fixture_key", "season", "minutes", "goals_scored"]
+    return played[columns].reset_index(drop=True)
 
 
 def fpl_name_variants(player_season: pd.DataFrame) -> dict[int, set[str]]:
@@ -340,11 +348,11 @@ def name_scores(
 
 
 def acceptable(pairs: pd.DataFrame) -> pd.Series:
-    """Pairs meeting any of ACCEPT_RULES (see module docstring)."""
+    """Pairs meeting any of ACCEPT_RULES and MIN_AUTO_NAME_SCORE (see module docstring)."""
     (min_overlap_1, min_shared), (min_overlap_2, min_name_2), (min_together, min_name_3) = (
         ACCEPT_RULES
     )
-    return (
+    return (pairs["name_score"] >= MIN_AUTO_NAME_SCORE) & (
         ((pairs["overlap"] >= min_overlap_1) & (pairs["shared"] >= min_shared))
         | ((pairs["overlap"] >= min_overlap_2) & (pairs["name_score"] >= min_name_2))
         | ((pairs["together"] >= min_together) & (pairs["name_score"] >= min_name_3))
@@ -546,6 +554,57 @@ def mapping_problems(
     return problems
 
 
+def goal_agreement(
+    mapping: pd.DataFrame, upm: pd.DataFrame, fpl_apps: pd.DataFrame
+) -> pd.DataFrame:
+    """Per auto pair: common appearances (Understat row and FPL minutes > 0 in the same
+    fixture), how many have us_goals == goals_scored, and that share (`agreement`)."""
+    auto = mapping[mapping["method"] == "auto"].dropna(subset=["player_key"])
+    auto = auto.astype({"player_key": "int64"})[["understat_id", "player_key"]]
+    common = (
+        upm[["understat_id", "fixture_key", "us_goals"]]
+        .merge(auto, on="understat_id")
+        .merge(
+            fpl_apps[["player_key", "fixture_key", "goals_scored"]],
+            on=["player_key", "fixture_key"],
+        )
+    )
+    common["agree"] = common["us_goals"] == common["goals_scored"]
+    out = (
+        common.groupby(["understat_id", "player_key"])["agree"]
+        .agg(apps="size", agree="sum")
+        .reset_index()
+    )
+    out["agreement"] = out["agree"] / out["apps"]
+    return out
+
+
+def goal_agreement_problems(
+    mapping: pd.DataFrame, upm: pd.DataFrame, fpl_apps: pd.DataFrame
+) -> list[str]:
+    """Auto pairs whose goals agree in fewer than MIN_GOAL_AGREEMENT of their common
+    appearances (an override can force or forbid such a pair); empty = valid."""
+    agreement = goal_agreement(mapping, upm, fpl_apps)
+    if len(agreement):
+        log.info(
+            "understat: goal agreement of %d auto pair(s): min %.3f, %d below 100%%, "
+            "%d of %d common appearance(s) disagree",
+            len(agreement),
+            agreement["agreement"].min(),
+            int((agreement["agreement"] < 1).sum()),
+            int((agreement["apps"] - agreement["agree"]).sum()),
+            int(agreement["apps"].sum()),
+        )
+    low = agreement[agreement["agreement"] < MIN_GOAL_AGREEMENT]
+    if low.empty:
+        return []
+    return [
+        f"{len(low)} auto pair(s) whose goals agree in < {MIN_GOAL_AGREEMENT:.0%} of their "
+        f"common appearances (add an override if the pair is right):\n"
+        f"{low.sort_values('agreement').head(20).to_string(index=False)}"
+    ]
+
+
 # --- the `understat` builder -------------------------------------------------------------
 
 
@@ -606,7 +665,7 @@ def build_understat(ctx: BuildContext) -> pd.DataFrame:
         fpl_apps,
         id_dict_oracle(run, player_season),
         exempt={int(k) for k in no_understat},
-    )
+    ) + goal_agreement_problems(mapping, upm, fpl_apps)
     if problems:
         raise UnderstatMappingError("Understat mapping failed: " + "\n".join(problems))
     write_table(mapping, "understat_map", MAP_SCHEMA, ctx.data_dir, MAP_SORT_BY)

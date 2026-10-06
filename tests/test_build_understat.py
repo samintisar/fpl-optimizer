@@ -21,6 +21,7 @@ from fplopt.build.teams import TeamResolver, team_dim_from_config
 from fplopt.build.understat import (
     UnderstatMappingError,
     candidate_pairs,
+    goal_agreement_problems,
     map_understat,
     mapping_problems,
     name_scores,
@@ -139,10 +140,11 @@ def two_seasons(world, *, skip_player=None):
                 ),
             ]
         )
-        world.vaastav(f"2024-25/understat/Player_{team_id}_{900 + team_id}", career)
+        player = f"First{team_id}_Second{team_id}_{900 + team_id}"
+        world.vaastav(f"2024-25/understat/{player}", career)
     stale = player_file_rows(fx23, 2023, 1, xg=0.9)
-    world.vaastav("2023-24/understat/Player_1_901", stale)
-    names = pd.DataFrame({"id": [901], "player_name": ["Dara O&#039;Shea"]})
+    world.vaastav("2023-24/understat/First1_Second1_901", stale)
+    names = pd.DataFrame({"id": [901], "player_name": ["First1 O&#039;Second1"]})
     world.vaastav("2024-25/understat/understat_player", names)
     for team_id in range(1, 21):
         file = f"understat_{us_team(team_id).replace(' ', '_')}"
@@ -199,12 +201,12 @@ def test_understat_build_end_to_end(world):
     assert len(upm) == 20 * 38 * 2  # no Barcelona or 2014 rows, no duplicates
     p1 = upm[upm["understat_id"] == 901]
     assert (p1["us_xg"] == 0.3).all()  # the newest folder wins over the stale 0.9 copy
-    assert (p1["understat_name"] == "Dara O'Shea").all()
-    assert upm.loc[upm["understat_id"] == 902, "understat_name"].iloc[0] == "Player 2"
+    assert (p1["understat_name"] == "First1 O'Second1").all()
+    assert upm.loc[upm["understat_id"] == 902, "understat_name"].iloc[0] == "First2 Second2"
 
     mapping = world.ctx.table("understat_map").set_index("understat_id")
     assert len(mapping) == 20 and (mapping["method"] == "auto").all()
-    assert mapping.loc[901, "player_key"] == 100001  # minutes agree, name doesn't
+    assert mapping.loc[901, "player_key"] == 100001
     player_dim = world.ctx.table("player_dim").set_index("player_key")
     assert player_dim.loc[100005, "understat_id"] == 905
 
@@ -324,6 +326,32 @@ def test_override_wins_and_can_unmap():
     mapping = map_understat(pairs, overrides).set_index("understat_id")
     assert mapping.loc[10, "player_key"] == 200 and mapping.loc[10, "method"] == "override"
     assert pd.isna(mapping.loc[20, "player_key"])
+
+
+def test_auto_pair_needs_a_name_score_of_50():
+    # Minutes agree perfectly, but the names have nothing in common: no auto mapping.
+    upm, fpl_apps, _, _ = walker_inputs()
+    pairs = scored_pairs(
+        upm, fpl_apps, {10: "Kyle Walker", 20: "Ben Mee"}, {100: {"Kyle Walker"}, 200: {"Xu Yi"}}
+    )
+    mapping = map_understat(pairs, EMPTY_OVERRIDES)
+    assert mapping["understat_id"].tolist() == [10]
+
+
+def test_goal_agreement_below_90_percent_fails():
+    upm, fpl_apps, us_names, fpl_names = walker_inputs()
+    mapping = map_understat(scored_pairs(upm, fpl_apps, us_names, fpl_names), EMPTY_OVERRIDES)
+    goals = [1, 0, 0, 2, 0]
+    fpl_apps = fpl_apps.assign(goals_scored=goals * 2)
+    agreeing = upm.assign(us_goals=goals * 2)
+    assert goal_agreement_problems(mapping, agreeing, fpl_apps) == []
+    # Understat id 20 (-> 200) disagrees in 1 of 5 appearances: 80% < 90%.
+    off = agreeing.assign(us_goals=goals + [1, 1, 0, 2, 0])
+    problems = goal_agreement_problems(mapping, off, fpl_apps)
+    assert len(problems) == 1 and "1 auto pair(s)" in problems[0] and "0.8" in problems[0]
+    # Overridden pairs are the reviewer's call: not checked.
+    forced = mapping.assign(method="override")
+    assert goal_agreement_problems(forced, off, fpl_apps) == []
 
 
 def test_single_appearance_with_minutes_off_maps_by_name():
