@@ -69,6 +69,10 @@ def test_settings_from_env():
     assert s.odds_api_key is None
     assert s.telegram_admin_chat_id == "42"
     assert Settings.from_env({}).raw_dir == Path("raw").resolve()
+    assert Settings.from_env({}).data_dir == Path("data").resolve()
+    assert (
+        Settings.from_env({"FPLOPT_DATA_DIR": "/srv/data"}).data_dir == Path("/srv/data").resolve()
+    )
 
 
 def test_alert_text_is_redacted_and_single_line(tmp_path, monkeypatch):
@@ -133,10 +137,32 @@ def test_backfill_commands_are_valid(tmp_path, monkeypatch, command):
 
 def test_every_parsed_command_has_a_job():
     parser = cli.build_parser()
+    extras = {"rules export": ["2026-27"], "build": ["fixture"]}
     for name in cli.JOBS:
-        extra = ["2026-27"] if name == "rules export" else []
-        args = parser.parse_args(name.split() + extra)
-        assert f"{args.group} {args.command}" == name
+        args = parser.parse_args(name.split() + extras.get(name, []))
+        assert cli.job_name(args) == name
+
+
+def test_build_dispatches_target_with_data_dir(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        cli, "build_tables", lambda names, ctx: seen.append((names, ctx.store.root, ctx.data_dir))
+    )
+    settings = replace(make_settings(tmp_path), data_dir=tmp_path / "data")
+    assert cli.main(["build", "fixture"], settings=settings) == 0
+    assert cli.main(["build", "all"], settings=settings) == 0
+    assert seen == [
+        (["fixture"], tmp_path, tmp_path / "data"),
+        (["all"], tmp_path, tmp_path / "data"),
+    ]
+
+
+def test_build_unknown_table_fails_with_exit_one(tmp_path, monkeypatch):
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    settings = replace(make_settings(tmp_path), data_dir=tmp_path / "data")
+    assert cli.main(["build", "nope"], settings=settings) == 1
+    assert "unknown table 'nope'" in alerts[0]
 
 
 def test_bad_season_label_alerts_and_returns_one(tmp_path, monkeypatch):

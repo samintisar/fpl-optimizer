@@ -2,8 +2,9 @@
 
 `fplopt snapshot daily|tick` (archiver timers), `fplopt backfill element-summary|football-data|
 vaastav|fplcache` (one-off backfills into raw/), `fplopt rules export SEASON [--out DIR]`
-(config/scoring/<season>.json from an archived bootstrap). Every job gets a `Context`;
-failures are logged and alerted to Telegram, and the exit code is 1.
+(config/scoring/<season>.json from an archived bootstrap), `fplopt build TABLE|all`
+(raw/ -> data/<table>.parquet; no network). Every job gets a `Context`; failures are logged
+and alerted to Telegram, and the exit code is 1.
 """
 
 from __future__ import annotations
@@ -29,7 +30,9 @@ from fplopt.adapters.http import make_client
 from fplopt.adapters.odds import OddsClient
 from fplopt.adapters.vaastav import VaastavClient
 from fplopt.alerts import send_admin_alert
+from fplopt.build import build as build_tables
 from fplopt.build import rules
+from fplopt.build.common import BuildContext
 from fplopt.ingest import history, jobs
 from fplopt.ingest.raw_store import RawStore
 from fplopt.redact import redact
@@ -75,6 +78,8 @@ JOBS: dict[str, Job] = {
     "rules export": lambda c: rules.export_rules(
         c.store, parse_season_label(c.args.season), Path(c.args.out)
     ),
+    # Unknown table names fail inside the job, so they are logged and alerted (exit 1).
+    "build": lambda c: build_tables([c.args.target], BuildContext(c.store, c.settings.data_dir)),
 }
 
 
@@ -93,7 +98,16 @@ def build_parser() -> argparse.ArgumentParser:
     rules_group.add_argument(
         "--out", default="config/scoring", help="output directory (default: config/scoring)"
     )
+    build_group = groups.add_parser("build", help="build data/<table>.parquet from raw/")
+    build_group.add_argument("target", help="table name, or 'all'")
     return parser
+
+
+def job_name(args: argparse.Namespace) -> str:
+    """The JOBS key for parsed arguments: '<group> <command>', or just '<group>' for groups
+    without a command (build)."""
+    command = getattr(args, "command", None)
+    return f"{args.group} {command}" if command else args.group
 
 
 def configure_logging() -> None:
@@ -128,7 +142,7 @@ def _sigterm_raises_system_exit() -> Iterator[None]:
 
 def main(argv: Sequence[str] | None = None, settings: Settings | None = None) -> int:
     args = build_parser().parse_args(argv)
-    job_name = f"{args.group} {args.command}"
+    name = job_name(args)
     if settings is None:
         load_dotenv(Path.cwd() / ".env")
         settings = Settings.from_env()
@@ -137,24 +151,23 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
         log.warning(
             "TELEGRAM_BOT_TOKEN/TELEGRAM_ADMIN_CHAT_ID not set: failures will not be alerted"
         )
-    log.info("job %r starting (raw dir %s)", job_name, settings.raw_dir)
+    log.info("job %r starting (raw dir %s)", name, settings.raw_dir)
     try:
         store = RawStore(settings.raw_dir)
         with make_client() as http, _sigterm_raises_system_exit():
-            JOBS[job_name](Context(store=store, http=http, settings=settings, args=args))
+            JOBS[name](Context(store=store, http=http, settings=settings, args=args))
     except Exception as exc:
-        log.exception("job %r failed", job_name)
+        log.exception("job %r failed", name)
         summary = str(exc).splitlines()[0] if str(exc) else ""
         send_admin_alert(
             redact(
-                f"fplopt {job_name} failed on {socket.gethostname()}: "
-                f"{type(exc).__name__}: {summary}"
+                f"fplopt {name} failed on {socket.gethostname()}: {type(exc).__name__}: {summary}"
             ),
             token=settings.telegram_bot_token,
             chat_id=settings.telegram_admin_chat_id,
         )
         return 1
-    log.info("job %r done", job_name)
+    log.info("job %r done", name)
     return 0
 
 
