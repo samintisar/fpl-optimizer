@@ -26,6 +26,7 @@ Runs as your normal user with systemd **user** timers. Raw data lands in `~/fpl-
    ODDS_API_KEY=...
    ```
    `ODDS_API_KEY` is optional (free tier at the-odds-api.com, 500 credits/month); without it odds are skipped.
+   `HEALTHCHECK_PING_URL` is optional too: see [Heartbeat](#heartbeat-optional) below.
    `FPLOPT_RAW_DIR` is optional (default `raw`, relative to the repo).
 4. First daily run, by hand. On a fresh server this is more than a smoke test: besides fixtures, bootstrap, odds and the football-data CSV, it archives `event/{gw}/live/` for every GW finalised so far and does a full element-summary run (about 700 requests, ~5 minutes). Run it **outside** the 2 hours before a deadline: its bootstrap snapshot counts as that window's pre-deadline snapshot, so the tick would skip it.
    ```bash
@@ -74,6 +75,30 @@ Steps run independently: one failing doesn't stop the others, and the job fails 
    - Does nothing on days when no new GW has been finalised.
 
 The element-summary run has to fit in the daily unit's `TimeoutStartSec=40min`. If systemd stops the job (timeout or `systemctl stop`), the CLI turns SIGTERM into a normal exit so the run still writes its manifest; the run is incomplete, so the next day redoes it. A run killed outright (SIGKILL, power loss) leaves no manifest and is likewise redone.
+
+## Heartbeat (optional)
+
+Telegram alerts need the server to be up. To also hear about the server being down (or the
+timers stopping), give the jobs an external dead-man's switch: after every *successful*
+`snapshot daily` or `snapshot tick`, the CLI sends a GET to `HEALTHCHECK_PING_URL`
+(10 s timeout; a failed ping is logged as `heartbeat ping failed: <error type>` and never fails
+the job). The URL is a secret (anyone holding it can ping), so it is never logged.
+
+With [healthchecks.io](https://healthchecks.io) (free tier is plenty):
+
+1. Sign up, then **Add Check**. Name it e.g. `fplopt archiver`.
+2. Schedule: **Period 1 hour, Grace 1 hour**. The 15-minute tick pings on every successful run,
+   including the usual runs that have nothing to do, so pings normally arrive about 4 times an
+   hour; this alerts after roughly 2 hours of silence. (If only the daily job pinged, you'd use
+   period 1 day and grace ~6 hours, and an outage could go unnoticed for most of a day.) Ticks
+   that fail don't ping, so a tick failing for 2 hours alerts here as well as on Telegram.
+3. Under **Integrations**, keep email and/or add Telegram.
+4. Copy the ping URL (`https://hc-ping.com/<uuid>`) into `~/fpl-optimizer/.env`:
+   ```
+   HEALTHCHECK_PING_URL=https://hc-ping.com/<uuid>
+   ```
+5. Check it: `.venv/bin/fplopt snapshot tick` should log `heartbeat ping sent`, and the check
+   turns green on healthchecks.io. No unit change or restart is needed: each run reads `.env`.
 
 ## Historical backfills (one-off, Phase 1a)
 

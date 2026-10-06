@@ -7,6 +7,8 @@ bootstrap), `fplopt build TABLE|all` (raw/ -> data/<table>.parquet; no network),
 `fplopt check freshness [--max-age-hours H]` (fails if the newest bootstrap snapshot is
 missing or older than H hours, default 36: a dead-man's switch for the timers). Every job
 gets a `Context`; failures are logged and alerted to Telegram, and the exit code is 1.
+After a successful `snapshot daily|tick`, HEALTHCHECK_PING_URL (if set) gets a best-effort
+GET, for an external dead-man's switch that also notices the server being down.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from fplopt.adapters.http import make_client
 from fplopt.adapters.odds import OddsClient
 from fplopt.adapters.vaastav import VaastavClient
 from fplopt.alerts import send_admin_alert
+from fplopt.heartbeat import send_heartbeat
 from fplopt.ingest import health, history, jobs
 from fplopt.ingest.raw_store import RawStore
 from fplopt.redact import redact
@@ -62,6 +65,9 @@ class Context:
 
 
 Job = Callable[[Context], object]
+
+# Jobs whose success pings HEALTHCHECK_PING_URL: the scheduled archiver runs.
+HEARTBEAT_JOBS = frozenset({"snapshot daily", "snapshot tick"})
 
 
 # The build layer pulls in pandas and pandera (~2 s to import), which the archiver jobs that
@@ -201,6 +207,8 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
         )
         return 1
     log.info("job %r done", name)
+    if name in HEARTBEAT_JOBS and settings.healthcheck_ping_url:
+        send_heartbeat(settings.healthcheck_ping_url)
     return 0
 
 

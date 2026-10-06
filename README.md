@@ -26,6 +26,7 @@ Put these in a local `.env` (gitignored) or set them as env vars on the server:
 | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
 | `TELEGRAM_ADMIN_CHAT_ID` | Chat that receives pipeline-failure alerts |
 | `ODDS_API_KEY` | The Odds API key |
+| `HEALTHCHECK_PING_URL` | Optional. Pinged (GET) after each successful `snapshot daily`/`tick`, for an external dead-man's switch such as healthchecks.io (see `deploy/README.md`). Treated as a secret: never logged |
 | `FPLOPT_RAW_DIR` | Raw snapshot root (default `raw`) |
 | `FPLOPT_DATA_DIR` | Parquet root (default `data`) |
 | `FPLOPT_USER_DB` | SQLite user-state path (default `data/users.sqlite`) |

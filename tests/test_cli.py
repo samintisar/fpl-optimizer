@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 
 from fplopt import cli
@@ -265,3 +266,60 @@ def test_check_freshness_on_an_empty_archive_alerts_and_returns_one(tmp_path, mo
     assert cli.main(["check", "freshness"], settings=make_settings(tmp_path)) == 1
     assert "check freshness failed" in alerts[0]
     assert "StaleArchiveError" in alerts[0]
+
+
+@pytest.fixture
+def heartbeats(monkeypatch):
+    sent = []
+    monkeypatch.setattr(cli, "send_heartbeat", lambda url: sent.append(url) or True)
+    return sent
+
+
+@pytest.mark.parametrize("command", ["daily", "tick"])
+def test_successful_snapshot_pings_the_heartbeat_url(tmp_path, monkeypatch, heartbeats, command):
+    monkeypatch.setitem(cli.JOBS, f"snapshot {command}", lambda c: None)
+    settings = replace(make_settings(tmp_path), healthcheck_ping_url="https://hc.test/abc")
+    assert cli.main(["snapshot", command], settings=settings) == 0
+    assert heartbeats == ["https://hc.test/abc"]
+
+
+def test_failed_snapshot_does_not_ping(tmp_path, monkeypatch, heartbeats):
+    def boom(c):
+        raise RuntimeError("fpl down")
+
+    monkeypatch.setitem(cli.JOBS, "snapshot daily", boom)
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: None)
+    settings = replace(make_settings(tmp_path), healthcheck_ping_url="https://hc.test/abc")
+    assert cli.main(["snapshot", "daily"], settings=settings) == 1
+    assert heartbeats == []
+
+
+def test_other_jobs_and_unset_url_do_not_ping(tmp_path, monkeypatch, heartbeats):
+    monkeypatch.setitem(cli.JOBS, "backfill vaastav", lambda c: None)
+    monkeypatch.setitem(cli.JOBS, "snapshot tick", lambda c: None)
+    settings = replace(make_settings(tmp_path), healthcheck_ping_url="https://hc.test/abc")
+    assert cli.main(["backfill", "vaastav"], settings=settings) == 0
+    assert cli.main(["snapshot", "tick"], settings=make_settings(tmp_path)) == 0
+    assert heartbeats == []
+
+
+def test_failed_ping_does_not_fail_the_job(tmp_path, monkeypatch):
+    def unreachable(request):
+        raise httpx.ConnectError("down", request=request)
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda *a, **kw: real_client(transport=httpx.MockTransport(unreachable)),
+    )
+    monkeypatch.setitem(cli.JOBS, "snapshot tick", lambda c: None)
+    settings = replace(make_settings(tmp_path), healthcheck_ping_url="https://hc.test/abc")
+    assert cli.main(["snapshot", "tick"], settings=settings) == 0
+
+
+def test_settings_heartbeat_url_is_stripped_and_optional():
+    url = "https://hc-ping.com/0b4c1f7e-9a2d-4e4b-8f3a-5d6c7b8a9e01"
+    assert Settings.from_env({"HEALTHCHECK_PING_URL": f" {url}\n"}).healthcheck_ping_url == url
+    assert Settings.from_env({"HEALTHCHECK_PING_URL": " "}).healthcheck_ping_url is None
+    assert Settings.from_env({}).healthcheck_ping_url is None
