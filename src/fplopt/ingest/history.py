@@ -183,6 +183,7 @@ _FPLCACHE_MEMBER = re.compile(
     r"^[^/]+/cache/(?P<y>\d{4})/(?P<m>\d{1,2})/(?P<d>\d{1,2})/(?P<H>\d{2})(?P<M>\d{2})\.json\.xz$"
 )
 MAX_FPLCACHE_MEMBER_BYTES = 64 << 20  # real snapshots are ~0.1-0.3 MB compressed
+MAX_FPLCACHE_JSON_BYTES = 256 << 20  # and ~1-2 MB decompressed
 FPLCACHE_PROGRESS_EVERY = 500
 
 
@@ -194,6 +195,20 @@ def fplcache_snapshot_time(member_name: str) -> datetime | None:
         return None
     y, m, d, hh, mm = (int(match[key]) for key in ("y", "m", "d", "H", "M"))
     return datetime(y, m, d, hh, mm, tzinfo=UTC)
+
+
+def _unxz_bounded(data: bytes, limit: int) -> bytes:
+    """Decompress a complete .xz blob, refusing output over `limit` bytes (a decompression
+    bomb would otherwise exhaust memory before the manifest is written)."""
+    decompressor = lzma.LZMADecompressor()
+    out = decompressor.decompress(data, max_length=limit + 1)
+    if len(out) > limit:
+        raise ValueError(f"decompresses to more than {limit} bytes")
+    if not decompressor.eof:
+        raise ValueError("truncated xz data")
+    if decompressor.unused_data:
+        raise ValueError("unexpected data after the xz stream")
+    return out
 
 
 def _archive_fplcache_member(
@@ -212,7 +227,7 @@ def _archive_fplcache_member(
         if path.read_bytes() == data:
             return False
         raise ValueError("differs from the archived copy (upstream rewrote history?)")
-    json.loads(lzma.decompress(data))
+    json.loads(_unxz_bounded(data, MAX_FPLCACHE_JSON_BYTES))
     store.write_bytes("fplcache", "bootstrap-static", data, snapshot_at, suffix=".json.xz")
     return True
 

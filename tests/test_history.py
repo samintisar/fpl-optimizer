@@ -410,3 +410,14 @@ def test_backfill_fplcache_records_a_download_cut_inside_a_member(tmp_path):
         backfill_fplcache(store, fplcache_client(FC_MEMBERS, body=body), Clock(NOW))
     assert not snapshot_path(store, TS_B).exists()
     assert "truncated" in latest_fplcache_manifest(store)["error"]
+
+
+def test_unxz_bounded_refuses_oversized_output():
+    from fplopt.ingest.history import _unxz_bounded
+
+    blob = lzma.compress(b"0" * 10_000)
+    assert _unxz_bounded(blob, 10_000) == b"0" * 10_000
+    with pytest.raises(ValueError, match="more than 9999"):
+        _unxz_bounded(blob, 9_999)
+    with pytest.raises(ValueError, match="truncated"):
+        _unxz_bounded(blob[:-8], 10_000)
