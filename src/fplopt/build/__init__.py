@@ -17,7 +17,7 @@ from pathlib import Path
 import pandas as pd
 import pandera.pandas as pa
 
-from fplopt.build import teams
+from fplopt.build import fixtures, teams
 from fplopt.build.common import BuildContext, write_table
 
 log = logging.getLogger(__name__)
@@ -32,8 +32,12 @@ class Builder:
 
 BUILDERS: dict[str, Builder] = {
     "team_dim": Builder(teams.build_team_dim, teams.SCHEMA, teams.SORT_BY),
+    "fixture": Builder(fixtures.build_fixture, fixtures.FIXTURE_SCHEMA, fixtures.FIXTURE_SORT_BY),
+    "gameweek": Builder(
+        fixtures.build_gameweek, fixtures.GAMEWEEK_SCHEMA, fixtures.GAMEWEEK_SORT_BY
+    ),
 }
-ORDER: list[str] = ["team_dim"]
+ORDER: list[str] = ["team_dim", "fixture", "gameweek"]
 
 
 def _resolve(names: Iterable[str]) -> list[str]:
