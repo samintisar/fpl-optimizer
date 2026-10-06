@@ -197,7 +197,11 @@ def backfill_element_summaries(
     """
     bootstrap = fpl.bootstrap_static()
     run_at = now()
-    store.write("fpl", "bootstrap-static", bootstrap, run_at)
+    try:
+        store.write("fpl", "bootstrap-static", bootstrap, run_at)
+    except FileExistsError:
+        # The daily FPL step archived a bootstrap in this same second; that one stands.
+        log.info("bootstrap for %s already archived; keeping it", run_at.isoformat())
     payload = json.loads(bootstrap)
     ids = [element["id"] for element in payload["elements"]]
     season = _season_or_none(payload)

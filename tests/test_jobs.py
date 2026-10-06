@@ -17,6 +17,7 @@ from fplopt.ingest.jobs import (
     snapshot_event_live,
     snapshot_football_data,
     snapshot_football_data_current,
+    snapshot_fpl,
     snapshot_post_lockdown,
 )
 from fplopt.ingest.raw_store import RawStore
@@ -206,6 +207,18 @@ def test_backfill_archives_every_element_under_one_run(tmp_path):
         "2.json.gz",
         "_manifest.json.gz",
     ]
+
+
+def test_backfill_tolerates_a_bootstrap_archived_in_the_same_second(tmp_path):
+    # The daily FPL step and the element-summary run can both archive a bootstrap in one second.
+    store = RawStore(tmp_path)
+    fpl = FakeFpl()
+    frozen = lambda: DEADLINE  # noqa: E731
+    snapshot_fpl(store, fpl, frozen)
+    assert backfill_element_summaries(store, fpl, frozen, sleep=no_sleep) == 2
+    assert store.times("fpl", "bootstrap-static") == [DEADLINE]
+    manifest = store.read_json(store.path_for("fpl", "element-summary", DEADLINE, name="_manifest"))
+    assert manifest["written"] == [1, 2]
 
 
 def test_backfill_continues_past_failures_then_raises(tmp_path):
