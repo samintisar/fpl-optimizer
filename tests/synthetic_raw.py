@@ -19,6 +19,7 @@ from fplopt.seasons import football_data_code, season_label
 
 REPO_CONFIG = Path(__file__).resolve().parents[1] / "config"
 RUN = datetime(2026, 10, 6, 3, 26, 9, tzinfo=UTC)
+CURRENT_AT = datetime(2026, 9, 1, tzinfo=UTC)
 # 20 FPL team codes (config/teams.csv); team id i+1 in every synthetic season.
 TEAM_CODES = [3, 7, 91, 94, 36, 90, 8, 31, 11, 54, 2, 13, 14, 43, 1, 4, 17, 20, 6, 21]
 FD_NAMES = dict(
@@ -219,10 +220,11 @@ class World:
         teams_csv: bool = True,
         fixtures: pd.DataFrame | None = None,
         merged: pd.DataFrame | None = None,
+        players: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
         label = season_label(season)
         fixtures = season_fixtures(season) if fixtures is None else fixtures
-        self.vaastav(f"{label}/players_raw", players_raw(season))
+        self.vaastav(f"{label}/players_raw", players_raw(season) if players is None else players)
         self.vaastav(f"{label}/gws/merged_gw", merged_gw(fixtures) if merged is None else merged)
         if fixtures_csv:
             self.vaastav(f"{label}/fixtures", fixtures)
@@ -242,3 +244,49 @@ class World:
     def add_own_fixtures(self, at: datetime, fixtures: pd.DataFrame) -> None:
         records = json.loads(fixtures.to_json(orient="records"))
         self.store.write("fpl", "fixtures", json.dumps(records).encode(), at)
+
+    def add_current_season(
+        self, at: datetime = CURRENT_AT, finished_through: int = 2, fd_rows: int = 15
+    ) -> pd.DataFrame:
+        """2026-27 from our own archive: GWs up to `finished_through` finished, fixture 380
+        postponed (no GW/kickoff), football-data published for the first `fd_rows`."""
+        fixtures = season_fixtures(2026)
+        fixtures["finished"] = fixtures["event"] <= finished_through
+        fixtures[["team_h_score", "team_a_score"]] = fixtures[
+            ["team_h_score", "team_a_score"]
+        ].where(fixtures["finished"])
+        fixtures["event"] = fixtures["event"].astype("Int64")
+        fixtures.loc[fixtures["id"] == 380, ["event", "kickoff_time"]] = None
+        payload = bootstrap(2026, season_fixtures(2026), finished_through=finished_through)
+        self.add_own_bootstrap(at, payload)
+        self.add_own_fixtures(at, fixtures)
+        played = fixtures[fixtures["finished"]]
+        self.football_data(2026, football_data(played.head(fd_rows), 2026))
+        return fixtures
+
+    def add_element_summary(
+        self, at: datetime, history: pd.DataFrame, season: int, through_event: int
+    ) -> None:
+        """An element-summary run: one file per element with its `history` rows."""
+        elements = sorted(int(e) for e in history["element"].unique())
+        for element in elements:
+            rows = history[history["element"] == element]
+            payload = {
+                "fixtures": [],
+                "history": json.loads(rows.to_json(orient="records")),
+                "history_past": [],
+            }
+            self.store.write(
+                "fpl", "element-summary", json.dumps(payload).encode(), at, name=str(element)
+            )
+        manifest = {
+            "run_at": at.isoformat(),
+            "season": season,
+            "through_event": through_event,
+            "expected": [str(e) for e in elements],
+            "written": [str(e) for e in elements],
+            "failed": [],
+        }
+        self.store.write(
+            "fpl", "element-summary", json.dumps(manifest).encode(), at, name="_manifest"
+        )

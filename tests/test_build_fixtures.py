@@ -243,25 +243,11 @@ def test_last_bootstrap_per_season_uses_payload_season_not_timestamp(world):
 # --- end to end -------------------------------------------------------------------------
 
 
-def current_season(world, at=datetime(2026, 9, 1, tzinfo=UTC)):
-    """2026-27 from our own archive: GW1-2 finished, one fixture postponed (unscheduled)."""
-    fixtures = season_fixtures(2026)
-    fixtures["finished"] = fixtures["event"] <= 2
-    fixtures.loc[~fixtures["finished"], ["team_h_score", "team_a_score"]] = None
-    fixtures["event"] = fixtures["event"].astype("Int64")
-    fixtures.loc[fixtures["id"] == 380, ["event", "kickoff_time"]] = None
-    world.add_own_bootstrap(at, bootstrap(2026, season_fixtures(2026), finished_through=2))
-    world.add_own_fixtures(at, fixtures)
-    played = fixtures[fixtures["finished"]]
-    world.football_data(2026, football_data(played.head(15), 2026))  # GW2 partly published
-    return fixtures
-
-
 def test_build_fixture_and_gameweek_end_to_end(world):
     world.add_vaastav_season(2016, fixtures_csv=False, teams_csv=False)
     fx23 = world.add_vaastav_season(2023)
     world.add_fplcache_bootstrap(datetime(2024, 6, 1, tzinfo=UTC), bootstrap(2023, fx23))
-    current_season(world)
+    world.add_current_season()
     build(["fixture", "gameweek"], world.ctx)
 
     fixture = world.ctx.table("fixture")
