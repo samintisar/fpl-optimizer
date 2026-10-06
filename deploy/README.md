@@ -4,10 +4,17 @@ Runs as your normal user with systemd **user** timers. Raw data lands in `~/fpl-
 
 ## One-time setup
 
-1. Clone and install:
+1. Clone and install. The repo is private, so give the server a read-only deploy key:
    ```bash
-   git clone https://github.com/samintisar/fpl-optimizer.git ~/fpl-optimizer
+   ssh-keygen -t ed25519 -f ~/.ssh/github_deploy -N "" -C "$USER@$(hostname) deploy"
+   printf "Host github.com\n    IdentityFile ~/.ssh/github_deploy\n    IdentitiesOnly yes\n" >> ~/.ssh/config
+   ```
+   Add `~/.ssh/github_deploy.pub` as a read-only deploy key from a machine where `gh` is logged in
+   (`gh repo deploy-key add <pubkey-file> --repo samintisar/fpl-optimizer`), then:
+   ```bash
+   git clone git@github.com:samintisar/fpl-optimizer.git ~/fpl-optimizer
    curl -LsSf https://astral.sh/uv/install.sh | sh
+   source "$HOME/.local/bin/env"   # put uv on PATH in this shell
    cd ~/fpl-optimizer && uv sync --locked
    ```
 2. Telegram alerts: create a bot with @BotFather, send it any message, then read your chat id from
@@ -24,9 +31,9 @@ Runs as your normal user with systemd **user** timers. Raw data lands in `~/fpl-
    ```bash
    .venv/bin/fplopt snapshot daily && ls raw/fpl/bootstrap-static
    ```
-5. Alert test (should fail and send a Telegram message):
+5. Alert test (should fail and send a Telegram message; the empty `ODDS_API_KEY` avoids spending odds credits):
    ```bash
-   FPLOPT_RAW_DIR=/proc/fplopt-alert-test .venv/bin/fplopt snapshot daily; echo "exit=$?"
+   ODDS_API_KEY= FPLOPT_RAW_DIR=/proc/fplopt-alert-test .venv/bin/fplopt snapshot daily; echo "exit=$?"
    ```
 6. Install and start the timers:
    ```bash
