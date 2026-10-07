@@ -596,10 +596,17 @@ def relaxation_bound(
     model = _Model(problem, params, scenario)
     model.lp.setObjective(model.objective() + terminal_value(problem, params, scenario))
     solver = _BulkHiGHS(mip=False, msg=False, threads=params.threads, timeLimit=params.time_limit)
-    stats = model.lp.solve(solver)
-    if str(stats.status_str) != "Optimal" or not stats.has_solution:
+    # Only the optimum is needed: run HiGHS without PuLP reading the solution back.
+    solver.createAndConfigureSolver(model.lp)
+    solver.buildSolverModel(model.lp)
+    solver.callSolver(model.lp)
+    h = model.lp.solverModel
+    import highspy
+
+    if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
         return math.inf
-    value = float(model.lp.objective.value())
+    # HiGHS minimised −(objective − constant) (see `solve_plan`).
+    value = float(model.lp.objective.constant) - float(h.getInfo().objective_function_value)
     return value + BOUND_MARGIN * max(1.0, abs(value))
 
 
