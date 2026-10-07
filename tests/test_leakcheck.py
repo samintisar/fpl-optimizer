@@ -1,6 +1,6 @@
 """Corrupt-the-future harness (PLAN §4): the harness itself, deliberately leaky builders it
-must catch, the registered features on the synthetic world (CI) and on the real data
-(`-m realdata`)."""
+must catch, the registered features and xP models on the synthetic worlds (CI) and on the
+real data (`-m realdata`)."""
 
 import time
 from pathlib import Path
@@ -8,13 +8,22 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from synthetic_season import synthetic_tables
 
+from fplopt.backtest.policies import RollPolicy
+from fplopt.backtest.probes import PROBES, run_probe
+from fplopt.backtest.rules import Rules
+from fplopt.backtest.start_states import template_state
+from fplopt.backtest.state import Holding, SquadState
 from fplopt.build.tables import TABLES
 from fplopt.features import FEATURES
+from fplopt.features.baseline import player_pool
 from fplopt.features.leakcheck import (
     Leak,
     check_leakage,
+    checked_builders,
     corrupt_future,
+    describe_builders,
     edge_deadlines,
     feature_fingerprint,
     load_tables,
@@ -24,6 +33,7 @@ from fplopt.features.leakcheck import (
     variant_order,
 )
 from fplopt.features.store import AsOfView, DataStore, FilesBlockedError, files_blocked
+from fplopt.models import MODELS
 from fplopt.seasons import HOLDOUT_SEASONS
 
 UTC_US = pd.DatetimeTZDtype("us", "UTC")
@@ -334,12 +344,166 @@ SYNTHETIC_DEADLINES = [(2023, 1), (2023, 10), (2024, 38), (2026, 1), (2026, 3), 
 
 
 def test_registered_features_do_not_leak_on_the_synthetic_world(built):
-    """Phase 2 'done when' (CI): every feature is byte-identical on the clean, corrupted
-    and truncated data at deadlines covering GW1, mid-season, the last GW, the player_gw
-    and snapshot pool paths and the as-of snapshot schedule."""
+    """Phase 2 'done when' (CI): every feature (and xP model) is byte-identical on the
+    clean, corrupted and truncated data at deadlines covering GW1, mid-season, the last GW,
+    the player_gw and snapshot pool paths and the as-of snapshot schedule."""
     deadlines = [deadline_of(built, season, gw) for season, gw in SYNTHETIC_DEADLINES]
     for seed in (0, 1):
         assert check_leakage(built, deadlines, seed=seed) == []
+
+
+def test_checked_builders_are_the_features_models_and_probes():
+    builders = checked_builders()
+    assert list(builders) == [
+        *FEATURES,
+        *(f"model:{name}" for name in MODELS),
+        *(f"probe:{name}" for name in PROBES),
+    ]
+    assert builders["model:rolling"] is MODELS["rolling"]
+    assert builders["probe:greedy_rolling_random0"] is PROBES["greedy_rolling_random0"]
+    assert describe_builders(builders) == (
+        f"{len(FEATURES)} feature(s), {len(MODELS)} model(s), {len(PROBES)} probe(s)"
+    )
+    assert describe_builders({"a": 1, "probe:x": 2, "probe:y": 3}) == "1 feature(s), 2 probe(s)"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "gameweeks"),
+    [
+        # Season boundary (rolling reads the previous season), a blank target (ep_next falls
+        # back to form) next to a double, mid-season and the last GW.
+        (
+            {"seasons": (2022, 2023), "blank": (2023, 10, 1), "double": (2023, 11, 4)},
+            [(2022, 38), (2023, 1), (2023, 2), (2023, 10), (2023, 11), (2023, 38)],
+        ),
+        ({"snapshots": False}, [(2023, 1), (2023, 20)]),  # pool from player_gw, ep_next 0
+    ],
+)
+def test_models_do_not_leak_on_the_synthetic_league(kwargs, gameweeks):
+    tables = synthetic_tables(**kwargs)
+    deadlines = [deadline_of(tables, season, gw) for season, gw in gameweeks]
+    builders = {name: b for name, b in checked_builders().items() if name.startswith("model:")}
+    assert check_leakage(tables, deadlines, seed=0, features=builders) == []
+    assert check_leakage(tables, deadlines[:2], seed=1) == []  # default: features + models
+
+
+def leaky_rolling(view: AsOfView) -> pd.DataFrame:
+    """xp_rolling's frame, but the rate from the player's last 5 matches in the whole
+    table (the future included)."""
+    honest = MODELS["rolling"](view)
+    rows = backdoor(view, "player_match").sort_values(["player_key", "kickoff_time"])
+    rate = rows.groupby("player_key")["total_points"].apply(lambda s: s.tail(5).mean())
+    return honest.assign(xp=honest["player_key"].map(rate).fillna(0.0).astype("float64"))
+
+
+def test_the_default_check_catches_a_leaky_model(monkeypatch):
+    tables = synthetic_tables()
+    monkeypatch.setitem(MODELS, "leaky", leaky_rolling)
+    deadlines = [deadline_of(tables, 2023, 10)]
+    leaks = check_leakage(tables, deadlines, seed=0)
+    assert {feature for feature, _ in flagged(leaks)} == {"model:leaky"}
+    assert ("model:leaky", "truncated") in flagged(leaks)
+
+
+# --- decision probes (fplopt.backtest.probes) ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "gameweeks"),
+    [
+        # Snapshots: GW1 (template from the pre-season snapshot), mid-season, a blank target
+        # next to a double, the last GW; the previous season feeds the rolling model.
+        (
+            {"seasons": (2022, 2023), "blank": (2023, 10, 1), "double": (2023, 11, 4)},
+            [(2023, 1), (2023, 2), (2023, 10), (2023, 11), (2023, 38)],
+        ),
+        # No snapshots: the template is refused at GW1 (no ownership), from GW2 it uses
+        # player_gw_ownership; ep_next is 0 everywhere.
+        ({"snapshots": False}, [(2023, 1), (2023, 2), (2023, 20)]),
+    ],
+)
+def test_probes_do_not_leak_on_the_synthetic_league(kwargs, gameweeks):
+    tables = synthetic_tables(**kwargs)
+    deadlines = [deadline_of(tables, season, gw) for season, gw in gameweeks]
+    probes = {name: b for name, b in checked_builders().items() if name.startswith("probe:")}
+    assert len(probes) == len(PROBES) == 3
+    assert check_leakage(tables, deadlines, seed=0, features=probes) == []
+    view = DataStore(tables=tables).as_of(deadlines[0])
+    frames = {name: probe(view) for name, probe in probes.items()}
+    if kwargs.get("snapshots", True):
+        assert all(len(frame) >= 35 for frame in frames.values())
+        assert (frames["probe:greedy_rolling_random0"]["kind"] == "held").sum() == 15
+    else:
+        refused = frames["probe:roll_rolling_template"]
+        assert refused["kind"].tolist() == ["refused"]
+        assert "no ownership" in refused["note"].iloc[0]
+        assert len(frames["probe:greedy_rolling_random0"]) >= 35
+
+
+def test_probes_are_refused_on_a_coverage_gap_and_still_compare():
+    tables = synthetic_tables(snapshots=False)
+    rows = tables["player_gw"]
+    club1 = (rows["season"] == 2023) & (rows["gw"] == 1) & (rows["team_key"] == 1)
+    tables["player_gw"] = rows[~club1].reset_index(drop=True)
+    deadlines = [deadline_of(tables, 2023, 1)]
+    view = DataStore(tables=tables).as_of(deadlines[0])
+    frame = PROBES["greedy_rolling_random0"](view)
+    assert frame["kind"].tolist() == ["refused"] and "coverage gap" in frame["note"].iloc[0]
+    probes = {f"probe:{name}": probe for name, probe in PROBES.items()}
+    assert check_leakage(tables, deadlines, seed=0, features=probes) == []
+
+
+def test_probes_refuse_the_holdout_season():
+    tables = synthetic_tables(seasons=(2025,))
+    view = DataStore(tables=tables).as_of(deadline_of(tables, 2025, 5))
+    for probe in PROBES.values():
+        with pytest.raises(ValueError, match="holdout"):
+            probe(view)
+
+
+def leaky_start(view: AsOfView, rules: Rules) -> SquadState:
+    """The template squad, but its first player swapped for the same-position player who
+    scores the most points in the target GW itself (an outcome after the deadline)."""
+    state = template_state(view, rules)
+    first = state.holdings[0]
+    season, gw = view.gameweek_for_deadline()
+    matches = backdoor(view, "player_match")
+    matches = matches[(matches["season"] == season) & (matches["gw"] == gw)]
+    points = matches.groupby("player_key")["total_points"].sum()
+    pool = player_pool(view)
+    candidates = pool[
+        (pool["element_type"] == first.element_type) & ~pool["player_key"].isin(state.player_keys)
+    ]
+    candidates = candidates.assign(points=candidates["player_key"].map(points).fillna(0))
+    best = candidates.sort_values(["points", "player_key"], ascending=[False, True]).iloc[0]
+    swapped = Holding(
+        int(best["player_key"]), first.element_type, int(best["team_key"]), first.price, first.price
+    )
+    return SquadState(state.season, state.gw_index, (swapped, *state.holdings[1:]), state.bank, 1)
+
+
+def leaky_probe(view: AsOfView) -> pd.DataFrame:
+    return run_probe(view, RollPolicy("rolling"), leaky_start)
+
+
+def test_the_default_check_catches_a_leaky_probe(monkeypatch):
+    tables = synthetic_tables()
+    monkeypatch.setitem(PROBES, "leaky", leaky_probe)
+    deadlines = [deadline_of(tables, 2023, 10)]
+    leaks = check_leakage(tables, deadlines, seed=0)
+    assert {feature for feature, _ in flagged(leaks)} == {"probe:leaky"}
+
+
+def test_run_leakage_check_logs_what_it_checks(tmp_path, built, caplog):
+    for name, df in built.items():
+        df.to_parquet(tmp_path / f"{name}.parquet")
+    with caplog.at_level("INFO", logger="fplopt.features.leakcheck"):
+        deadlines = run_leakage_check(tmp_path, n_deadlines=0)
+    builders = checked_builders()
+    counts = describe_builders(builders)
+    assert "probe(s)" in counts
+    assert f"{len(deadlines)} deadline(s)" in caplog.text and counts in caplog.text
+    assert f"x {len(builders)} builder(s) ({counts})" in caplog.text
 
 
 # --- deadline sampling -------------------------------------------------------------------

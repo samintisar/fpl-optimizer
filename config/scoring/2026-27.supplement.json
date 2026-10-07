@@ -1,0 +1,27 @@
+{
+  "_comment": "Hand-maintained rules the bootstrap-static API lacks (PLAN §3 Rules config), read together with 2026-27.json by fplopt.backtest.rules.load_rules. Every key without a _comment suffix is required.",
+  "season": "2026-27",
+  "scoring": {
+    "long_play_minutes": 60,
+    "saves_per_point": 3,
+    "goals_conceded_per_point": 2,
+    "defcon_threshold": {
+      "_comment": "Count needed for the defensive-contribution award: DEF clearances+blocks+interceptions+tackles (CBIT), MID/FWD CBIT + recoveries (CBIRT); GK not eligible (null).",
+      "GKP": null,
+      "DEF": 10,
+      "MID": 12,
+      "FWD": 12
+    }
+  },
+  "transfers": {
+    "hit_cost": 4,
+    "chip_week_ft": "retain",
+    "chip_week_ft_comment": "Banked FTs after a Wildcard/Free Hit GW: 'retain_plus_one' (kept, +1 as in any GW) or 'retain' (kept, no +1). Verified 2026-10-06 (#9): 795 top-800 2026/27 entry histories (507 played WC/FH in GW2-5) are all consistent with 'retain'; 'retain_plus_one' is contradicted by 27 (hits paid with FTs it says were left).",
+    "ft_topups": [],
+    "ft_topups_comment": "Extra FTs granted at a GW, as [{\"gw_index\": n, \"amount\": k}]. 2026/27 has no AFCON top-up (PLAN §3)."
+  },
+  "chips": {
+    "freehit_consecutive": false,
+    "freehit_consecutive_comment": "Free Hit may not be played in consecutive GWs (2025/26 rule; VERIFY for 2026/27, PLAN §11)."
+  }
+}

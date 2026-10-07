@@ -5,9 +5,10 @@ them in (`fplopt build TABLE|all`). A builder's `run(ctx)` returns the table and
 validates it against `schema` and writes `data/<name>.parquet` sorted by `sort_by`. A builder
 with `schema=None` writes its own output(s) and returns a frame only for logging.
 
-Rebuilding `player_match` or `player_dim` writes them without their Understat columns, so
-`build()` then also runs `understat` (which fills them) and `team_match` (built from
-`player_match`), and logs that it did.
+Rebuilding `player_season` also rebuilds `player_match` (its rows wait for the player's
+first listing, `DEPENDENTS`). Rebuilding `player_match` or `player_dim` writes them without
+their Understat columns, so `build()` then also runs `understat` (which fills them) and
+`team_match` (built from `player_match`). Both log what they added.
 
 `fplopt.build.tables.TABLES` describes every written table (kind, key); a test checks it
 matches what a full build writes.
@@ -88,12 +89,13 @@ ORDER: list[str] = [
     "gameweek",
     "gameweek_result",
     "schedule",
-    # player_gw needs player_snapshot (registration times); player_season needs player_gw.
+    # player_gw needs player_snapshot (registration times); player_season needs player_gw;
+    # player_match needs player_season (rows wait for the player's first listing).
     "player_snapshot",
-    "player_match",
     "player_gw",
     "player_gw_ownership",
     "player_season",
+    "player_match",
     "player_dim",
     "understat",
     "team_match",
@@ -103,6 +105,9 @@ ORDER: list[str] = [
 ]
 
 
+# Tables built from another table's rows: rebuilding the key also rebuilds the values
+# (player_match rows wait for the player's first listing in player_season, #24).
+DEPENDENTS: dict[str, tuple[str, ...]] = {"player_season": ("player_match",)}
 # Tables whose rebuild clears columns the `understat` builder fills, and what then reruns.
 UNDERSTAT_TARGETS = ("player_match", "player_dim")
 UNDERSTAT_AND_DEPENDENTS = ("understat", "team_match")
@@ -117,6 +122,11 @@ def _resolve(names: Iterable[str]) -> list[str]:
             requested.add(name)
         else:
             raise ValueError(f"unknown table {name!r}; valid: {', '.join(['all', *ORDER])}")
+    for source in [name for name in ORDER if name in requested]:
+        added = [name for name in DEPENDENTS.get(source, ()) if name not in requested]
+        if added:
+            log.info("also rebuilding %s: its rows depend on %s", ", ".join(added), source)
+            requested.update(added)
     if requested.intersection(UNDERSTAT_TARGETS):
         added = [name for name in UNDERSTAT_AND_DEPENDENTS if name not in requested]
         if added:

@@ -1,8 +1,12 @@
 """Corrupt-the-future harness (PLAN §4; Phase 2 plan, Task 4).
 
-For a deadline, every feature is computed three times, each from its own `DataStore`, in a
-per-deadline random order (`variant_order`, seeded), so a builder that keeps state between
-calls cannot rely on always seeing the clean data first:
+What is checked (`checked_builders`): every registered feature, as 'model:<name>' every
+xP model (`fplopt.models.MODELS`) and as 'probe:<name>' every backtest decision probe
+(`fplopt.backtest.probes.PROBES`: a start state plus a policy decision); all take one
+`AsOfView`. For a deadline, each is computed
+three times, each from its own `DataStore`, in a per-deadline random order (`variant_order`,
+seeded), so a builder that keeps state between calls cannot rely on always seeing the clean
+data first:
 - **clean**: the tables as they are;
 - **corrupted** (`corrupt_future`): every row with `available_at >= deadline` gets random
   values of the same dtype in every column except `available_at` (keys, event/snapshot
@@ -416,18 +420,49 @@ def variant_order(seed: int, i: int) -> tuple[str, ...]:
     return tuple(RUNS[j] for j in rng.permutation(len(RUNS)))
 
 
+MODEL_PREFIX = "model:"
+PROBE_PREFIX = "probe:"
+
+
+def checked_builders() -> dict[str, FeatureBuilder]:
+    """Everything the check runs by default: the FEATURES under their own names, the xP
+    MODELS as 'model:<name>' and the backtest decision PROBES as 'probe:<name>'. Every entry
+    takes one AsOfView and returns a DataFrame. `fplopt.models` and `fplopt.backtest` are
+    imported here, not at module import: they import `fplopt.features`, which must not
+    import them back."""
+    from fplopt.backtest.probes import PROBES
+    from fplopt.models import MODELS
+
+    return {
+        **FEATURES,
+        **{f"{MODEL_PREFIX}{name}": model for name, model in MODELS.items()},
+        **{f"{PROBE_PREFIX}{name}": probe for name, probe in PROBES.items()},
+    }
+
+
+def describe_builders(builders: Mapping[str, Any]) -> str:
+    """Counts per kind, e.g. '7 feature(s), 2 model(s)': the kind is the name's prefix before
+    ':' ('feature' for names without one)."""
+    counts: dict[str, int] = {}
+    for name in builders:
+        kind = name.split(":", 1)[0] if ":" in name else "feature"
+        counts[kind] = counts.get(kind, 0) + 1
+    return ", ".join(f"{n} {kind}(s)" for kind, n in counts.items()) or "nothing"
+
+
 def check_leakage(
     tables: Mapping[str, pd.DataFrame],
     deadlines: Sequence[Any],
     seed: int = 0,
     features: Mapping[str, FeatureBuilder] | None = None,
 ) -> list[Leak]:
-    """For each deadline compute `features` (default: the registry) on the clean,
-    corrupted and truncated tables (each variant from a fresh DataStore; the clean one is
-    shared across deadlines), in `variant_order`, with `files_blocked()` active; every
-    difference is a Leak. A feature that fails on the clean data is reported too (variant
-    'clean')."""
-    features = FEATURES if features is None else features
+    """For each deadline compute `features` (default: `checked_builders()`: the feature
+    registry, the xP models as 'model:<name>' and the decision probes as 'probe:<name>') on
+    the clean, corrupted and truncated tables (each variant from a fresh DataStore; the
+    clean one is shared across deadlines), in `variant_order`, with `files_blocked()`
+    active; every difference is a Leak. A builder that fails on the clean data is reported
+    too (variant 'clean')."""
+    features = checked_builders() if features is None else features
     clean_store = DataStore(tables=tables)
     leaks: list[Leak] = []
     with files_blocked("while the leakage check runs (features read only the view)"):
@@ -544,36 +579,38 @@ def sample_deadlines(
 def run_leakage_check(
     data_dir: Path | str, n_deadlines: int = DEFAULT_DEADLINES, seed: int = 0
 ) -> list[pd.Timestamp]:
-    """`fplopt check leakage`: check the registered features on `data_dir` at the edge
-    deadlines plus n sampled ones (`sample_deadlines`); raises LeakageError listing the
-    leaks. Returns the deadlines checked."""
+    """`fplopt check leakage`: check `checked_builders()` (features, xP models, probes) on
+    `data_dir` at the edge deadlines plus n sampled ones (`sample_deadlines`); raises
+    LeakageError listing the leaks. Returns the deadlines checked."""
     started = time.perf_counter()
     tables = load_tables(data_dir)
     deadlines = sample_deadlines(tables, n_deadlines, seed)
     if not deadlines:
         # Checking nothing must not read as a pass.
         raise ValueError("no eligible deadlines: the leakage check was not performed")
+    builders = checked_builders()
     log.info(
-        "leakage check: %d deadline(s) from %s to %s, %d feature(s), seed %d",
+        "leakage check: %d deadline(s) from %s to %s, %s, seed %d",
         len(deadlines),
         deadlines[0],
         deadlines[-1],
-        len(FEATURES),
+        describe_builders(builders),
         seed,
     )
-    leaks = check_leakage(tables, deadlines, seed=seed)
+    leaks = check_leakage(tables, deadlines, seed=seed, features=builders)
     elapsed = time.perf_counter() - started
     if leaks:
         for leak in leaks:
             log.error("leak: %s", leak)
         raise LeakageError(
-            f"{len(leaks)} leak(s) in {len({leak.feature for leak in leaks})} feature(s) at "
+            f"{len(leaks)} leak(s) in {len({leak.feature for leak in leaks})} builder(s) at "
             f"{len({leak.deadline for leak in leaks})} deadline(s); first: {leaks[0]}"
         )
     log.info(
-        "leakage check passed: %d deadline(s) x %d feature(s) x %d variants in %.0f s",
+        "leakage check passed: %d deadline(s) x %d builder(s) (%s) x %d variants in %.0f s",
         len(deadlines),
-        len(FEATURES),
+        len(builders),
+        describe_builders(builders),
         len(VARIANTS),
         elapsed,
     )
