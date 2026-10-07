@@ -16,8 +16,8 @@ see the future and statistics that can't be fooled by one lucky season.
 
 > **Status:** work in progress. Phases 0–3 of the nine phases (0–8) are done: a live data
 > archiver, a 10-season point-in-time data warehouse, leakage tests, and a backtester with paired
-> statistical evaluation. The MILP optimizer and the real models come next. No live recommendations until a pre-registered
-> holdout test passes ([roadmap](#roadmap)).
+> statistical evaluation. The MILP optimizer and the real models come next. No live
+> recommendations until a pre-registered holdout test passes ([roadmap](#roadmap)).
 
 ## Highlights
 
