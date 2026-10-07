@@ -378,7 +378,8 @@ Horizon, decay and FT value are confounded — tune them jointly.
   - FT value and money in the bank follow open-fpl-solver's convention (checked by the reference check).
   - Bench uses the fixed fallback weights until Phase 5's minutes model.
   - Chip terminal values are config per chip (0 once the window closes inside the horizon) until backtest-estimated.
-  - Top-3 cuts exclude plan #1's first-GW transfer set.
+  - Top-3 cuts exclude plan #1's first-GW transfer set. Plans #2–3 are re-solved within plan #1's chip scenario (other moves now, given the winning chip plan; every scenario's objective is reported alongside). The roll plan uses the same scenario, minus a Wildcard/Free Hit in the first GW (a transfer chip with no transfers is wasted).
+  - Chip terminal values are added undecayed (the value of holding the chip at the horizon's end, in this-GW points); placeholder defaults WC 6, FH 4, BB 4, TC 3. A Free Hit GW credits `itb_value` on the bank carried past it, not the FH squad's leftover.
   - Prices are held fixed over the horizon.
 
 ---

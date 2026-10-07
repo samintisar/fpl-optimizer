@@ -33,10 +33,12 @@ def _frozen(mapping: Mapping) -> Mapping:
 
 DEFAULT_FT_VALUE = MappingProxyType({2: 2.0, 3: 1.6, 4: 1.3, 5: 1.1})
 DEFAULT_BENCH_WEIGHTS = (0.03, 0.21, 0.06, 0.002)
-# Terminal value per chip name of an unused chip whose window extends past the horizon
-# (Phase 4 plan, Decisions: a placeholder for PLAN §7's "estimated from backtest
-# distributions"; used by the chip scenarios of Task 2).
-DEFAULT_CHIP_VALUE = MappingProxyType({"wildcard": 0.0, "freehit": 0.0, "bboost": 0.0, "3xc": 0.0})
+# Terminal value (points, undecayed) per chip name of an unused chip whose window extends
+# past the horizon (`chips.terminal_value`). PLACEHOLDERS, not estimates: rough guesses at
+# what a well-timed chip adds over not playing it (Phase 4 plan, Decisions; PLAN §7 wants
+# them estimated from backtest distributions later). A chip is played inside the horizon
+# only if it beats holding it by at least this much.
+DEFAULT_CHIP_VALUE = MappingProxyType({"wildcard": 6.0, "freehit": 4.0, "bboost": 4.0, "3xc": 3.0})
 # Candidates kept per position (element_type) by horizon xP and by horizon xP per price.
 DEFAULT_PRUNE_N = MappingProxyType({1: 10, 2: 30, 3: 30, 4: 15})
 

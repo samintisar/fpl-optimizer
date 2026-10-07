@@ -439,8 +439,6 @@ def test_fix_and_exclude_first_gw() -> None:
     second = solve_plan(problem, params, exclude_first_gw=[first])
     assert (frozenset(second.first.transfers_out), frozenset(second.first.transfers_in)) != first
     assert second.objective <= best.objective * (1 + params.mip_gap) + 1e-6
-    with pytest.raises(NotImplementedError):
-        solve_plan(problem, params, chips={0: "bboost"})
 
 
 def test_same_input_same_plan() -> None:
@@ -451,7 +449,7 @@ def test_same_input_same_plan() -> None:
         state, pool.sample(frac=1, random_state=1), xp.sample(frac=1, random_state=2), RULES, params
     )
     assert a == b
-    p, q = optimize(a, params), optimize(b, params)
+    p, q = optimize(a, params, chips=False).best, optimize(b, params, chips=False).best
     assert p.gws == q.gws and p.objective == q.objective
 
 
