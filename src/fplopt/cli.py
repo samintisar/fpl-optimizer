@@ -299,8 +299,14 @@ def validate_backtest(
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
     if args.command == "compare":
-        if args.a == args.b:
-            parser.error(f"--a and --b are the same policy ({args.a})")
+        # Equal specs, or specs that build the same policy (a default spelled out, e.g.
+        # greedy:rolling vs greedy:rolling:threshold=1.0): run_grid needs distinct names.
+        try:
+            same = args.a == args.b or args.a.build().name == args.b.build().name
+        except ValueError as exc:
+            parser.error(f"bad policy: {exc}")
+        if same:
+            parser.error(f"--a and --b are the same policy ({args.a} vs {args.b})")
         if args.stride is None:
             args.stride = args.k  # non-overlapping per-decision windows
         if min(args.k, args.stride, args.block_length, args.n_boot) < 1:

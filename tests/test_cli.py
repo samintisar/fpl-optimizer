@@ -515,6 +515,11 @@ ROLL_VS_GREEDY = ["--a", "roll:rolling", "--b", "greedy:rolling"]
         (["run", "--seasons", "2023", "--policy", "roll", "--horizon", "3"], "only for --policy"),
         (["run", "--seasons", "2023", "--horizon", "0"], "horizon >= 1"),
         (["compare", "--seasons", "2023", "--a", "roll:rolling", "--b", "roll:rolling"], "same"),
+        (  # a default spelled out builds the same policy (same name)
+            ["compare", "--seasons", "2023", "--a", "greedy:rolling"]
+            + ["--b", "greedy:rolling:threshold=1.0"],
+            "same policy",
+        ),
         (["compare", "--seasons", "2023", *ROLL_VS_GREEDY, "--k", "0"], "must be >= 1"),
         (["compare", "--seasons", "2023", *ROLL_VS_GREEDY, "--stride", "0"], "must be >= 1"),
         (["compare", "--seasons", "2023", "--a", "greedy:x", "--b", "roll:rolling"], "unknown xP"),
