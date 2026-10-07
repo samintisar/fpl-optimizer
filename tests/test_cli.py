@@ -681,3 +681,49 @@ def test_start_gw_of_keeps_fallback_starts_with_their_spec():
         "random0@20": 20,
         "random1@20": 20,
     }
+
+
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("highspy") is None, reason="needs the optimize extra"
+)
+def test_optimize_bench_end_to_end(tmp_path, monkeypatch, league, capsys):
+    """`fplopt optimize bench` on the synthetic league: one deadline × template/random ×
+    both xP models, the exhaustive chip search on the first case, the pruning variants."""
+    import pandas as pd
+
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+    out = tmp_path / "bench"
+    argv = ["optimize", "bench", "--deadlines", "1", "--horizon", "2", "--all-chips", "1"]
+    argv += ["--prune-n", "5,10,10,6"]  # small pools: synthetic instances are hard for HiGHS
+    assert cli.main([*argv, "--out", str(out)], settings=make_settings(tmp_path)) == 0
+    assert alerts == []
+    cases = pd.read_csv(out / "cases.csv")
+    assert len(cases) == 4
+    assert set(cases["xp"]) == {"ep_next", "rolling"}
+    assert set(cases["season"]) <= {2022, 2023}
+    assert (cases["n_solves"] <= cases["n_scenarios"]).all()
+    assert (cases["chips_objective"] >= cases["objective"] - 1e-6).all()
+    assert cases["bound_matches_all"].iloc[0] and cases["bound_matches_all"].iloc[1:].isna().all()
+    prune = pd.read_csv(out / "prune.csv")
+    assert len(prune) == 4 * 5 and (prune["loss"] >= 0).all()
+    assert cases["chips_prune_loss"].iloc[0] >= -1e-6
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["summary"]["n_cases"] == 4
+    assert summary["summary"]["chips_all"]["matches"] == 1
+    assert summary["config"]["params"]["horizon"] == 2
+    printed = capsys.readouterr().out
+    assert "chips, bound search" in printed and "Pruning" in printed and "default" in printed
+    # --prune-n sets the planner's pool; bad values are usage errors.
+    argv = ["optimize", "bench", "--deadlines", "1", "--horizon", "1", "--no-prune-study"]
+    out2 = tmp_path / "bench2"
+    code = cli.main(
+        [*argv, "--prune-n", "3,6,6,4", "--out", str(out2)], settings=make_settings(tmp_path)
+    )
+    assert code == 0
+    config = json.loads((out2 / "summary.json").read_text(encoding="utf-8"))["config"]
+    assert config["params"]["prune_n"] == {"1": 3, "2": 6, "3": 6, "4": 4}
+    assert not (out2 / "prune.csv").read_text(encoding="utf-8").strip()
+    with pytest.raises(SystemExit):
+        cli.main([*argv, "--prune-n", "3,6,6"], settings=make_settings(tmp_path))

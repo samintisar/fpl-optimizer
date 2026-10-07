@@ -337,7 +337,7 @@ ft[t+1] ≤ ft[t] − (Σ buy − hits) + 1;  1 ≤ ft ≤ cap        # cap from
 
 ### Chips
 - Chip availability is per chip **and per window** (from the rules config): a set-1 chip not used by the GW19 deadline is lost. Free Hit not in consecutive GWs.
-- **Solve by scenario:** enumerate candidate chip assignments within the horizon (no chip; each available chip in each eligible GW; chip pairs only where both are available), fix them, solve each sub-MILP in parallel, keep the best. Modelling chips as free binaries was reported to stall the solver (85% gap after 30 s vs ~5 s with chips fixed).
+- **Solve by scenario:** enumerate candidate chip assignments within the horizon (no chip; each available chip in each eligible GW; chip pairs only where both are available), fix them, solve each sub-MILP, keep the best. Scenarios are searched best-first by upper bound (LP relaxation, or a WC/FH base's bound + a Triple Captain/Bench Boost bound) and only those that could beat the best plan found are solved: the same plan as solving all of them, ~2 MILPs instead of ~205 (see *Solve times* below). Modelling chips as free binaries was reported to stall the solver (85% gap after 30 s vs ~5 s with chips fixed).
 - **Unused chips have terminal value:** the expected best use of that chip in the rest of its window beyond the horizon (zero once the window closes), estimated from backtest distributions. A chip is played now only if it beats waiting.
 
 ### Objective
@@ -365,14 +365,37 @@ Horizon, decay and FT value are confounded — tune them jointly.
 
 ### Practicalities
 - **Rolling horizon:** plan 6 GWs, execute only this GW, re-solve next week. Warm-start from last week's plan shifted by one GW.
-- **Pruning:** owned players + top-N by xP per position, a minimum expected-minutes floor, an xP-per-price cutoff, and dominance pruning (cheaper and higher xP in every GW).
+- **Pruning:** owned players + top-N by horizon xP and by xP per price per position (20/60/60/30 GK/DEF/MID/FWD), and dominance pruning (cheaper and ≥ xP in every GW, with the dominators spanning ≥ the position's squad slots + 5 clubs so the club cap can't block them all). A minimum expected-minutes floor waits for Phase 5's minutes model.
 - **Top 3 plans:** solve → add no-good cut excluding that GW's transfer set → re-solve (×2). Plus the "roll transfer" plan as baseline; show each plan's xP gain vs roll over the horizon.
 - **Solve budget:** gap-based stopping (start: 0.5%) with fixed thread count for reproducibility; a generous time cap only as a safety net. Record solve time and final gap per GW.
 - **Reference check:** open-fpl-solver (Apache-2.0) is the external reference. A differential test feeds identical xP to both and checks objectives match on no-chip cases.
 - **Optimizer's curse:** the chosen plan's predicted gain is biased upward. Log predicted vs realized gain of executed transfers (backtest and live); a slope < 1 means raising the hit margin / FT value or shrinking later-GW xP harder.
 - **Sensitivity analysis (Phase 8):** re-solve N times with xP perturbed by **estimate uncertainty** from the component models (not outcome noise); report how often each move appears ("robustness %") and backtest "most frequent plan" as a policy.
 - **Uncertain fixtures (Phase 8):** weight scenarios for possible blanks/doubles.
-- **VERIFY:** solve times with chip scenarios over 6 GWs; benchmark early.
+- **Solve times** (#10, `fplopt optimize bench`, 2026-10-07; 40 cases = 10 deadlines (2021/22 GW2, 33; 2022/23 GW3, 24; 2023/24 GW1, 20; 2024/25 GW7, 11; 2026/27 GW2, 5) × template/random start × ep_next/rolling xP; 6-GW horizon, no chips used yet (205 scenarios, 173 at GW1); defaults; one thread, one process; median / p90 / max):
+  | | median | p90 | max |
+  |---|---|---|---|
+  | model build (PuLP) | 0.06 s | 0.13 s | 0.18 s |
+  | no-chip solve (HiGHS, gap 0.5%) | 1.4 s | 6.1 s | 31 s |
+  | final gap | 0 | 0.36% | 0.50% |
+  | top-3 + roll plan | 11 s | 28 s | 105 s |
+  | chips, bound search | 14 s | 30 s | 54 s |
+  | — LP relaxations computed / time | 49 / 10 s | 73 / 18 s | 106 / 26 s |
+  | — scenario MILPs solved / time | 2 / 3.6 s | 3 / 13 s | 3 / 29 s |
+  - Solving every chip scenario took 107–750 s per deadline (5 instances, earlier code); the bound search returns the same plan in 5–15 s there. Same plan as the exhaustive search on every instance checked: those 5; 8 benchmark cases with a 4-GW horizon (`--all-chips`, 2021/22 GW28 and 2022/23 GW35: exhaustive 37–340 s, bound 2.6–16 s); 2 `-m realdata` tests (3-GW); 10 synthetic test instances. Guarantee: within `mip_gap` of the best plan over all scenarios, as the exhaustive search.
+  - PuLP's per-column/row hand-over to highspy took ~0.2 s per model (longer than most solves); a bulk hand-over (three array calls, identical model) cut it to ~0.02 s. Model build is not the bottleneck, so no switch to highspy's API.
+  - Hard cases are early-season and ep_next instances (ep_next is one number per fixture, so many plans tie); `rolling` mid-season solves in ~0.2 s. With top-N 10/30/30/15 the chip search takes 8.7 / 16 / 34 s.
+  - Parallel scenario solves: not needed (~2 MILPs per deadline); backtests parallelise over (season, start) instead.
+- **Pruning loss** (same 40 cases, no chips, gap 1e-4; loss = best variant's objective − this one's; "none" hits the 60 s limit in 5 cases):
+  | pool | candidates (median) | solve median / p90 | loss median / max | cases > 0.1 |
+  |---|---|---|---|---|
+  | none (every pool player) | 662 | 18 s / 60 s | — | — |
+  | dominance only | 204 | 1.6 s / 20 s | 0 / 0.015 | 0 |
+  | **20/60/60/30 + dominance (default)** | 131 | 2.0 s / 15 s | 0 / 0.21 | 2 |
+  | 10/30/30/15 + dominance | 99 | 1.2 s / 15 s | 0 / 1.0 | 4 |
+  | 5/15/15/8 + dominance | 66 | 0.6 s / 11 s | 0 / 1.3 | 7 |
+  - The first dominance rule (≥ squad-slots dominators, any club) lost up to 6.6 points: at GW1/GW2 the dominators of a mid-priced player were often all of one club. Losses > 0.1 left are GW1/GW2 ep_next squad builds.
+  - With chips (21 cases, gap 1e-4) the default pool loses median 0, max 0.22 points vs dominance-only pruning (the same winning chip plan in 20/21).
 - **Phase 4 decisions** (plan `docs/superpowers/plans/2026-10-07-phase-4-optimizer.md`):
   - Hits sit inside the decay sum, like the points they cost.
   - FT value and money in the bank follow open-fpl-solver's convention (checked by the reference check).
@@ -450,8 +473,10 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 - Free-transfer reconstruction rules from public transfer history, and the 2025/26 AFCON top-up (GW and amount; absent from the API). (WC/FH effect resolved below.)
 - Free Hit consecutive-GW restriction in 2026/27.
 - FPL-Core-Insights components reproduce FPL CBIT/CBIRT (2026/27 GW1–5) before setting defcon `k`, `r`.
-- Solver performance with chip scenarios over a 6-GW horizon.
 - Go-live test size on a single season (~0.14 at nominal 0.10 with the block bootstrap, §5): choose a size-correct test (e.g. a HAC t-test with t critical values, or calibrate the threshold by A/A placebo) and how chips enter it, before Phase 6.
+
+**Resolved (2026-10-07):**
+- Solver performance with chip scenarios over a 6-GW horizon → §7 *Solve times* (#10).
 
 **Resolved (2026-10-06):**
 - WC/FH GW effect on banked FTs (2026/27): FTs kept, no +1 → §3 *Rules config*, `chip_week_ft: retain` (#9).
@@ -490,3 +515,4 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-06 | Backtester: outcomes read at lockdown via `as_of`; develop chip windows on `gw_index`; per-decision states from the baseline's own run; greedy never takes hits. | Same single access path as features; GW numbering gaps (2019/20, 2022/23); a neutral, reproducible reference. |
 | 2026-10-06 | Per-decision windows don't overlap (stride = k, one grid per season); bootstrap blocks counted in GWs; 80% two-sided CIs; `realized@xg` companion rows. | Overlapping windows made the bootstrap reject ~17% at nominal 10%; the 80% lower bound is the gate's one-sided α = 0.10; same-sample sign check. |
 | 2026-10-07 | Optimizer: PuLP on in-process HiGHS (1 thread, gap stop), chips by fixed scenarios, hits decayed, open-fpl-solver objective conventions, parallel backtests by (season, start). | PLAN §2/§7; deterministic decisions for the leakage check; like-for-like reference check; hundreds of solves per backtest. |
+| 2026-10-07 | Chip scenarios searched best-first by LP/derived upper bounds (same plan as solving all); bulk PuLP→highspy hand-over; club-aware dominance pruning; top-N 20/60/60/30. | #10 benchmark: 107–750 s → median 14 s per deadline; old dominance lost up to 6.6 pts, 10/30/30/15 up to 1.0. |

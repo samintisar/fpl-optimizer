@@ -10,10 +10,12 @@ missing or older than H hours, default 36: a dead-man's switch for the timers),
 registered features, xP models and decision probes on data/ at a fixed list of edge deadlines
 plus N sampled ones, default 12, outside the holdout), `fplopt backtest run|compare` (season
 replays and paired policy comparisons on data/, written to results/ and logged to
-results/experiments.csv; see `_backtest_run`, `_backtest_compare`). Every job
-gets a `Context`; failures are logged and alerted to Telegram, and the exit code is 1.
-Bad backtest arguments (season syntax, holdout seasons, `ep_next` before 2021/22, seasons
-without data) are usage errors: exit 2, no alert.
+results/experiments.csv; see `_backtest_run`, `_backtest_compare`), `fplopt optimize bench
+[--deadlines N] [--seed S] [--horizon H] [--all-chips K] [--no-prune-study]` (optimizer
+solve times, chip scenario search and pruning variants on real deadlines, written to
+results/; `_optimize_bench`). Every job gets a `Context`; failures are logged and alerted
+to Telegram, and the exit code is 1. Bad backtest arguments (season syntax, holdout
+seasons, `ep_next` before 2021/22, seasons without data) are usage errors: exit 2, no alert.
 After a successful `snapshot daily|tick`, HEALTHCHECK_PING_URL (if set) gets a best-effort
 GET, for an external dead-man's switch that also notices the server being down.
 """
@@ -741,6 +743,49 @@ def _backtest_compare(c: Context) -> object:
     return summary
 
 
+# --- optimizer --------------------------------------------------------------------------------
+
+
+def _optimize_bench(c: Context) -> object:
+    """`fplopt optimize bench`: solve times, gaps, the chip scenario search and the pruning
+    variants on real deadlines (`fplopt.optimize.bench`); prints the summary and writes
+    cases.csv, prune.csv and summary.json to --out."""
+    from fplopt.optimize import OptimizerParams
+    from fplopt.optimize.bench import run_bench, summarize, summary_text
+
+    args = c.args
+    if min(args.deadlines, args.horizon) < 1 or args.all_chips < 0:
+        raise ValueError("--deadlines and --horizon must be >= 1, --all-chips >= 0")
+    store = _backtest_store(c)
+    out = _out_dir(args)
+    began = time.perf_counter()
+    result = run_bench(
+        store,
+        deadlines=args.deadlines,
+        seed=args.seed,
+        params=OptimizerParams(horizon=args.horizon)
+        if args.prune_n is None
+        else OptimizerParams(horizon=args.horizon, prune_n=args.prune_n),
+        all_chips=args.all_chips,
+        prune_study=args.prune_study,
+        progress=lambda line: print(line, flush=True),
+    )
+    summary = summarize(result)
+    runtime = time.perf_counter() - began
+    out.mkdir(parents=True, exist_ok=True)
+    result.cases.to_csv(out / "cases.csv", index=False)
+    result.prune.to_csv(out / "prune.csv", index=False)
+    payload = {
+        "command": args.command_line,
+        "config": result.config,
+        "runtime_seconds": round(runtime, 1),
+        "summary": summary,
+    }
+    _write_json(out / "summary.json", payload)
+    print(f"\n{summary_text(summary)}\n\n({runtime:.0f}s) Written to {out}", flush=True)
+    return summary
+
+
 JOBS: dict[str, Job] = {
     "snapshot daily": lambda c: jobs.run_daily(
         c.store, c.fpl, c.odds, football_data=FootballDataClient(c.http)
@@ -760,6 +805,7 @@ JOBS: dict[str, Job] = {
     "check leakage": _check_leakage,
     "backtest run": _backtest_run,
     "backtest compare": _backtest_compare,
+    "optimize bench": _optimize_bench,
 }
 
 
@@ -807,7 +853,52 @@ def build_parser() -> argparse.ArgumentParser:
         "--seed", type=int, default=0, metavar="S", help="leakage only: corruption seed"
     )
     _add_backtest_parsers(groups)
+    _add_optimize_parsers(groups)
     return parser
+
+
+def _prune_n(text: str) -> dict[int, int]:
+    """`10,30,30,15` -> {1: 10, 2: 30, 3: 30, 4: 15} (GK, DEF, MID, FWD)."""
+    try:
+        values = [int(v) for v in text.split(",")]
+    except ValueError:
+        values = []
+    if len(values) != 4 or min(values) < 0:
+        raise argparse.ArgumentTypeError(f"--prune-n: expected 4 counts >= 0, got {text!r}")
+    return dict(zip((1, 2, 3, 4), values, strict=True))
+
+
+def _add_optimize_parsers(groups: Any) -> None:
+    optimize = groups.add_parser("optimize", help="the MILP planner")
+    commands = optimize.add_subparsers(dest="command", required=True)
+    bench = commands.add_parser("bench", help="solve-time and pruning benchmark (#10)")
+    bench.add_argument("--deadlines", type=int, default=10, help="real deadlines (10)")
+    bench.add_argument("--seed", type=int, default=0, help="deadline/random-start seed (0)")
+    bench.add_argument("--horizon", type=int, default=6, help="planning horizon in GWs (6)")
+    bench.add_argument(
+        "--prune-n",
+        type=_prune_n,
+        default=None,
+        metavar="GK,DEF,MID,FWD",
+        help="top-N pruning per position (default: OptimizerParams' 20,60,60,30)",
+    )
+    bench.add_argument(
+        "--all-chips",
+        type=int,
+        default=0,
+        metavar="K",
+        help="also run the exhaustive chip scenario search (and the chip search at a tight "
+        "gap per pool) on the first K cases (default 0; 2-50 min per case)",
+    )
+    bench.add_argument(
+        "--prune-study",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="solve every pruning variant at a tight gap (default on)",
+    )
+    bench.add_argument(
+        "--out", default=None, help="output directory (default results/<UTC time>-bench)"
+    )
 
 
 def _add_backtest_parsers(groups: Any) -> None:

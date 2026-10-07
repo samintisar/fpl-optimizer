@@ -49,8 +49,9 @@ Phase 4 is done when (PLAN §9):
 - **Pruning:**
   - Keep owned players.
   - Per position, keep the top-N by horizon xP and the top-N by horizon xP per price.
-  - Dominance pruning (cheaper and ≥ xP in every horizon GW, same position, with the number of dominators kept ≥ the slots that position could need).
-  - Defaults: N = 10/30/30/15 (GK/DEF/MID/FWD); tune by the benchmark.
+  - Dominance pruning (cheaper and ≥ xP in every horizon GW, same position, with the dominators kept spanning ≥ the slots that position could need + 5 clubs, so the club cap can't block them all; Task 3).
+  - Defaults: N = 20/60/60/30 (GK/DEF/MID/FWD), set by the Task 3 benchmark (was 10/30/30/15).
+- **Chip scenario search (Task 3):** best-first by upper bounds (LP relaxation, or the WC/FH base's bound + a Triple Captain/Bench Boost bound); only scenarios that could beat the incumbent are solved, so the result equals the exhaustive search (`scenario_search="all"`).
 - **Parallel backtests:** `run_grid` takes `jobs` (process pool over (season, start state); each worker opens its own `DataStore` and `Caches`). Results are identical to `jobs=1` because every piece is deterministic.
 
 ---
@@ -119,11 +120,11 @@ Phase 4 is done when (PLAN §9):
 
 ### Task 3: Benchmark and pruning defaults (#10) (wave B, after Task 2's model is in; may run with Task 4)
 **Files:** `src/fplopt/optimize/bench.py`, CLI `fplopt optimize bench`.
-- [ ] On real data, from template and random states at 10+ deadlines across seasons (ep_next and rolling xP), measure model-build and solve time and final gap:
+- [x] On real data, from template and random states at 10+ deadlines across seasons (ep_next and rolling xP), measure model-build and solve time and final gap:
   - no chips / all chip scenarios / top-3;
   - pruning N variations;
   - the objective loss from pruning vs a larger pool.
-- [ ] Pick the defaults. Record the numbers in PLAN §7 and close #10.
+- [x] Pick the defaults. Record the numbers in PLAN §7 and close #10.
 
 ### Task 4: Reference check against open-fpl-solver (wave B; needs Task 1)
 **Files:** `dev/reference_check.py`, `dev/README.md` (how to run), optional `tests/test_optimize_reference.py` (skipped unless `OPEN_FPL_SOLVER_DIR` is set).
