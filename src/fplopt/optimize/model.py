@@ -1,17 +1,20 @@
-"""The transfer-planning MILP for one chip scenario (Phase 4 plan, Decisions and Task 1;
+"""The transfer-planning MILP for one chip scenario (Phase 4 plan, Decisions and Tasks 1-2;
 PLAN §7). Built with PuLP and solved by HiGHS in-process (highspy, no temp files).
 
 Indices: candidate i (`PlanInput.players`, sorted by `player_key`), horizon GW t (0 = the
 GW being decided). Money is int tenths of £m; prices are fixed over the horizon.
 
 Variables (binary unless noted):
-- `squad[i,t]`; `buy[i,t]` (buyable players); `sell_first[i,t]` (owned players: the first
-  sale, at the selling price); `sell_later[i,t]` (a sale at the buy price: a player bought,
-  or bought back, within the plan);
+- `squad[i,t]` (the persistent squad); `buy[i,t]` (buyable players); `sell_first[i,t]`
+  (owned players: the first sale, at the selling price); `sell_later[i,t]` (a sale at the
+  buy price: a player bought, or bought back, within the plan). No buy/sell variables in a
+  Free Hit GW;
 - `lineup[i,t]`, `captain[i,t]`, `bench[i,t,k]` (k = 0 for goalkeepers, 1..3 outfield);
 - `bank[t]` ≥ 0 (continuous); per GW after the first, `fts[t,s]` for s = 1..cap (one
   binary per FT state, `ft[t] = Σ s · fts[t,s]`); per normal GW `hits[t]` ≥ 0 (integer)
-  and `take_hits[t]`; per transition `ft_capped[t]`.
+  and `take_hits[t]`; per transition `ft_capped[t]`;
+- Free Hit GW t only: `fh_squad[i,t]`, `fh_buy[i,t]`, `fh_sell_first[i,t]`,
+  `fh_sell_later[i,t]` and `fh_bank[t]` ≥ 0, the one-GW squad (see *Chips*).
 
 Constraints:
 - squad continuity `squad[i,t] = squad[i,t−1] + buy − sell_first − sell_later` (start:
@@ -20,20 +23,42 @@ Constraints:
 - `squad_select` per position (2/5/5/3, so 15); club cap: ≤ `team_limit` per club, except
   a club already over the cap at the deadline (a held player changed club), which may keep
   its excess as long as none of its players is bought in that GW (`state.apply_decision`);
-- lineup + bench slots = squad; 11 starters within `play_min`/`play_max`; one player per
-  bench slot (slot 0 the GK, slots 1..3 outfield; their order follows from the weights);
-  one captain, a starter;
+- lineup + bench slots = the GW's squad (the FH squad in a Free Hit GW); 11 starters within
+  `play_min`/`play_max`; one player per bench slot (slot 0 the GK, slots 1..3 outfield;
+  their order follows from the weights); one captain, a starter;
 - `bank[t] = bank[t−1] + Σ sell_price·sell_first + Σ price·sell_later − Σ price·buy`;
 - free transfers, exactly as `state.next_state`: in a normal GW `hits = max(n − ft, 0)`
   (pinned with `take_hits`, so a hit can never buy an extra FT), and
   `ft[t+1] = min(cap, max(ft − n, 0) + 1 + top-ups)` (pinned with `ft_capped`). At
-  `gw_index == 1` transfers are unlimited and free and the next GW has 1 FT (+ top-ups).
+  `gw_index == 1` transfers are unlimited and free and the next GW has 1 FT (+ top-ups);
+  this takes precedence over a chip played there, as in `next_state`.
+
+Chips (one fixed `ChipScenario` per solve, `chips.py`):
+- **Wildcard** GW: transfers free (no hits), and `ft[t+1] = min(cap, ft[t] + top-ups)`
+  under `chip_week_ft == "retain"` (`ft[t] + 1 + top-ups` under `retain_plus_one`).
+- **Free Hit** GW: the persistent squad is unchanged (`squad[i,t] = squad[i,t−1]`, no
+  buys or sells) and `bank[t] = bank[t−1]`. The one-GW squad `fh_squad[i,t] =
+  squad[i,t−1] + fh_buy − fh_sell_first − fh_sell_later` is built from the persistent
+  squad with the same selling-price rules (an owned player not yet sold in the plan sells
+  at his selling price, anyone else at his buy price), so its budget is bank[t−1] + the
+  squad's sale value: `fh_bank[t] = bank[t−1] + Σ sell_price·fh_sell_first +
+  Σ price·fh_sell_later − Σ price·fh_buy ≥ 0`. Positions and the club cap (with the
+  pre-existing-excess rule) apply to it; the GW's lineup, bench and captain are picked
+  from it. Transfers are free and FTs follow `chip_week_ft` as for the Wildcard. Next
+  GW continues from the persistent squad and bank (the revert of `state.next_state`).
+- **Bench Boost** GW: every bench weight is 1 (all 15 count, no autosub weighting).
+- **Triple Captain** GW: the captain's xP counts 3× (2 extra instead of 1).
 
 Objective (maximised), with h_t the GW's horizon offset:
-  Σ_t decay**h_t · [ Σ_i xp·(lineup + captain) + Σ_k w_k Σ_i xp·bench_k
+  Σ_t decay**h_t · [ Σ_i xp·lineup + (m_t − 1) Σ_i xp·captain + Σ_k w_tk Σ_i xp·bench_k
                      + V(ft[t]) − V(ft[t−1]) + itb_value · bank[t] / 10
                      − (hit_cost + hit_margin) · hits[t] ]
-with V(s) = Σ_{n ≤ s} ft_value[n] and V(ft[−1]) = 0 (`params`). This follows
+  + terminal_value(scenario)
+with m_t the captain multiplier (2, 3 under TC), w_tk the bench weights (1 under BB),
+V(s) = Σ_{n ≤ s} ft_value[n] and V(ft[−1]) = 0 (`params`). `bank[t]` is the persistent
+bank, so a Free Hit GW credits the money carried past it, not the FH squad's leftover.
+The terminal value of unused chips (`chips.terminal_value`) is a constant per scenario,
+undecayed; `Plan.objective` excludes it and `Plan.terminal_value` holds it. This follows
 open-fpl-solver (solioanalytics/open-fpl-solver, `dev/solver.py`, Apache-2.0) for the FT
 value (its `gw_ft_gain`: the gain in FT-state value, inside the decay), money in the bank
 (`itb_value · in_the_bank[w]`, after transfers), hits (`hit_cost · penalized_transfers`,
@@ -42,9 +67,9 @@ its vice-captain term (`vcap_weight · xp · vicecap`) is not modelled (the vice
 the solve), nor its optional `ft_use_penalty`; its FT dynamics clamp the same way
 (`raw_gw_ft` clamped to 1..5 with indicator binaries).
 
-Chips (Task 2) are scenario solves; this module takes the hooks already: `fix_first_gw`
-pins the first GW's transfers (the roll plan pins none) and `exclude_first_gw` adds no-good
-cuts on first-GW transfer sets (top-k).
+Hooks: `fix_first_gw` pins the first GW's transfers (the roll plan pins none) and
+`exclude_first_gw` adds no-good cuts on first-GW transfer sets (top-k). In a Free Hit first
+GW both act on the FH squad's transfers.
 
 The model is built in sorted key order with stable variable names, so the same input
 gives the same model (and, with `threads=1`, the same plan).
@@ -59,8 +84,9 @@ from typing import Any
 
 import pulp
 
-from fplopt.backtest.rules import Rules
-from fplopt.backtest.state import GOALKEEPER, Transfer
+from fplopt.backtest.rules import CHIP_NAMES, CHIP_WEEK_FT, Rules
+from fplopt.backtest.state import GOALKEEPER, TRANSFER_CHIPS, Transfer
+from fplopt.optimize.chips import NO_CHIP, ChipScenario, make_scenario, terminal_value
 from fplopt.optimize.params import OptimizerParams
 from fplopt.optimize.plans import GwPlan, Plan
 from fplopt.optimize.problem import PlanInput
@@ -99,9 +125,11 @@ def _value(x: Any) -> float:
 
 
 class _Model:
-    """Variables and constraints of one solve (no chips)."""
+    """Variables and constraints of one solve (one chip scenario)."""
 
-    def __init__(self, problem: PlanInput, params: OptimizerParams) -> None:
+    def __init__(
+        self, problem: PlanInput, params: OptimizerParams, scenario: ChipScenario = NO_CHIP
+    ) -> None:
         self.problem, self.params = problem, params
         rules = problem.rules
         if rules.squad_size - rules.squad_play != len(params.bench_weights):
@@ -112,6 +140,13 @@ class _Model:
         self.lp = pulp.LpProblem("fpl_plan", pulp.LpMaximize)
         self.players = problem.players
         self.T = range(len(problem.gws))
+        self.chips = scenario.by_t
+        unknown = {c for c in self.chips.values() if c not in CHIP_NAMES}
+        if unknown or not set(self.chips) <= set(self.T):
+            raise ValueError(f"invalid chip scenario {scenario}")
+        if self.chips and rules.chip_week_ft not in CHIP_WEEK_FT:
+            raise ValueError(f"chip_week_ft {rules.chip_week_ft!r} not in {CHIP_WEEK_FT}")
+        self.fh = frozenset(t for t, c in self.chips.items() if c == "freehit")
         self.cap = rules.max_free_transfers
         self.big_m = rules.squad_size + self.cap + sum(a for _, a in rules.ft_topups) + 1
         self._variables()
@@ -132,24 +167,41 @@ class _Model:
         self.lineup: dict[tuple[int, int], Any] = {}
         self.captain: dict[tuple[int, int], Any] = {}
         self.bench: dict[tuple[int, int, int], Any] = {}
+        self.fh_squad: dict[tuple[int, int], Any] = {}
+        self.fh_buy: dict[tuple[int, int], Any] = {}
+        self.fh_sell_first: dict[tuple[int, int], Any] = {}
+        self.fh_sell_later: dict[tuple[int, int], Any] = {}
         n_slots = len(self.params.bench_weights)
         for p in self.players:
             k = p.player_key
+            # A later sale needs an earlier buy (owned: an earlier first sale, then a buy).
+            later_from = 2 if p.owned else 1
             for t in self.T:
                 self.squad[k, t] = self._bin(f"squad_{k}_{t}")
-                if p.buyable:
-                    self.buy[k, t] = self._bin(f"buy_{k}_{t}")
-                if p.owned:
-                    self.sell_first[k, t] = self._bin(f"sell_first_{k}_{t}")
-                # A later sale needs an earlier buy (owned: an earlier first sale, then a buy).
-                if p.buyable and t >= (2 if p.owned else 1):
-                    self.sell_later[k, t] = self._bin(f"sell_later_{k}_{t}")
+                if t in self.fh:
+                    self.fh_squad[k, t] = self._bin(f"fh_squad_{k}_{t}")
+                    if p.buyable:
+                        self.fh_buy[k, t] = self._bin(f"fh_buy_{k}_{t}")
+                    if p.owned:
+                        self.fh_sell_first[k, t] = self._bin(f"fh_sell_first_{k}_{t}")
+                    if p.buyable and t >= later_from:
+                        self.fh_sell_later[k, t] = self._bin(f"fh_sell_later_{k}_{t}")
+                else:
+                    if p.buyable:
+                        self.buy[k, t] = self._bin(f"buy_{k}_{t}")
+                    if p.owned:
+                        self.sell_first[k, t] = self._bin(f"sell_first_{k}_{t}")
+                    if p.buyable and t >= later_from:
+                        self.sell_later[k, t] = self._bin(f"sell_later_{k}_{t}")
                 self.lineup[k, t] = self._bin(f"lineup_{k}_{t}")
                 self.captain[k, t] = self._bin(f"captain_{k}_{t}")
                 slots = [0] if p.element_type == GOALKEEPER else range(1, n_slots)
                 for s in slots:
                     self.bench[k, t, s] = self._bin(f"bench_{k}_{t}_{s}")
         self.bank = {t: self.lp.add_variable(f"bank_{t}", lowBound=0) for t in self.T}
+        self.fh_bank = {
+            t: self.lp.add_variable(f"fh_bank_{t}", lowBound=0) for t in sorted(self.fh)
+        }
         self.bench_of: dict[tuple[int, int], list[Any]] = defaultdict(list)  # (key, t)
         self.slot: dict[tuple[int, int], list[Any]] = defaultdict(list)  # (t, slot)
         for (k, t, s), v in self.bench.items():
@@ -161,10 +213,34 @@ class _Model:
             v for v in (self.sell_first.get((k, t)), self.sell_later.get((k, t))) if v is not None
         )
 
+    def fh_sells(self, k: int, t: int) -> pulp.LpAffineExpression:
+        return _vars(
+            v
+            for v in (self.fh_sell_first.get((k, t)), self.fh_sell_later.get((k, t)))
+            if v is not None
+        )
+
+    def first_sales_before(self, k: int, t: int) -> pulp.LpAffineExpression:
+        """Σ sell_first[k,s] for s < t: 1 once an owned player has been sold."""
+        return _vars(self.sell_first[k, s] for s in range(t) if (k, s) in self.sell_first)
+
     def n_transfers(self, t: int) -> pulp.LpAffineExpression:
         return _vars(
             self.buy[p.player_key, t] for p in self.players if (p.player_key, t) in self.buy
         )
+
+    def selected(self, k: int, t: int) -> Any:
+        """The squad that plays GW t: the FH squad in a Free Hit GW, else the squad."""
+        return self.fh_squad[k, t] if t in self.fh else self.squad[k, t]
+
+    def bench_weights(self, t: int) -> tuple[float, ...]:
+        if self.chips.get(t) == "bboost":
+            return (1.0,) * len(self.params.bench_weights)
+        return self.params.bench_weights
+
+    def captain_extra(self, t: int) -> float:
+        """The captain's xP counted on top of his starter xP: 1 (×2), 2 under TC (×3)."""
+        return 2.0 if self.chips.get(t) == "3xc" else 1.0
 
     # --- constraints --------------------------------------------------------------------
 
@@ -178,36 +254,62 @@ class _Model:
                 lp += self.squad[k, t] == prev + buy - self.sells(k, t)
                 if (k, t) in self.buy:
                     lp += buy + self.sells(k, t) <= 1
+                if t in self.fh:
+                    fh_buy = self.fh_buy.get((k, t), 0)
+                    lp += self.fh_squad[k, t] == prev + fh_buy - self.fh_sells(k, t)
+                    if (k, t) in self.fh_buy:
+                        lp += fh_buy + self.fh_sells(k, t) <= 1
+                    if p.owned:
+                        # Selling price only if not sold before; buy price only if re-bought.
+                        earlier = self.first_sales_before(k, t)
+                        lp += self.fh_sell_first[k, t] + earlier <= 1
+                        if (k, t) in self.fh_sell_later:
+                            lp += self.fh_sell_later[k, t] <= earlier
             if p.owned:
-                lp += _vars(self.sell_first[k, t] for t in self.T) <= 1
+                lp += _vars(self.sell_first[k, t] for t in self.T if (k, t) in self.sell_first) <= 1
                 for t in self.T:
                     if (k, t) in self.sell_later:
-                        earlier = _vars(self.sell_first[k, s] for s in range(t))
-                        lp += self.sell_later[k, t] <= earlier
+                        lp += self.sell_later[k, t] <= self.first_sales_before(k, t)
 
         by_type: dict[int, list[int]] = defaultdict(list)
         by_club: dict[int, list[int]] = defaultdict(list)
+        owned_per_club: dict[int, int] = defaultdict(int)
         for p in self.players:
             by_type[p.element_type].append(p.player_key)
             by_club[p.team_key].append(p.player_key)
-        owned_per_club = defaultdict(int)
-        for p in self.players:
             if p.owned:
                 owned_per_club[p.team_key] += 1
+        groups = (by_type, by_club, owned_per_club)
         for t in self.T:
-            for et, n in sorted(rules.squad_select.items()):
-                lp += _vars(self.squad[k, t] for k in by_type.get(et, [])) == n
-            for club, keys in sorted(by_club.items()):
-                count = _vars(self.squad[k, t] for k in keys)
-                start = owned_per_club[club]
-                if start <= rules.team_limit:
-                    lp += count <= rules.team_limit
-                else:
-                    # Pre-existing excess: tolerated unless a player of the club is bought.
-                    excess = start - rules.team_limit
-                    for k in keys:
-                        if (k, t) in self.buy:
-                            lp += count + excess * self.buy[k, t] <= start
+            self._selection(rules, groups, self.squad, self.buy, t)
+            if t in self.fh:
+                self._selection(rules, groups, self.fh_squad, self.fh_buy, t)
+
+    def _selection(
+        self,
+        rules: Rules,
+        groups: tuple[Mapping[int, list[int]], Mapping[int, list[int]], Mapping[int, int]],
+        squad: Mapping[tuple[int, int], Any],
+        buy: Mapping[tuple[int, int], Any],
+        t: int,
+    ) -> None:
+        """Positions and the club cap for one GW's squad variables (`groups`: keys by
+        position, keys by club, owned players per club)."""
+        lp = self.lp
+        by_type, by_club, owned_per_club = groups
+        for et, n in sorted(rules.squad_select.items()):
+            lp += _vars(squad[k, t] for k in by_type.get(et, [])) == n
+        for club, keys in sorted(by_club.items()):
+            count = _vars(squad[k, t] for k in keys)
+            start = owned_per_club.get(club, 0)
+            if start <= rules.team_limit:
+                lp += count <= rules.team_limit
+            else:
+                # Pre-existing excess: tolerated unless a player of the club is bought.
+                excess = start - rules.team_limit
+                for k in keys:
+                    if (k, t) in buy:
+                        lp += count + excess * buy[k, t] <= start
 
     def _lineup_constraints(self, rules: Rules) -> None:
         lp = self.lp
@@ -215,7 +317,7 @@ class _Model:
         for t in self.T:
             for p in self.players:
                 k = p.player_key
-                lp += self.lineup[k, t] + _vars(self.bench_of[k, t]) == self.squad[k, t]
+                lp += self.lineup[k, t] + _vars(self.bench_of[k, t]) == self.selected(k, t)
                 lp += self.captain[k, t] <= self.lineup[k, t]
             lp += _vars(self.lineup[p.player_key, t] for p in self.players) == rules.squad_play
             for et in sorted(rules.play_min):
@@ -228,57 +330,65 @@ class _Model:
                 lp += _vars(self.slot[t, s]) == 1
             lp += _vars(self.captain[p.player_key, t] for p in self.players) == 1
 
+    def _flow(self, t: int, sell_first: Mapping, sell_later: Mapping, buy: Mapping) -> Any:
+        """Σ sell_price·sell_first + Σ price·sell_later − Σ price·buy at GW t."""
+        terms: list[tuple[Any, float]] = []
+        for p in self.players:
+            k = p.player_key
+            if (k, t) in sell_first:
+                terms.append((sell_first[k, t], p.sell_price))
+            if (k, t) in sell_later:
+                terms.append((sell_later[k, t], p.price))
+            if (k, t) in buy:
+                terms.append((buy[k, t], -p.price))
+        return _sum(terms)
+
     def _money_and_transfers(self, rules: Rules) -> None:
         lp, problem = self.lp, self.problem
         for t in self.T:
             prev = problem.bank if t == 0 else self.bank[t - 1]
-            flow = _sum(
-                [(self.sell_first[p.player_key, t], p.sell_price) for p in self.players if p.owned]
-                + [
-                    (self.sell_later[p.player_key, t], p.price)
-                    for p in self.players
-                    if (p.player_key, t) in self.sell_later
-                ]
-                + [
-                    (self.buy[p.player_key, t], -p.price)
-                    for p in self.players
-                    if (p.player_key, t) in self.buy
-                ]
-            )
-            lp += self.bank[t] == prev + flow
+            lp += self.bank[t] == prev + self._flow(t, self.sell_first, self.sell_later, self.buy)
+            if t in self.fh:
+                flow = self._flow(t, self.fh_sell_first, self.fh_sell_later, self.fh_buy)
+                lp += self.fh_bank[t] == prev + flow
 
         # Free transfers. ft[t] is a constant or Σ s·fts[t,s]; hits[t] a variable or 0.
         cap, m = self.cap, self.big_m
         gws = problem.gws
+        chip_extra = 1 if rules.chip_week_ft == "retain_plus_one" else 0
         self.ft: dict[int, Any] = {0: max(problem.free_transfers, 0)}
         self.ft_value: dict[int, Any] = {0: self.params.ft_state_value(self.ft[0])}
         self.hits: dict[int, Any] = {}
         for t in self.T:
-            n = self.n_transfers(t)
             free_gw = t == 0 and problem.gw1
-            if free_gw:
+            transfer_chip = self.chips.get(t) in TRANSFER_CHIPS
+            if free_gw or transfer_chip:
                 self.hits[t] = 0
-                carry: Any = 0  # after GW1 the count restarts at 1
             else:
+                n = self.n_transfers(t)
                 hits = self.lp.add_variable(f"hits_{t}", lowBound=0, cat=pulp.LpInteger)
                 take = self._bin(f"take_hits_{t}")
                 lp += hits >= n - self.ft[t]
                 lp += hits <= n - self.ft[t] + m * (1 - take)
                 lp += hits <= m * take
                 self.hits[t] = hits
-                carry = self.ft[t] - n + hits  # = max(ft − n, 0)
             if t + 1 not in self.T:
                 break
             topup = sum(a for g, a in rules.ft_topups if gws[t].gw_index < g <= gws[t + 1].gw_index)
             if free_gw:
-                self.ft[t + 1] = min(cap, 1 + topup)
+                target: Any = 1 + topup  # after GW1 the count restarts at 1
+            elif transfer_chip:
+                target = self.ft[t] + chip_extra + topup  # chip_week_ft
+            else:
+                target = self.ft[t] - n + self.hits[t] + 1 + topup  # max(ft − n, 0) + 1 + ...
+            if isinstance(target, int):
+                self.ft[t + 1] = min(cap, target)
                 self.ft_value[t + 1] = self.params.ft_state_value(self.ft[t + 1])
                 continue
             states = {s: self._bin(f"fts_{t + 1}_{s}") for s in range(1, cap + 1)}
             lp += _vars(states.values()) == 1
             ft_next = _sum((v, s) for s, v in states.items())
             capped = self._bin(f"ft_capped_{t}")
-            target = carry + 1 + topup
             lp += ft_next <= target
             lp += ft_next >= target - m * capped
             lp += ft_next >= cap - m * (1 - capped)
@@ -289,9 +399,14 @@ class _Model:
     # --- hooks -------------------------------------------------------------------------
 
     def first_gw_vars(self) -> tuple[dict[int, Any], dict[int, Any]]:
-        """(sale variables by key, buy variables by key) of the first GW."""
-        sells = {p.player_key: self.sell_first[p.player_key, 0] for p in self.players if p.owned}
-        buys = {k: v for (k, t), v in self.buy.items() if t == 0}
+        """(sale variables by key, buy variables by key) of the first GW's transfers (the
+        FH squad's in a Free Hit first GW)."""
+        if 0 in self.fh:
+            sell_first, buy = self.fh_sell_first, self.fh_buy
+        else:
+            sell_first, buy = self.sell_first, self.buy
+        sells = {p.player_key: sell_first[p.player_key, 0] for p in self.players if p.owned}
+        buys = {k: v for (k, t), v in buy.items() if t == 0}
         return sells, buys
 
     def fix_first_gw(self, transfers: TransferSet) -> None:
@@ -319,16 +434,17 @@ class _Model:
     # --- objective ----------------------------------------------------------------------
 
     def objective(self) -> pulp.LpAffineExpression:
+        """The horizon part of the objective (the terminal value is added by the caller)."""
         params, rules = self.params, self.problem.rules
-        weights = params.bench_weights
         hit_cost = rules.hit_cost + params.hit_margin
         terms: list[tuple[Any, float]] = []
         constant = 0.0
         for t, gw in zip(self.T, self.problem.gws, strict=True):
             d = params.decay**gw.horizon
+            weights, extra = self.bench_weights(t), self.captain_extra(t)
             for p in self.players:
                 k, x = p.player_key, p.xp[t]
-                terms += [(self.lineup[k, t], d * x), (self.captain[k, t], d * x)]
+                terms += [(self.lineup[k, t], d * x), (self.captain[k, t], extra * d * x)]
                 for s in range(len(weights)):
                     if (k, t, s) in self.bench:
                         terms.append((self.bench[k, t, s], d * weights[s] * x))
@@ -349,24 +465,29 @@ def solve_plan(
     *,
     fix_first_gw: TransferSet | None = None,
     exclude_first_gw: Iterable[TransferSet] = (),
-    chips: Mapping[int, str] | None = None,
+    chips: ChipScenario | Mapping[int, str] | None = None,
 ) -> Plan:
     """Build and solve the MILP; return the plan.
 
     `fix_first_gw=(outs, ins)` pins the first GW's transfers (`(frozenset(), frozenset())`
     = the roll plan's first GW); each `exclude_first_gw` entry is a first-GW (outs, ins) set
-    the plan must differ from (a no-good cut, for top-k plans). `chips` (horizon offset →
-    chip name) is reserved for the chip scenarios of Task 2; only `None`/empty for now.
+    the plan must differ from (a no-good cut, for top-k plans). `chips` fixes the chip
+    scenario: a `ChipScenario`, or a mapping position in the horizon → chip name (validated
+    with `chips.make_scenario`; InvalidDecision if the rules don't allow it); `None`/empty
+    = no chip. The plan's `terminal_value` is the scenario's (`chips.terminal_value`).
     Raises InfeasiblePlan if HiGHS returns no solution."""
-    if chips:
-        raise NotImplementedError("chip scenarios are not implemented yet (Phase 4 Task 2)")
+    if isinstance(chips, ChipScenario):
+        scenario = chips
+    else:
+        scenario = make_scenario(problem, chips) if chips else NO_CHIP
     start = time.perf_counter()
-    model = _Model(problem, params)
+    model = _Model(problem, params, scenario)
     if fix_first_gw is not None:
         model.fix_first_gw(fix_first_gw)
     for transfers in exclude_first_gw:
         model.exclude_first_gw(transfers)
-    model.lp.setObjective(model.objective())
+    terminal = terminal_value(problem, params, scenario)
+    model.lp.setObjective(model.objective() + terminal)
     build_seconds = time.perf_counter() - start
 
     solver = pulp.HiGHS(
@@ -391,6 +512,8 @@ def solve_plan(
         build_seconds=build_seconds,
         solve_seconds=solve_seconds,
         n_candidates=len(problem.players),
+        scenario=scenario.label,
+        terminal_value=terminal,
     )
 
 
@@ -402,13 +525,16 @@ def _read_plan(model: _Model) -> tuple[GwPlan, ...]:
     """The solution as GwPlans (vice = best non-captain starter by xP, ties by key)."""
     problem, params = model.problem, model.params
     hit_cost = problem.rules.hit_cost + params.hit_margin
+    et = {p.player_key: p.element_type for p in problem.players}
     out = []
     previous_ft_value = 0.0
     for t, gw in enumerate(problem.gws):
         xp = {p.player_key: p.xp[t] for p in problem.players}
-        et = {p.player_key: p.element_type for p in problem.players}
-        outs = [p.player_key for p in problem.players if _on_expr(model.sells(p.player_key, t))]
-        ins = [k for (k, tt), v in model.buy.items() if tt == t and _on(v)]
+        freehit = t in model.fh
+        sells = model.fh_sells if freehit else model.sells
+        buy = model.fh_buy if freehit else model.buy
+        outs = [p.player_key for p in problem.players if _on_expr(sells(p.player_key, t))]
+        ins = [k for (k, tt), v in buy.items() if tt == t and _on(v)]
         transfers = _pair(outs, ins, et)
         starters = sorted(
             (k for (k, tt), v in model.lineup.items() if tt == t and _on(v)),
@@ -419,18 +545,20 @@ def _read_plan(model: _Model) -> tuple[GwPlan, ...]:
         captain = next(k for (k, tt), v in model.captain.items() if tt == t and _on(v))
         vice = min((k for k in starters if k != captain), key=lambda k: (-xp[k], k))
         hits = round(_value(model.hits[t]))
-        bank = round(_value(model.bank[t]))
+        kept_bank = round(_value(model.bank[t]))  # the persistent bank
+        bank = round(_value(model.fh_bank[t])) if freehit else kept_bank
         ft = round(_value(model.ft[t]))
         ft_value = params.ft_state_value(ft)
-        lineup_xp = sum(xp[k] for k in starters) + xp[captain]
-        bench_xp = sum(w * xp[k] for w, k in zip(params.bench_weights, bench, strict=True))
+        lineup_xp = sum(xp[k] for k in starters) + model.captain_extra(t) * xp[captain]
+        weights = model.bench_weights(t)
+        bench_xp = sum(w * xp[k] for w, k in zip(weights, bench, strict=True))
         d = params.decay**gw.horizon
         objective = d * (
             lineup_xp
             + bench_xp
             + ft_value
             - previous_ft_value
-            + params.itb_value * bank / 10
+            + params.itb_value * kept_bank / 10
             - hit_cost * hits
         )
         previous_ft_value = ft_value
@@ -444,7 +572,7 @@ def _read_plan(model: _Model) -> tuple[GwPlan, ...]:
                 bench=bench,
                 captain=captain,
                 vice=vice,
-                chip=None,
+                chip=model.chips.get(t),
                 xp=lineup_xp,
                 bench_xp=bench_xp,
                 objective=objective,

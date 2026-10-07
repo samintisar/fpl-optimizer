@@ -208,6 +208,13 @@ def chip_available(state: SquadState, name: str, rules: Rules) -> bool:
     return True
 
 
+def chip_window(state: SquadState, name: str, rules: Rules) -> int:
+    """The `chip_id` that playing chip `name` at `state.gw_index` would use (the lowest
+    open, unused window), or InvalidDecision if the chip can't be played there (same rules
+    as `chip_available`; the optimizer's chip scenarios use it)."""
+    return _chip_window(state, name, rules)
+
+
 def _chip_window(state: SquadState, name: str, rules: Rules) -> int:
     """The `chip_id` of the open, unused window for `name`, or InvalidDecision."""
     names = {c.chip_id: c.name for c in rules.chips}

@@ -89,7 +89,7 @@ def test_deterministic_under_input_order() -> None:
 
 def plans(seed: int, n_gws: int = 2):
     """(pruned, dominance-only, unpruned) plan objectives on a random instance."""
-    from fplopt.optimize import optimize
+    from fplopt.optimize.model import solve_plan
 
     pool = grid_pool(range(1, 9), {1: 2, 2: 5, 3: 5, 4: 3}, seed=seed)
     xp = correlated_xp(pool, n_gws, seed)
@@ -103,7 +103,7 @@ def plans(seed: int, n_gws: int = 2):
     ):
         problem = PlanInput.from_context(state, pool, xp, RULES, params)
         assert set(state.player_keys) <= {p.player_key for p in problem.players}
-        out.append((len(problem.players), optimize(problem, params).objective))
+        out.append((len(problem.players), solve_plan(problem, params).objective))
     return out
 
 
