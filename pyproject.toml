@@ -3,6 +3,8 @@ name = "fplopt"
 version = "0.1.0"
 description = "Fantasy Premier League decision optimizer: xP models + MILP planner + Telegram bot"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "httpx",
