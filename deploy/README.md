@@ -2,21 +2,19 @@
 
 Runs as your normal user with systemd **user** timers. Raw data lands in `~/fpl-optimizer/raw/` (gitignored).
 
+Commands run from the dev machine use `fplopt-server` as an SSH host alias for the server; define
+your own in `~/.ssh/config` or substitute `user@host`.
+
 ## One-time setup
 
-1. Clone and install. The repo is private, so give the server a read-only deploy key:
+1. Clone and install (the repo is public, so no key is needed):
    ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/github_deploy -N "" -C "$USER@$(hostname) deploy"
-   printf "Host github.com\n    IdentityFile ~/.ssh/github_deploy\n    IdentitiesOnly yes\n" >> ~/.ssh/config
-   ```
-   Add `~/.ssh/github_deploy.pub` as a read-only deploy key from a machine where `gh` is logged in
-   (`gh repo deploy-key add <pubkey-file> --repo samintisar/fpl-optimizer`), then:
-   ```bash
-   git clone git@github.com:samintisar/fpl-optimizer.git ~/fpl-optimizer
+   git clone https://github.com/samintisar/fpl-optimizer.git ~/fpl-optimizer
    curl -LsSf https://astral.sh/uv/install.sh | sh
    source "$HOME/.local/bin/env"   # put uv on PATH in this shell
    cd ~/fpl-optimizer && uv sync --locked
    ```
+   A server cloned earlier over SSH with a read-only deploy key keeps pulling as before.
 2. Telegram alerts: create a bot with @BotFather, send it any message, then read your chat id from
    `https://api.telegram.org/bot<token>/getUpdates` (`message.chat.id`).
 3. Create `~/fpl-optimizer/.env` (then `chmod 600 .env`):
