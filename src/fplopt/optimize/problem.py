@@ -138,6 +138,7 @@ class PlanInput:
         kept = prune(
             keys=keys,
             element_type=frame["element_type"].to_numpy(dtype="int64"),
+            team_key=frame["team_key"].to_numpy(dtype="int64"),
             price=frame["price"].to_numpy(dtype="int64"),
             xp=xp_rows,
             owned=np.isin(keys, list(owned)),

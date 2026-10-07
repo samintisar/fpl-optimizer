@@ -18,11 +18,13 @@ from fplopt.optimize import OptimizerParams, PlanInput
 from fplopt.optimize.prune import prune
 
 
-def run(keys, et, price, xp, owned=(), buyable=None, prune_n=None, dominated=True):
+def run(keys, et, price, xp, owned=(), buyable=None, prune_n=None, dominated=True, clubs=None):
+    """`prune` on lists; every player has his own club unless `clubs` says otherwise."""
     keys = np.asarray(keys)
     return prune(
         keys=keys,
         element_type=np.asarray(et),
+        team_key=np.asarray(keys if clubs is None else clubs),
         price=np.asarray(price),
         xp=np.asarray(xp, dtype="float64").reshape(len(keys), -1),
         owned=np.isin(keys, list(owned)),
@@ -54,24 +56,30 @@ def test_owned_always_kept_and_unlisted_positions_untouched() -> None:
     assert {4, 5} <= set(kept)
 
 
-def test_dominance_keeps_enough_dominators() -> None:
-    # 4 GKs (squad_select 2): 1 and 2 dominate 3 and 4; 3 dominates 4.
-    keys = [1, 2, 3, 4]
-    xp = [[5, 5], [4, 6], [3, 3], [3, 2]]
-    price = [40, 40, 45, 45]
-    assert run(keys, [1] * 4, price, xp) == [1, 2]
-    # Only one dominator (2 needed): kept.
-    assert run([1, 3], [1, 1], [40, 45], [[5, 5], [3, 3]]) == [1, 3]
+def test_dominance_needs_dominators_from_enough_clubs() -> None:
+    # GKs: squad_select 2 + 15 // 3 full clubs = dominators from 7 clubs needed.
+    keys = list(range(1, 9))
+    xp = [[5, 5]] * 7 + [[3, 3]]
+    price = [40] * 7 + [45]
+    # 1-7 (identical: tie by key, so 7 has 6 dominators) dominate 8, from 7 clubs.
+    assert run(keys, [1] * 8, price, xp) == keys[:7]
+    # The same 7 dominators from 3 clubs: the club cap could block them all, so 8 stays.
+    assert run(keys, [1] * 8, price, xp, clubs=[1, 1, 1, 2, 2, 2, 3, 4]) == keys
+    # Six dominators: kept.
+    assert run(keys[1:], [1] * 7, price[1:], xp[1:]) == keys[1:]
     # Cheaper but worse in one GW: not dominated.
-    assert run(keys, [1] * 4, price, [[5, 5], [4, 6], [3, 7], [3, 2]]) == [1, 2, 3]
+    worse = [[5, 5]] * 6 + [[5, 1], [3, 3]]
+    assert run(keys, [1] * 8, price, worse) == keys
 
 
 def test_identical_players_tie_by_key_and_departed_never_dominate() -> None:
-    keys = [7, 3, 5, 9]
-    assert run(keys, [1] * 4, [40] * 4, [2.0] * 4) == [3, 5]
+    keys = [7, 3, 5, 9, 11, 13, 15, 17, 19]
+    # Sorted 3, 5, ..., 19: each is dominated by the smaller keys; 17 and 19 have 7+.
+    assert run(keys, [1] * 9, [40] * 9, [2.0] * 9) == [3, 5, 7, 9, 11, 13, 15]
     # 3 and 5 can't be bought (left the game; owned): they dominate nobody.
-    kept = run(keys, [1] * 4, [40] * 4, [2.0] * 4, owned=[3, 5], buyable=[True, False, False, True])
-    assert kept == [3, 5, 7, 9]
+    buyable = [k not in (3, 5) for k in keys]
+    kept = run(keys, [1] * 9, [40] * 9, [2.0] * 9, owned=[3, 5], buyable=buyable)
+    assert kept == sorted(keys)
 
 
 def test_deterministic_under_input_order() -> None:
@@ -91,7 +99,8 @@ def plans(seed: int, n_gws: int = 2):
     """(pruned, dominance-only, unpruned) plan objectives on a random instance."""
     from fplopt.optimize.model import solve_plan
 
-    pool = grid_pool(range(1, 9), {1: 2, 2: 5, 3: 5, 4: 3}, seed=seed)
+    # 12 clubs: dominance needs dominators from up to 10 clubs (squad_select + 5).
+    pool = grid_pool(range(1, 13), {1: 1, 2: 3, 3: 3, 4: 2}, seed=seed)
     xp = correlated_xp(pool, n_gws, seed)
     state = make_state(pool, first_valid_squad(pool), ft=2)
     out = []
@@ -111,7 +120,7 @@ def plans(seed: int, n_gws: int = 2):
 def test_pruning_keeps_the_optimum_on_random_instances(seed: int) -> None:
     pytest.importorskip("highspy")
     (n_pruned, pruned), (n_dom, dominance), (n_all, unpruned) = plans(seed)
-    assert n_pruned <= n_dom < n_all
+    assert n_pruned <= n_dom <= n_all
     assert dominance == pytest.approx(unpruned, abs=1e-6)
     # Top-N is a heuristic: allow the default MIP gap.
     assert pruned >= unpruned * (1 - OptimizerParams().mip_gap) - 1e-6
@@ -120,7 +129,7 @@ def test_pruning_keeps_the_optimum_on_random_instances(seed: int) -> None:
 def test_default_params_are_read_only() -> None:
     params = OptimizerParams()
     assert isinstance(params.prune_n, MappingProxyType)
-    assert dict(params.prune_n) == {1: 10, 2: 30, 3: 30, 4: 15}
+    assert dict(params.prune_n) == {1: 20, 2: 60, 3: 60, 4: 30}
     assert params.ft_state_value(1) == 0 and params.ft_state_value(3) == pytest.approx(3.6)
     with pytest.raises(ValueError):
         OptimizerParams(ft_value={2: -1.0})

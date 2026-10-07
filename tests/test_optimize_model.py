@@ -213,8 +213,11 @@ def test_gw1_plan_replays_with_one_ft_after() -> None:
 def test_ft_topups_follow_the_rules() -> None:
     rules = replace(RULES, ft_topups=((6, 2),))
     state, pool, xp = medium_instance(4, ft=1, n_gws=3)
-    xp = xp.assign(xp=0.0)  # nothing worth a transfer: the FTs just bank
-    _, plan = plan_for(state, pool, xp, OptimizerParams(horizon=3), rules=rules)
+    # Nothing worth a transfer (no xP, and no value on money in the bank, which selling
+    # down to cheaper players would gain): the FTs just bank.
+    xp = xp.assign(xp=0.0)
+    params = OptimizerParams(horizon=3, itb_value=0.0)
+    _, plan = plan_for(state, pool, xp, params, rules=rules)
     assert [g.ft for g in plan.gws] == [1, 4, 5]
     assert all(g.n_transfers == 0 for g in plan.gws)
     replay(state, plan, pool, rules)

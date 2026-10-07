@@ -40,7 +40,10 @@ DEFAULT_BENCH_WEIGHTS = (0.03, 0.21, 0.06, 0.002)
 # only if it beats holding it by at least this much.
 DEFAULT_CHIP_VALUE = MappingProxyType({"wildcard": 6.0, "freehit": 4.0, "bboost": 4.0, "3xc": 3.0})
 # Candidates kept per position (element_type) by horizon xP and by horizon xP per price.
-DEFAULT_PRUNE_N = MappingProxyType({1: 10, 2: 30, 3: 30, 4: 15})
+# Task 3 benchmark (40 real cases, no chips, gap 1e-4, with club-aware dominance): vs the
+# unpruned pool this loses 0 points in the median and at most 0.21 (10/30/30/15: max 1.0,
+# at GW1 squad builds), with ~130 candidates and a median solve of ~1.4 s at that gap.
+DEFAULT_PRUNE_N = MappingProxyType({1: 20, 2: 60, 3: 60, 4: 30})
 
 
 @dataclass(frozen=True)
