@@ -2,9 +2,10 @@
 pruning, chip scenarios, the model and its plans.
 
 `PlanInput.from_context(state, pool, xp, rules, params)` → `optimize(problem, params)` →
-`PlanSet` (top-k plans over the chip scenarios plus the roll plan); `solve_plan` solves one
-scenario with fixed/excluded first-GW transfers → `Plan`; `Plan.decision()` is the first
-GW's `state.Decision`. Needs the `optimize` extra (PuLP + highspy) for solving.
+`PlanSet` (top-k plans over the chip scenarios, found by `search`, plus the roll plan);
+`solve_plan` solves one scenario with fixed/excluded first-GW transfers → `Plan`;
+`Plan.decision()` is the first GW's `state.Decision`. Needs the `optimize` extra (PuLP +
+highspy) for solving.
 """
 
 from fplopt.optimize.chips import ChipScenario, scenarios, terminal_value

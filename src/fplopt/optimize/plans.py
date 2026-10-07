@@ -6,12 +6,17 @@ A `Plan` holds one `GwPlan` per horizon GW plus solve statistics. `Plan.decision
 first GW's `state.Decision` (transfers paired within position, lineup, chip), which
 `state.apply_decision` accepts.
 
-`optimize(problem, params, top_k=3, chips=True, roll=True) -> PlanSet`:
+`optimize(problem, params, top_k=3, chips=True, roll=True, scenario_search="bound") ->
+PlanSet`:
 
-1. **Chip scenarios** (`chips.scenarios`; only no-chip when `chips=False`): each is solved
-   separately and ranked by `Plan.total_objective` (horizon objective + terminal value of
+1. **Chip scenarios** (`chips.scenarios`; only no-chip when `chips=False`): each is a
+   separate MILP, ranked by `Plan.total_objective` (horizon objective + terminal value of
    the unused chips). The best is plan #1; ties go to the earlier scenario (no chip first).
-   Every scenario's total objective is kept in `PlanSet.scenario_objectives`.
+   `scenario_search="bound"` (`search`) solves only the scenarios whose upper bound (LP
+   relaxation, or a bound derived from a related scenario) could beat the best plan found,
+   and returns the same plan as `"all"`, which solves every scenario. The solved
+   scenarios' total objectives are kept in `PlanSet.scenario_objectives`, every
+   scenario's bound in `PlanSet.scenario_bounds`.
 2. **Top-k:** plans #2..k re-solve **within plan #1's chip scenario**, each with no-good
    cuts excluding the first-GW transfer sets of the plans before it, so the k plans differ
    in what to do this GW given the winning chip plan. (Cutting across scenarios would need
@@ -29,16 +34,21 @@ first GW's `state.Decision` (transfers paired within position, lineup, chip), wh
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from fplopt.backtest.gw_score import Lineup
 from fplopt.backtest.state import TRANSFER_CHIPS, Decision, Transfer
-from fplopt.optimize.chips import NO_CHIP, ChipScenario, scenarios
+from fplopt.optimize.chips import NO_CHIP, scenarios
 from fplopt.optimize.params import OptimizerParams
 from fplopt.optimize.problem import PlanInput
+
+if TYPE_CHECKING:
+    from fplopt.optimize.search import SearchStats
 
 
 @dataclass(frozen=True)
@@ -116,7 +126,10 @@ class Plan:
     final relative gap; `build_seconds` the PuLP model build and `solve_seconds` the HiGHS
     call (including PuLP's hand-over); `n_candidates` the players in the model.
     `scenario` is the chip scenario's label (`none` without chips) and `gain_vs_roll`
-    the `total_objective` gain over the roll plan (set by `optimize`, else None)."""
+    the `total_objective` gain over the roll plan (set by `optimize`, else None).
+    `bound` is HiGHS's dual bound mapped to `total_objective` terms: no plan of this
+    scenario (with the same fixed/excluded first-GW transfers) beats it, and it is
+    ≥ `total_objective` (equal up to `mip_gap`)."""
 
     gws: tuple[GwPlan, ...]
     objective: float
@@ -128,6 +141,7 @@ class Plan:
     scenario: str = "none"
     terminal_value: float = 0.0
     gain_vs_roll: float | None = None
+    bound: float = math.inf
 
     @property
     def first(self) -> GwPlan:
@@ -157,12 +171,17 @@ class PlanSet:
     """`plans`: the top-k plans by objective, distinct in first-GW transfer sets (plan #1
     first); `roll`: the roll plan (None if not asked for); `scenario_objectives`: chip
     scenario label → that scenario's best `total_objective`, in enumeration order;
-    `seconds`: wall time of the whole `optimize` call."""
+    `seconds`: wall time of the whole `optimize` call. With `scenario_search="bound"`
+    only the scenarios that were solved are in `scenario_objectives`; `scenario_bounds`
+    holds every scenario's upper bound on its best `total_objective` (the MILP's dual bound
+    if solved), and `search` how the search went (`search.SearchStats`)."""
 
     plans: tuple[Plan, ...]
     roll: Plan | None
     scenario_objectives: Mapping[str, float]
     seconds: float = 0.0
+    scenario_bounds: Mapping[str, float] = field(default_factory=lambda: MappingProxyType({}))
+    search: SearchStats | None = None
 
     @property
     def best(self) -> Plan:
@@ -180,24 +199,21 @@ def optimize(
     top_k: int = 3,
     chips: bool = True,
     roll: bool = True,
+    scenario_search: str = "bound",
 ) -> PlanSet:
     """Best plan over the chip scenarios, plans #2..top_k in its scenario, and the roll
-    plan (see the module docstring). `chips=False` solves the no-chip scenario only."""
+    plan (see the module docstring). `chips=False` solves the no-chip scenario only.
+    `scenario_search` is "bound" (skip scenarios that provably can't win; same result) or
+    "all" (solve every scenario), see `search`."""
     from fplopt.optimize.model import InfeasiblePlan, solve_plan  # model imports this module
+    from fplopt.optimize.search import search
 
     if top_k < 1:
         raise ValueError(f"top_k must be >= 1, got {top_k}")
     start = time.perf_counter()
     candidates = scenarios(problem, params) if chips else (NO_CHIP,)
-    best: tuple[Plan, ChipScenario] | None = None
-    objectives: dict[str, float] = {}
-    for scenario in candidates:
-        plan = solve_plan(problem, params, chips=scenario)
-        objectives[scenario.label] = plan.total_objective
-        if best is None or plan.total_objective > best[0].total_objective:
-            best = (plan, scenario)
-    assert best is not None
-    plan1, scenario1 = best
+    found = search(problem, params, candidates, scenario_search)
+    plan1, scenario1 = found.plan, found.scenario
 
     plans = [plan1]
     while len(plans) < top_k:
@@ -233,6 +249,8 @@ def optimize(
     return PlanSet(
         plans=tuple(plans),
         roll=roll_plan,
-        scenario_objectives=MappingProxyType(objectives),
+        scenario_objectives=MappingProxyType(found.objectives),
         seconds=time.perf_counter() - start,
+        scenario_bounds=MappingProxyType(found.bounds),
+        search=found.stats,
     )

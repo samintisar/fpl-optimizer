@@ -77,6 +77,7 @@ gives the same model (and, with `threads=1`, the same plan).
 
 from __future__ import annotations
 
+import math
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
@@ -93,6 +94,9 @@ from fplopt.optimize.problem import PlanInput
 
 TransferSet = tuple[frozenset[int], frozenset[int]]  # (outs, ins)
 _ON = 0.5  # binary threshold when reading the solution
+# Relative margin added to LP-relaxation bounds: HiGHS's primal/dual feasibility tolerances
+# (1e-7) can leave the reported LP optimum a hair below the true one.
+BOUND_MARGIN = 1e-6
 
 
 class InfeasiblePlan(RuntimeError):
@@ -122,6 +126,63 @@ def _value(x: Any) -> float:
         return float(x)
     v = x.value()
     return 0.0 if v is None else float(v)
+
+
+class _BulkHiGHS(pulp.HiGHS):
+    """`pulp.HiGHS` with a bulk hand-over: the model goes to highspy in three array calls
+    (`addCols`, `addRows`, `changeColsIntegrality`) instead of one call per column, row
+    and integer column, which took longer than the solve itself (~0.2 s per 6-GW model;
+    Task 3 benchmark). Same columns, rows, order and coefficients as PuLP's own
+    `buildSolverModel` (zero coefficients dropped, the objective constant left out), so
+    HiGHS sees the identical model; warm starts are not supported."""
+
+    def buildSolverModel(self, lp: pulp.LpProblem) -> None:  # noqa: N802 (PuLP's name)
+        import highspy
+        import numpy as np
+
+        if self.optionsDict.get("warmStart", False):
+            raise ValueError("_BulkHiGHS does not support warm starts")
+        inf = highspy.kHighsInf
+        h = lp.solverModel
+        sign = -1.0 if lp.sense == pulp.LpMaximize else 1.0
+        columns = lp.exported_variables()
+        col_of = {v.id: j for j, v in enumerate(columns)}
+        objective = lp.objective
+        n = len(columns)
+        cost = np.array([sign * objective.get(v, 0.0) for v in columns], dtype=np.float64)
+        lower = np.array(
+            [-inf if v.lowBound is None else v.lowBound for v in columns], dtype=np.float64
+        )
+        upper = np.array(
+            [inf if v.upBound is None else v.upBound for v in columns], dtype=np.float64
+        )
+        empty_i, empty_f = np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.float64)
+        h.addCols(n, cost, lower, upper, 0, np.zeros(n, dtype=np.int32), empty_i, empty_f)
+
+        starts, indices, values, row_lower, row_upper = [], [], [], [], []
+        for constraint in lp.constraints():
+            starts.append(len(indices))
+            for var, coef in constraint.items():
+                if coef != 0:
+                    indices.append(col_of[var.id])
+                    values.append(coef)
+            lb, ub = constraint.getLb(), constraint.getUb()
+            row_lower.append(-inf if lb is None else lb)
+            row_upper.append(inf if ub is None else ub)
+        h.addRows(
+            len(starts),
+            np.array(row_lower, dtype=np.float64),
+            np.array(row_upper, dtype=np.float64),
+            len(indices),
+            np.array(starts, dtype=np.int32),
+            np.array(indices, dtype=np.int32),
+            np.array(values, dtype=np.float64),
+        )
+        if self.mip:
+            integer = [j for j, v in enumerate(columns) if v.cat == pulp.LpInteger]
+            if integer:
+                kinds = np.full(len(integer), int(highspy.HighsVarType.kInteger), dtype=np.uint8)
+                h.changeColsIntegrality(len(integer), np.array(integer, dtype=np.int32), kinds)
 
 
 class _Model:
@@ -490,7 +551,7 @@ def solve_plan(
     model.lp.setObjective(model.objective() + terminal)
     build_seconds = time.perf_counter() - start
 
-    solver = pulp.HiGHS(
+    solver = _BulkHiGHS(
         msg=False,
         gapRel=params.mip_gap,
         threads=params.threads,
@@ -504,9 +565,15 @@ def solve_plan(
         raise InfeasiblePlan(f"no feasible plan (HiGHS status {stats.status_str})")
     info = model.lp.solverModel.getInfo()
     gws = _read_plan(model)
+    objective = sum(g.objective for g in gws)
+    # HiGHS minimises −(objective − constant) (PuLP flips the sense and keeps the constant),
+    # so its dual bound maps back as constant − bound. Never below the plan itself.
+    bound = float(model.lp.objective.constant) - float(info.mip_dual_bound)
+    if not math.isfinite(bound):
+        bound = math.inf
     return Plan(
         gws=gws,
-        objective=sum(g.objective for g in gws),
+        objective=objective,
         status=str(stats.status_str),
         mip_gap=float(info.mip_gap),
         build_seconds=build_seconds,
@@ -514,7 +581,26 @@ def solve_plan(
         n_candidates=len(problem.players),
         scenario=scenario.label,
         terminal_value=terminal,
+        bound=max(bound, objective + terminal),
     )
+
+
+def relaxation_bound(
+    problem: PlanInput, params: OptimizerParams, scenario: ChipScenario = NO_CHIP
+) -> float:
+    """An upper bound on the best `Plan.total_objective` of `scenario`: the optimum of its
+    LP relaxation (integrality dropped; same model, objective incl. the terminal value).
+    Every integral plan is feasible for the LP, so the LP optimum is ≥ the MILP optimum;
+    a small tolerance margin (`BOUND_MARGIN`, relative) covers HiGHS's feasibility
+    tolerances. `math.inf` when HiGHS doesn't report the LP optimal (no bound)."""
+    model = _Model(problem, params, scenario)
+    model.lp.setObjective(model.objective() + terminal_value(problem, params, scenario))
+    solver = _BulkHiGHS(mip=False, msg=False, threads=params.threads, timeLimit=params.time_limit)
+    stats = model.lp.solve(solver)
+    if str(stats.status_str) != "Optimal" or not stats.has_solution:
+        return math.inf
+    value = float(model.lp.objective.value())
+    return value + BOUND_MARGIN * max(1.0, abs(value))
 
 
 def _on(var: Any) -> bool:
