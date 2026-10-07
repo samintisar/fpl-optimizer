@@ -14,9 +14,9 @@ Most FPL tools give you a points projection and a solver. This project spends mo
 the part they skip: **proving the recommendations are actually better**, using a backtest that can't
 see the future and statistics that can't be fooled by one lucky season.
 
-> **Status:** work in progress. Phases 0–3 of 8 are done: a live data archiver, a 10-season
-> point-in-time data warehouse, leakage tests, and a backtester with paired statistical evaluation.
-> The MILP optimizer and the real models come next. No live recommendations until a pre-registered
+> **Status:** work in progress. Phases 0–3 of the nine phases (0–8) are done: a live data
+> archiver, a 10-season point-in-time data warehouse, leakage tests, and a backtester with paired
+> statistical evaluation. The MILP optimizer and the real models come next. No live recommendations until a pre-registered
 > holdout test passes ([roadmap](#roadmap)).
 
 ## Highlights
@@ -226,11 +226,14 @@ that touch features or models should keep `fplopt check leakage` passing.
 - [open-fpl-solver](https://github.com/solioanalytics/open-fpl-solver) (Apache-2.0): the
   reference the Phase 4 optimizer will be checked against.
 
-Each source has its own terms. Raw and derived data are not redistributed in this repository.
+Each source has its own terms. Raw snapshots and the Parquet tables built from them are not
+redistributed in this repository. The only data file tracked is
+[`results/experiments.csv`](results/experiments.csv), a log of this project's aggregate backtest
+metrics (season totals, paired differences, CIs) that contains no source records.
 
 ## License
 
-The code is released under the [MIT License](LICENSE). It covers this repository's code only, not
-the data the sources above provide.
+The code is released under the [MIT License](LICENSE), which also covers
+`results/experiments.csv`. It does not cover the data the sources above provide.
 
 This project is not affiliated with or endorsed by the Premier League or Fantasy Premier League.
