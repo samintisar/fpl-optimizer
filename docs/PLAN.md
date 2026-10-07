@@ -373,6 +373,13 @@ Horizon, decay and FT value are confounded — tune them jointly.
 - **Sensitivity analysis (Phase 8):** re-solve N times with xP perturbed by **estimate uncertainty** from the component models (not outcome noise); report how often each move appears ("robustness %") and backtest "most frequent plan" as a policy.
 - **Uncertain fixtures (Phase 8):** weight scenarios for possible blanks/doubles.
 - **VERIFY:** solve times with chip scenarios over 6 GWs; benchmark early.
+- **Phase 4 decisions** (plan `docs/superpowers/plans/2026-10-07-phase-4-optimizer.md`):
+  - Hits sit inside the decay sum, like the points they cost.
+  - FT value and money in the bank follow open-fpl-solver's convention (checked by the reference check).
+  - Bench uses the fixed fallback weights until Phase 5's minutes model.
+  - Chip terminal values are config per chip (0 once the window closes inside the horizon) until backtest-estimated.
+  - Top-3 cuts exclude plan #1's first-GW transfer set.
+  - Prices are held fixed over the horizon.
 
 ---
 
@@ -481,3 +488,4 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-06 | No direct Understat requests; use vaastav's Understat mirror (≤2024/25) and FPL's Opta xG (2022/23+). No per-shot data. | Understat's robots.txt disallows all crawling and it publishes no API or terms. |
 | 2026-10-06 | Backtester: outcomes read at lockdown via `as_of`; develop chip windows on `gw_index`; per-decision states from the baseline's own run; greedy never takes hits. | Same single access path as features; GW numbering gaps (2019/20, 2022/23); a neutral, reproducible reference. |
 | 2026-10-06 | Per-decision windows don't overlap (stride = k, one grid per season); bootstrap blocks counted in GWs; 80% two-sided CIs; `realized@xg` companion rows. | Overlapping windows made the bootstrap reject ~17% at nominal 10%; the 80% lower bound is the gate's one-sided α = 0.10; same-sample sign check. |
+| 2026-10-07 | Optimizer: PuLP on in-process HiGHS (1 thread, gap stop), chips by fixed scenarios, hits decayed, open-fpl-solver objective conventions, parallel backtests by (season, start). | PLAN §2/§7; deterministic decisions for the leakage check; like-for-like reference check; hundreds of solves per backtest. |
