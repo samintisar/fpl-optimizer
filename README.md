@@ -62,20 +62,13 @@ rolling average here, which sets a low but real bar the Phase 5 models must clea
 
 ```mermaid
 flowchart LR
-    subgraph Sources
-        FPL[FPL API]
-        FC[fplcache<br/>2021+ snapshots]
-        VA[vaastav<br/>2016+ GW data + Understat mirror]
-        FD[football-data.co.uk<br/>results + odds]
-        OA[The Odds API]
-    end
-    Sources --> A[adapters/] --> RAW[(raw/<br/>append-only)]
-    RAW --> B[build/<br/>17 Parquet tables, ID mapping, Elo]
-    B --> DS["DataStore.as_of(deadline)"]
-    DS --> F[features/] --> M[models/<br/>xP]
-    M --> P[policy<br/>greedy now, MILP next]
-    DS --> BT[backtest/<br/>simulator + paired eval]
-    P --> BT
+    SRC["FPL API, fplcache, vaastav,<br/>football-data, The Odds API"] --> A[adapters/]
+    A --> RAW[("raw/<br/>append-only")]
+    RAW --> B["build/<br/>17 Parquet tables"]
+    B --> DS["DataStore<br/>.as_of(deadline)"]
+    DS --> F[features/] --> M["models/<br/>xP"] --> P["policy<br/>greedy, MILP next"]
+    P --> BT["backtest/<br/>paired eval"]
+    DS --> BT
     P --> BOT[Telegram bot]
 ```
 
