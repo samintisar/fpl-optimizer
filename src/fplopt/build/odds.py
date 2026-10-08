@@ -30,9 +30,9 @@ prices are only known at kickoff: `available_at = kickoff_time`. `event_time` = 
 
 Seasons archived live (the season's first raw file was fetched before its last kickoff; from
 2026/27, re-fetched daily): `available_at = snapshot_at` = max(the time above, the timestamp
-of the first raw file of the season carrying the market's prices — one time per bookmaker,
-market and closing flag, so a revised price never splits a market), so a replay only sees
-what we held. `E0.csv` lists played matches only (no unplayed row in any 2026/27 file), so
+of the first raw file of the season holding the market's whole price set — one time per
+bookmaker, market and closing flag, so a revised price never splits a market), so a replay
+only sees what we held. `E0.csv` lists played matches only (no unplayed row in any 2026/27 file), so
 every live-season price is first archived after kickoff: usable as history, never as
 as-of-deadline odds for the match itself (those come from The Odds API). Seasons whose files
 were all fetched after the season (one-time backfills, ≤ 2025/26) keep the assumed times.
@@ -243,20 +243,20 @@ def prematch_available_at(kickoff: pd.Series) -> pd.Series:
     return collected.where(collected <= cap, cap)
 
 
-# A price's identity across a season's raw files (the date is left out: within a season the
-# teams already pin the match down).
-PRICE_KEY = [
-    "season",
-    "home_team_key",
-    "away_team_key",
-    "bookmaker",
-    "market",
-    "outcome",
-    "line",
-    "is_closing",
-    "price",
-]
-MARKET_KEY = [c for c in PRICE_KEY if c not in ("outcome", "line", "price")]
+# A market's identity across a season's raw files (the date is left out: within a season
+# the teams already pin the match down); `prices` (market_prices) is its full price set.
+MARKET_KEY = ["season", "home_team_key", "away_team_key", "bookmaker", "market", "is_closing"]
+
+
+def market_prices(odds: pd.DataFrame) -> pd.DataFrame:
+    """MARKET_KEY + `prices`: each market's full set of (outcome, line, price) as one
+    comparable string, so two files hold the same market only if every price matches."""
+    line = odds["line"].astype("float64").map(lambda v: "" if pd.isna(v) else repr(v))
+    item = odds["outcome"].astype(str) + "@" + line + "=" + odds["price"].map(repr)
+    prices = item.groupby([odds[c] for c in MARKET_KEY], sort=False).agg(
+        lambda s: "|".join(sorted(s))
+    )
+    return prices.rename("prices").reset_index()
 
 
 def archived_live(first_file: pd.Timestamp, kickoffs: pd.Series) -> bool:
@@ -267,14 +267,20 @@ def archived_live(first_file: pd.Timestamp, kickoffs: pd.Series) -> bool:
 
 
 def football_data_first_seen(files: list[tuple[pd.Timestamp, pd.DataFrame]]) -> pd.DataFrame:
-    """PRICE_KEY + `first_seen`: per price, the timestamp of the first of `files` ((fetched
-    at, `football_data_frame` rows) pairs) carrying it."""
-    frames = [football_data_odds(rows).assign(first_seen=at) for at, rows in files]
-    frames = [f for f in frames if len(f)]
+    """MARKET_KEY + `prices` + `first_seen`: per market price set (`market_prices`), the
+    timestamp of the first of `files` ((fetched at, `football_data_frame` rows) pairs) holding
+    exactly that set."""
+    frames = []
+    for at, rows in files:
+        odds = football_data_odds(rows)
+        if len(odds):
+            frames.append(market_prices(odds).assign(first_seen=at))
+    columns = [*MARKET_KEY, "prices", "first_seen"]
     if not frames:
-        return pd.DataFrame(columns=[*PRICE_KEY, "first_seen"]).astype({"first_seen": UTC_US})
+        return pd.DataFrame(columns=columns).astype({"first_seen": UTC_US})
     seen = pd.concat(frames, ignore_index=True).astype({"first_seen": UTC_US})
-    return seen.groupby(PRICE_KEY, dropna=False, sort=False, as_index=False)["first_seen"].min()
+    keys = [*MARKET_KEY, "prices"]
+    return seen.groupby(keys, sort=False, as_index=False)["first_seen"].min()[columns]
 
 
 def football_data_live_first_seen(
@@ -344,26 +350,24 @@ def _not_before_first_seen(
     df: pd.DataFrame, available: pd.Series, first_seen: pd.DataFrame
 ) -> pd.Series:
     """max(available, first seen) for the rows of the seasons in `first_seen`; each of them
-    must have been seen (the newest file is among the files). A market's prices (MARKET_KEY)
-    share the time the whole set was first held, so a revised price never splits it."""
+    must have been seen (the newest file is among the files). First seen = the first file
+    holding the market's whole price set (`market_prices`), so a market is never dated to a
+    file where its prices did not appear together."""
     live = df["season"].isin(first_seen["season"].unique())
+    keys = [*MARKET_KEY, "prices"]
+    first_seen = first_seen.astype({c: df[c].dtype for c in MARKET_KEY})
+    markets = market_prices(df).merge(first_seen, on=keys, how="left", validate="one_to_one")
     seen = (
-        df[PRICE_KEY]
-        .merge(
-            first_seen.astype({c: df[c].dtype for c in PRICE_KEY}),
-            on=PRICE_KEY,
-            how="left",
-            validate="many_to_one",
-        )["first_seen"]
+        df[MARKET_KEY]
+        .merge(markets, on=MARKET_KEY, how="left", validate="many_to_one")["first_seen"]
         .set_axis(df.index)
     )
     missing = live & seen.isna()
     if missing.any():
         raise OddsValidationError(
             f"{missing.sum()} live-season football-data price(s) in no archived file:\n"
-            + df.loc[missing, PRICE_KEY].head(10).to_string()
+            + df.loc[missing, [*MARKET_KEY, "outcome", "line", "price"]].head(10).to_string()
         )
-    seen = seen.groupby([df[c] for c in MARKET_KEY], dropna=False).transform("max")
     later = live & (seen > available)
     if later.any():
         log.info(

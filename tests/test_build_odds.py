@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pandas as pd
 import pytest
@@ -12,6 +12,7 @@ from fplopt.build.odds import (
     check_overround,
     football_data_first_seen,
     football_data_odds,
+    football_data_snapshots,
     odds_api_rows,
     prematch_available_at,
 )
@@ -332,7 +333,7 @@ def test_build_odds_snapshot_end_to_end(world):
     assert (api["fixture_key"] == 2026000 + upcoming["id"]).all()
 
 
-def test_first_seen_is_the_first_file_carrying_the_price():
+def test_first_seen_is_the_first_file_holding_the_whole_market():
     gw1 = fd_row(2026, AvgH=2.0, AvgD=3.5, AvgA=4.0)
     gw1_moved = fd_row(2026, AvgH=2.2, AvgD=3.5, AvgA=4.0)  # a revised home price
     gw2 = fd_row(2026, AvgH=1.5, AvgD=4.0, AvgA=6.0).assign(home_team_key=8, away_team_key=3)
@@ -341,17 +342,39 @@ def test_first_seen_is_the_first_file_carrying_the_price():
         (utc("2026-08-10T02:30"), pd.concat([gw1_moved, gw2], ignore_index=True)),
     ]
     seen = football_data_first_seen(files)
-    first = {(r.home_team_key, r.outcome, r.price): r.first_seen for r in seen.itertuples()}
+    first = {(r.home_team_key, r.prices): r.first_seen for r in seen.itertuples()}
     assert first == {
-        (3, "home", 2.0): utc("2026-08-03T02:30"),
-        (3, "draw", 3.5): utc("2026-08-03T02:30"),
-        (3, "away", 4.0): utc("2026-08-03T02:30"),
-        (3, "home", 2.2): utc("2026-08-10T02:30"),
-        (8, "home", 1.5): utc("2026-08-10T02:30"),
-        (8, "draw", 4.0): utc("2026-08-10T02:30"),
-        (8, "away", 6.0): utc("2026-08-10T02:30"),
+        (3, "away@=4.0|draw@=3.5|home@=2.0"): utc("2026-08-03T02:30"),
+        (3, "away@=4.0|draw@=3.5|home@=2.2"): utc("2026-08-10T02:30"),
+        (8, "away@=6.0|draw@=4.0|home@=1.5"): utc("2026-08-10T02:30"),
     }
     assert football_data_first_seen([]).empty
+
+
+def test_market_reverting_to_old_prices_dates_from_the_file_holding_them_together():
+    """home/draw 2.0/3.4, then 2.2/3.5, then 2.0/3.5: each price was seen by the second file,
+    but the newest market only by the third."""
+    played = date(2026, 8, 1)
+    match = {"home_team_key": [3], "away_team_key": [8], "season": [2026], "fd_date": [played]}
+    rows = pd.DataFrame(match)
+    files = [
+        (utc("2026-08-03T02:30"), rows.assign(AvgH=2.0, AvgD=3.4, AvgA=4.0)),
+        (utc("2026-08-04T02:30"), rows.assign(AvgH=2.2, AvgD=3.5, AvgA=4.0)),
+        (utc("2026-08-05T02:30"), rows.assign(AvgH=2.0, AvgD=3.5, AvgA=4.0)),
+    ]
+    fixture = pd.DataFrame(
+        {
+            **{k: v for k, v in match.items() if k != "fd_date"},
+            "fixture_key": [2026001],
+            "kickoff_time": [utc("2026-08-01T14:00")],
+            "event_time": [utc("2026-08-01T14:00")],
+            "fd_date": [played],
+        }
+    )
+    newest = football_data_odds(files[-1][1])
+    out = football_data_snapshots(newest, fixture, football_data_first_seen(files))
+    assert (out["available_at"] == utc("2026-08-05T02:30")).all()
+    assert (out["snapshot_at"] == out["available_at"]).all()
 
 
 def test_archived_live_means_first_file_before_the_last_kickoff():
