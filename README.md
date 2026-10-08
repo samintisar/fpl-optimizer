@@ -65,7 +65,7 @@ data/         (gitignored) Parquet tables, SQLite user state
 | 1 | Backfill + ID mapping + Parquet tables | done: raw backfills on the server; `fplopt build all` builds every table |
 | 2 | `as_of` layer + leakage tests | done: `DataStore(...).as_of(deadline)`, baseline features, corrupt-the-future check (CI + `fplopt check leakage`) |
 | 3 | Backtester + baselines + greedy policy | done: simulator from any squad state, rolling-average and `ep_next` xP, roll/greedy policies, paired full-run and per-decision evaluation with GW-block bootstrap (`fplopt backtest run`/`compare`, log in `results/experiments.csv`) |
-| 4 | Optimizer | in review: MILP planner (PuLP + HiGHS; transfers, captain, bench, chip scenarios, top-3 + roll plan), `OptimizerPolicy` in the backtester, parallel backtests (`--jobs`), `fplopt optimize plan`/`bench`; hits off by default (`max_hits=0`); beats greedy on full runs with `rolling` and `ep_next`, not per decision (PLAN §7) |
+| 4 | Optimizer | done (criterion deferred to Phase 5): MILP planner (PuLP + HiGHS; transfers, captain, bench, chip scenarios, top-3 + roll plan), `OptimizerPolicy` in the backtester, parallel backtests (`--jobs`), `fplopt optimize plan`/`bench`; hits off by default (`max_hits=0`). "Beats greedy" is **not** met out of sample with the baseline xP (develop +, validate ≈ 0; PLAN §7 *Phase 4 results*) and moves to Phase 5 |
 | 5 | Real models (market-implied team model first) | |
 | 6 | Holdout evaluation | |
 | 7 | Telegram bot + go live | |
