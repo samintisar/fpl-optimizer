@@ -35,6 +35,7 @@ from fplopt.backtest.state import (
 from fplopt.features.baseline import player_pool
 from fplopt.features.store import DataStore
 from fplopt.models import MODELS
+from fplopt.models.fitted import FittedModel
 from fplopt.optimize import OptimizerParams
 
 RULES = load_rules("2026-27")
@@ -349,8 +350,13 @@ def league():
     out = {}
     for gw_index, deadline in zip(gameweeks["gw_index"], gameweeks["deadline_time"], strict=True):
         view = store.as_of(deadline)
-        # The models the policies below use (v1 refits per deadline here: too slow).
-        xp = {name: MODELS[name](view) for name in ("rolling", "ep_next")}
+        # Every model except the walk-forward fitted ones (v1 would refit at every
+        # deadline here: too slow for this fixture; the backtest smoke test covers it).
+        xp = {
+            name: model(view)
+            for name, model in MODELS.items()
+            if not isinstance(model, FittedModel)
+        }
         out[int(gw_index)] = (view, player_pool(view), xp)
     return out
 

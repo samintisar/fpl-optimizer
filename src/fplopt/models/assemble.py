@@ -56,9 +56,10 @@ xP = their sum.
 a blank is 0). Probabilities are per player-GW only for one fixture: P(start), P(plays),
 P(60+), the 3 minutes classes, P(clean sheet) (= p_60 · team P(CS): the player's FPL clean
 sheet), P(goal ≥ 1); NaN in a double, 0 in a blank (P(0 minutes) 1). Expected minutes,
-goals and assists are sums. The frame keeps the standard xP columns and dtypes first (`XP_DTYPES`); the extra
-columns are the ones `fplopt.evaluate.metrics.COMPONENTS` scores. The backtester, policies
-and optimizer read only player_key, gw, gw_index, horizon and xp.
+goals and assists are sums. The frame keeps the standard xP columns and dtypes first
+(`XP_DTYPES`); the extra columns are the ones `fplopt.evaluate.metrics.COMPONENTS`
+scores. The backtester, policies and optimizer read only player_key, gw, gw_index, horizon
+and xp.
 
 `MODELS["v1"]` = `FittedModel(fit_v1, predict_v1)`. No state, no file access except the
 rules config (`backtest_rules` reads `config/scoring`, never `data/`).

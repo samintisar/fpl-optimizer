@@ -308,3 +308,67 @@ for everyone):
 - Time (6 processes in parallel, the chosen settings): `fit_shares` 0.15–0.59 s per cutoff
   (1.0 s on the full `data/` store at 2022/23), `predict_shares` 0.10–0.27 s per deadline
   (median 0.17 s). The walk takes ~2.5 min for one variant at `--jobs 6`.
+
+## `calibrate_v1.py`: v1 calibration and the ban residual
+
+Phase 5 plan, Task 5 (PLAN §5 *Calibration*; `fplopt.models.assemble`, `.calibration`). Reads
+the built `data/` tables read-only into an in-memory store (`--data-dir`):
+
+```sh
+uv run python dev/calibrate_v1.py --data-dir data walk --seasons 2016-2024 --jobs 6 \
+    --out results/p5-task5-walk [--ban-residual]                           # ~4.5 min
+uv run python dev/calibrate_v1.py fit --walk results/p5-task5-walk-ban --first-fit 2017 \
+    --parts "p_start:1+" [--variant SPECS ...] [--write]                   # ~5 min
+uv run python dev/calibrate_v1.py ban --off results/p5-task5-walk --on results/p5-task5-walk-ban
+```
+
+- `walk`: v1's uncalibrated per player-fixture components (every horizon) at every deadline of
+  2016/17–2024/25 (fitted at the refit cutoffs), joined to each fixture's realized minutes,
+  start (real, else inferred), goals, clean sheet, the club's goals against and the re-scored
+  points. One parquet per season. The validate seasons are walked only so that the 2024/25
+  and 2025/26+ calibration entries can be fitted; nothing scores them.
+- `fit`: the expanding-window calibrations (season S: fitted on the walk rows of seasons in
+  [`--first-fit`, S)) and their effect on develop (2017/18–2022/23 only): per-fixture xP MSE
+  (horizon 0, 1–5), Brier of P(start), of the team's P(CS) and of P(goal ≥ 1), minutes log
+  loss and goals log-likelihood, means over seasons. Part specs: `name` (all horizons), `name:0`
+  or `name:1+`. `--write` regenerates `src/fplopt/models/calibration_table.py`.
+- `ban`: the ban residual (`MinutesParams.ban_residual`) against P(start) = 0 on develop.
+
+### Results (2026-10-08)
+
+**Ban residual** (develop, mean over 2017/18–2022/23; ~47 banned player-fixtures per season,
+31% of which started): adopted.
+
+| | minutes log loss (all horizons) | on banned rows | Brier P(start) on banned rows | xP MSE h0 | xP MSE h1–5 |
+|---|---|---|---|---|---|
+| P(start) = 0 | 0.6302 | 11.62 | 0.311 | 4.26088 | 4.68698 |
+| residual | 0.6287 | 0.78 | 0.229 | 4.26034 | 4.68695 |
+
+**Calibration** (on the ban-residual walk, `--first-fit 2017`: 2016/17 is burn-in, so 2017/18
+is uncalibrated and 2018/19 is the first calibrated season; develop means over 2017/18–2022/23,
+per player-fixture):
+
+| variant | xP MSE h0 | xP MSE h1–5 | Brier P(start) h0 / h1–5 | team P(CS) Brier | P(goal) Brier h0 |
+|---|---|---|---|---|---|
+| none | 4.26034 | 4.68695 | 0.09848 / 0.13618 | 0.18740 | 0.03244 |
+| P(start), all horizons | 4.27054 | 4.68355 | 0.09958 / 0.13572 | | |
+| P(start), h0 only | 4.26104 | 4.68740 | 0.09852 / 0.13616 | | |
+| **P(start), h1+ (kept)** | **4.26034** | **4.68426** | **0.09848 / 0.13577** | | |
+| team P(CS) | 4.26222 | 4.68763 | | 0.18783 | |
+| team P(CS), h1+ | 4.26034 | 4.68820 | | 0.18778 | |
+| P(goal ≥ 1) | 4.26316 | 4.68645 | | | 0.03246 |
+| P(goal ≥ 1), h1+ | 4.26034 | 4.68630 | | | |
+| linear xP per position | 4.26717 | 4.68560 | | | |
+
+- Uncalibrated v1 is already calibrated in the large (horizon 0: mean xP 1.317 vs 1.327 realized;
+  P(start) 0.353 vs 0.352; e_goals 0.0437 vs 0.0428; e_bonus 0.104 vs 0.103), so most maps only
+  add noise. P(CS) as p_60 · team P(CS) runs 8% under the player's realized FPL clean sheets
+  (0.094 vs 0.102: a player off after 60+ minutes keeps a clean sheet the team later loses);
+  p_cs^(m_sixty/90) closes half of it but moved xP MSE by < 0.002 either way, so the plan's
+  formula stays.
+- Only isotonic P(start) at horizons ≥ 1 improves its component and xP; it is the only part in
+  the table. P(start) + P(goal) at h1+ together: 4.68596 (worse than P(start) alone).
+- With `--first-fit 2016` (2017/18 calibrated on 2016/17 alone) every part was worse still
+  (e.g. all parts: xP MSE h0 4.2756; on the walk without the ban residual).
+- Time: the walk fits 1.1 s (2016/17 cutoffs) to 21 s (2024/25) per cutoff, predicts 0.5–1.5 s
+  per deadline; ~4.5 min for 2016–2024 at `--jobs 6`.
