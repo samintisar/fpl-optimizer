@@ -20,6 +20,9 @@ __pycache__/
 /dist/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # Notebooks / experiments
 .ipynb_checkpoints/
@@ -33,3 +36,7 @@ mlruns/
 Thumbs.db
 .vscode/
 .idea/
+
+# Claude Code: per-machine settings and agent worktrees
+.claude/settings.local.json
+.claude/worktrees/
