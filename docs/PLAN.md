@@ -332,6 +332,28 @@ Blending rule everywhere: equal weights or a single fixed weight — never weigh
   - **Candidate test:** `models eval` pairwise candidate tests use the pair's own top-N union (`own_candidate`), so they no longer depend on which other models are in the run.
   - **Variant counts:** the Phase 5 tuning grids are logged in `results/experiments.csv` with their variant counts (team 120, minutes 42, shares 38, v1 calibration 8).
   - **Develop after the fixes:** v1 MSE h0 4.31 vs rolling 5.33 (2016/17–2022/23) and vs ep_next 5.33 (v1 3.99 on 2021/22–2022/23); XI regret 5.46 vs 6.41; captain regret 4.77 vs 5.50. These are the same as before the fixes to two decimals.
+- **Criterion 1, validate (2023/24–2024/25), one run** (2026-10-08, after the review fixes; `fplopt models eval --models v1,rolling,ep_next --seasons 2023-2024`, `results/p5-validate`, 4 min). **Met.**
+
+  | | MSE h0 | candidate MSE h0 | MSE h1–5 | XI regret | captain regret |
+  |---|---|---|---|---|---|
+  | `v1` | **3.47** | **8.79** | **3.98** | **4.60** | **4.04** |
+  | rolling | 4.35 | 11.20 | 4.80 | 5.29 | 4.63 |
+  | ep_next | 4.46 | 11.31 | 5.24 | 4.68 | 4.11 |
+
+  - **MSE:** lower than both baselines at horizon 0 and at every horizon 1–5 separately. One-sided DM p < 0.001 everywhere. Candidate MSE on each pair's own top-N union: 9.07 vs 11.63 (rolling) and 9.38 vs 12.10 (ep_next), p < 0.001.
+  - **Seasons:** v1 wins both (3.45 / 3.50 vs rolling 4.36 / 4.35, ep_next 4.44 / 4.48).
+  - **Regrets: no worse** (better, not significantly):
+    - XI regret 4.60 vs 5.29 (rolling, p 0.10) and 4.68 (ep_next, p 0.44);
+    - captain regret 4.04 vs 4.63 (p 0.13) and 4.11 (p 0.44).
+  - **Predicted-xP bands.** The harness's band table puts each model on its *own* bands, so each band holds different players. In bands 4–8 xP v1's MSE is higher there (e.g. 5–6 xP: 22.9 vs 16.6 / 16.1). The reason: v1's high bands hold players who do score high (5–6 xP band: realized 5.96), and high scorers vary more. The baselines' high bands are full of overrated low scorers (realized 3.45 / 3.67).
+    - On identical rows, v1's MSE is lower than both baselines in every band, whether the bands are drawn by rolling's xP, ep_next's, v1's own or the three models' mean (e.g. by mean xP, 5–6: 13.7 vs 19.6 / 22.9; ≥ 8: 40.4 vs 53.1 / 60.5).
+    - The criterion's "no worse in any band" is read as this paired comparison, the only one that compares like with like. The own-band table is kept as a calibration diagnostic: v1's mean realized points track its prediction in every band, the baselines overpredict above ~3 xP.
+  - **Components, validate:**
+    - minutes log loss 0.450 at h0 and 0.610 at h1–5;
+    - P(start) Brier 0.073 at h0 (it underpredicts high P(start) slightly: 0.85 predicted → 0.92 observed);
+    - player P(CS) Brier 0.056; P(goal) Brier 0.030;
+    - e_goals mean 0.0402 vs 0.0402 realized.
+  - **Flag check (§4) on validate:** no separate with/without-flags run was made; the P(start) reliability above includes the flag layer.
 
 ### 6.1 Team model — market primary
 **Market-implied λ (primary for GWs with odds, typically GW+1, sometimes +2):**
@@ -660,5 +682,6 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-08 | Optimizer defaults `max_hits = 0` (conservative: unlimited hits clearly lose, max 1 with margin 2 undetermined) and `itb_value = 0`; `ep_next_fade` xP; parallel backtests (`--jobs`). Phase 4 full-run gains vs greedy (rolling +0.90/GW, ep_next +1.92/GW) are in-sample only (see the next row); chips +4.3/GW is chips used vs wasted. | Cash in the bank was hoarded (2016/17 GW1 sell-off); realized transfer gains are ~⅕–⅓ of predicted (§7 Phase 4 results). |
 | 2026-10-08 | Merge Phase 4 without its "optimizer beats greedy" criterion; the criterion moves to Phase 5 (with the real xP models: develop-selected, validate-confirmed, deflated). | Out of sample the full-run edge vanishes (validate: rolling −0.03, ep_next −0.13 per GW; 2021/22 carries ~⅔ of it; season-level p 0.14 / 0.11; deflated ≈ +0.08 / +0.44) the split pattern flips with the start set; per decision the optimizer doesn't beat greedy (negative with the roll continuation; with each arm's own continuation positive but reference-dependent, season-level p ≥ 0.22) (§7 *Phase 4 results*). The planner itself is done and correct (reference check, solve times, leakage checks); its edge depends on xP quality. |
 | 2026-10-08 | Phase 5 models fit walk-forward: refit every 4 GWs via `AsOfView.earlier`, with fits memoized by the caller; LightGBM only through `fplopt.models.gbm` (deterministic). Criterion 1 is tested on xP MSE and decision metrics against `rolling` and `ep_next` on validate. Phase 5 ships as two PRs (5a models, 5b decisions). | ~10 fits per season instead of one per deadline, still leak-checked end to end; the baselines have no components to compare; one review per PR stays manageable. |
+| 2026-10-08 | Phase 5 criterion 1 met on validate (2023/24–2024/25). The "no worse in any predicted-xP band" condition is judged on identical rows (bands by each model's xP and by their mean), not on each model's own bands. | v1 MSE 3.47 vs 4.35 / 4.46 (p < 0.001 at every horizon), regrets no worse. Own-band MSE compares different players: v1's high bands hold real high scorers, whose outcomes vary more; on identical rows v1 is lower in every band under every banding. |
 | 2026-10-08 | Backtests use a deterministic node limit, no wall-clock limit (60 s only for `optimize plan`/`bench`); solver status recorded per GW; tie-break ε 1e-4 per buy; parallel units on a pipe-per-worker pool. | Results must not depend on machine load (solves took up to 306 s on a loaded machine); equal-xP GWs made arbitrary transfers; ProcessPoolExecutor's queue semaphores broke under load on Windows (Phase 4 review). |
 | 2026-10-07 | Chip scenarios searched best-first by LP/derived upper bounds (same plan as solving all); bulk PuLP→highspy hand-over; club-aware dominance pruning; top-N 20/60/60/30. | #10 benchmark: 107–750 s → median 14 s per deadline; old dominance lost up to 6.6 pts, 10/30/30/15 up to 1.0. |
