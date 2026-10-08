@@ -83,6 +83,7 @@ __all__ = (
     "SeasonRun",
     "Step",
     "decide_step",
+    "gw_matches",
     "hindsight_points",
     "play_step",
     "read_outcomes",
@@ -250,15 +251,17 @@ class Caches:
         return self._outcomes[key]
 
 
-def read_outcomes(
-    store: DataStore, rules: Rules, season: int, gw: int, lockdown: pd.Timestamp
-) -> GwOutcomes:
-    """Outcomes of (season, gw) from `store.as_of(lockdown + 1 µs)` (module docstring)."""
-    view = store.as_of(pd.Timestamp(lockdown) + OUTCOME_DELAY)
-    matches = view.table("player_match", columns=list(MATCH_COLUMNS))
+def gw_matches(
+    view: AsOfView, season: int, gw: int, columns: Sequence[str] = MATCH_COLUMNS
+) -> pd.DataFrame:
+    """The `player_match` rows (`columns`, which must include `player_key`, `season`, `gw`)
+    of (season, gw) visible in `view`, with the player's `player_season.element_type`
+    (int64; rows without one are dropped with a warning), RangeIndex: the rows the backtest
+    scores (`read_outcomes`, `fplopt.evaluate.outcomes`)."""
+    matches = view.table("player_match", columns=list(columns))
     matches = matches[(matches["season"] == season) & (matches["gw"] == gw)]
     if matches.empty:
-        return GwOutcomes({}, {})
+        return matches.assign(element_type=pd.Series(dtype="int64")).reset_index(drop=True)
     positions = view.table("player_season", columns=["player_key", "season", "element_type"])
     positions = positions[positions["season"] == season].drop_duplicates("player_key", keep="last")
     matches = matches.merge(
@@ -273,7 +276,17 @@ def read_outcomes(
             int(unknown.sum()),
         )
         matches = matches[~unknown]
-    matches = matches.astype({"element_type": "int64"}).reset_index(drop=True)
+    return matches.astype({"element_type": "int64"}).reset_index(drop=True)
+
+
+def read_outcomes(
+    store: DataStore, rules: Rules, season: int, gw: int, lockdown: pd.Timestamp
+) -> GwOutcomes:
+    """Outcomes of (season, gw) from `store.as_of(lockdown + 1 µs)` (module docstring)."""
+    view = store.as_of(pd.Timestamp(lockdown) + OUTCOME_DELAY)
+    matches = gw_matches(view, season, gw)
+    if matches.empty:
+        return GwOutcomes({}, {})
     realized = score_matches(matches, rules)
     teams = view.table("team_match", columns=list(TEAM_COLUMNS))
     teams = teams[teams["fixture_key"].isin(matches["fixture_key"])]
