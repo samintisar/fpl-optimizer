@@ -232,6 +232,14 @@ class AsOfView:
         self.deadline = _utc(deadline)
         self._deadline_ns = self.deadline.as_unit("ns").value
 
+    def earlier(self, cutoff: Any) -> AsOfView:
+        """The same store as of `cutoff` (walk-forward fits); a cutoff after this view's
+        deadline raises, so nothing derived from a view sees more than the view."""
+        cutoff = _utc(cutoff)
+        if cutoff > self.deadline:
+            raise ValueError(f"cutoff {cutoff} is after the view's deadline {self.deadline}")
+        return AsOfView(self._store, cutoff)
+
     def _visible(self, name: str) -> tuple[_Table, int]:
         table = self._store._table(name)
         return table, table.visible(self._deadline_ns)

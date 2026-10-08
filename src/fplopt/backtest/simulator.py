@@ -70,6 +70,7 @@ from fplopt.backtest.xg_points import team_xg_table, xg_score_matches
 from fplopt.features.baseline import player_pool
 from fplopt.features.store import AsOfView, DataStore
 from fplopt.models import MODELS
+from fplopt.models.fitted import FittedModel
 from fplopt.seasons import HOLDOUT_SEASONS, season_label
 
 log = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ __all__ = (
     "SeasonRun",
     "Step",
     "decide_step",
+    "gw_matches",
     "hindsight_points",
     "play_step",
     "read_outcomes",
@@ -175,16 +177,19 @@ class GwOutcomes:
 
 
 class Caches:
-    """xP frames per (model, deadline), pools per deadline and outcomes per (season, gw,
-    rules.label), for one `DataStore` (using them with another raises). Share one instance
-    across policies and start states; the cached frames must not be modified."""
+    """xP frames per (model, deadline), walk-forward fits per (model, cutoff) (`FittedModel`:
+    the frame is `predict(view, fit)` with the memoized fit, the same as calling the model),
+    pools per deadline and outcomes per (season, gw, rules.label), for one `DataStore`
+    (using them with another raises). Share one instance across policies and start states;
+    the cached frames and fits must not be modified."""
 
     def __init__(self) -> None:
         self._store: DataStore | None = None
         self._xp: dict[tuple[str, pd.Timestamp], pd.DataFrame] = {}
+        self._fits: dict[tuple[str, pd.Timestamp], Any] = {}
         self._pool: dict[pd.Timestamp, pd.DataFrame] = {}
         self._outcomes: dict[tuple[int, int, str], GwOutcomes] = {}
-        self.timings: dict[str, float] = {"xp": 0.0, "pool": 0.0, "outcomes": 0.0}
+        self.timings: dict[str, float] = {"xp": 0.0, "fit": 0.0, "pool": 0.0, "outcomes": 0.0}
 
     def _check(self, store: DataStore) -> None:
         if self._store is None:
@@ -208,10 +213,31 @@ class Caches:
             raise ValueError(f"unknown xp_model {model!r} (MODELS: {sorted(MODELS)})")
         key = (model, view.deadline)
         if key not in self._xp:
-            start = time.perf_counter()
-            self._xp[key] = MODELS[model](view)
+            builder = MODELS[model]
+            if isinstance(builder, FittedModel):
+                fitted = self.fit(store, model, view)
+                start = time.perf_counter()
+                self._xp[key] = builder.predict(view, fitted)
+            else:
+                start = time.perf_counter()
+                self._xp[key] = builder(view)
             self.timings["xp"] += time.perf_counter() - start
         return self._xp[key]
+
+    def fit(self, store: DataStore, model: str, view: AsOfView) -> Any:
+        """The `FittedModel` `model`'s fit for `view`'s deadline: `fit(view.earlier(cutoff))`,
+        memoized by cutoff; `view` must come from `store`."""
+        self._check(store)
+        builder = MODELS[model]
+        if not isinstance(builder, FittedModel):
+            raise ValueError(f"xp_model {model!r} is not fitted walk-forward")
+        cutoff = builder.cutoff(view)
+        key = (model, cutoff)
+        if key not in self._fits:
+            start = time.perf_counter()
+            self._fits[key] = builder.fit(view.earlier(cutoff))
+            self.timings["fit"] += time.perf_counter() - start
+        return self._fits[key]
 
     def outcomes(
         self, store: DataStore, rules: Rules, season: int, gw: int, lockdown: pd.Timestamp
@@ -225,15 +251,17 @@ class Caches:
         return self._outcomes[key]
 
 
-def read_outcomes(
-    store: DataStore, rules: Rules, season: int, gw: int, lockdown: pd.Timestamp
-) -> GwOutcomes:
-    """Outcomes of (season, gw) from `store.as_of(lockdown + 1 µs)` (module docstring)."""
-    view = store.as_of(pd.Timestamp(lockdown) + OUTCOME_DELAY)
-    matches = view.table("player_match", columns=list(MATCH_COLUMNS))
+def gw_matches(
+    view: AsOfView, season: int, gw: int, columns: Sequence[str] = MATCH_COLUMNS
+) -> pd.DataFrame:
+    """The `player_match` rows (`columns`, which must include `player_key`, `season`, `gw`)
+    of (season, gw) visible in `view`, with the player's `player_season.element_type`
+    (int64; rows without one are dropped with a warning), RangeIndex: the rows the backtest
+    scores (`read_outcomes`, `fplopt.evaluate.outcomes`)."""
+    matches = view.table("player_match", columns=list(columns))
     matches = matches[(matches["season"] == season) & (matches["gw"] == gw)]
     if matches.empty:
-        return GwOutcomes({}, {})
+        return matches.assign(element_type=pd.Series(dtype="int64")).reset_index(drop=True)
     positions = view.table("player_season", columns=["player_key", "season", "element_type"])
     positions = positions[positions["season"] == season].drop_duplicates("player_key", keep="last")
     matches = matches.merge(
@@ -248,7 +276,17 @@ def read_outcomes(
             int(unknown.sum()),
         )
         matches = matches[~unknown]
-    matches = matches.astype({"element_type": "int64"}).reset_index(drop=True)
+    return matches.astype({"element_type": "int64"}).reset_index(drop=True)
+
+
+def read_outcomes(
+    store: DataStore, rules: Rules, season: int, gw: int, lockdown: pd.Timestamp
+) -> GwOutcomes:
+    """Outcomes of (season, gw) from `store.as_of(lockdown + 1 µs)` (module docstring)."""
+    view = store.as_of(pd.Timestamp(lockdown) + OUTCOME_DELAY)
+    matches = gw_matches(view, season, gw)
+    if matches.empty:
+        return GwOutcomes({}, {})
     realized = score_matches(matches, rules)
     teams = view.table("team_match", columns=list(TEAM_COLUMNS))
     teams = teams[teams["fixture_key"].isin(matches["fixture_key"])]

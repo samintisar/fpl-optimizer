@@ -144,3 +144,239 @@ and first-GW transfers are equal in 19 of 24.
 Not exercised by these instances: an owned player who left the game, and a club over the
 team limit (the latter is not comparable, see above).
 
+## `team_rho.py` and `team_model_eval.py`: the team model on develop
+
+Phase 5 plan, Task 2 (PLAN §6.1; `fplopt.models.team`). Both read the built `data/` tables
+read-only, as of 2023-07-01: develop results only, never validate or the 2025/26 holdout.
+
+```sh
+uv run python dev/team_rho.py [--data-dir data] [--devig power|shin]          # ~1 min
+uv run python dev/team_model_eval.py [--data-dir data] [--quick] [--out DIR]  # ~10 min
+```
+
+**ρ** (`team_rho.py`): for each ρ on a grid, every develop match's market λ is re-solved
+under that ρ and the realized scores are scored under Dixon-Coles; ρ = argmax. On the 2,660
+develop matches with pre-match odds the profile is flat around **ρ = −0.03** (+0.6
+log-likelihood in total over ρ = 0; ρ = −0.10 is 4.1 worse). Hard-coded as `team.RHO`.
+
+**Evaluation** (`team_model_eval.py`): every develop deadline (265), fitted at the
+walk-forward cutoff (`refit_deadline`), predicting the target GW and the next 5. Scores per
+side: Poisson log-likelihood of the team's goals and the P(clean sheet) Brier score, per
+horizon, for the model (market λ where odds are visible, else ratings), the ratings alone,
+an Elo-only reference (log λ linear in the Elo difference + home, Poisson-fitted on the 3
+years before the cutoff, Elo at the deadline) and the market λ. It writes
+`results/<UTC>-team-eval/metrics.json`.
+
+Results (2026-10-08; chosen parameters: half-life 45 d, w 0.75, prior 2; all develop
+seasons, mean per side):
+
+| horizon | model ll | ratings ll | Elo ll | model Brier | ratings Brier | Elo Brier |
+|---|---|---|---|---|---|---|
+| 0 | −1.4471 | −1.4542 | −1.4656 | 0.1859 | 0.1870 | 0.1891 |
+| 1 | −1.4550 | −1.4550 | −1.4657 | 0.1871 | 0.1872 | 0.1889 |
+| 2 | −1.4551 | −1.4551 | −1.4655 | 0.1870 | 0.1870 | 0.1888 |
+| 3 | −1.4548 | −1.4548 | −1.4656 | 0.1873 | 0.1873 | 0.1891 |
+| 4 | −1.4533 | −1.4533 | −1.4634 | 0.1882 | 0.1882 | 0.1898 |
+| 5 | −1.4531 | −1.4531 | −1.4629 | 0.1884 | 0.1884 | 0.1901 |
+
+- Horizon 0, the 2,454 fixtures with visible odds: market −1.4477 / 0.1854, ratings
+  −1.4554 / 0.1866, Elo −1.4670 / 0.1890. Shin's de-vig: −1.4477 / 0.1854 (no difference).
+- Odds visible at the deadline (target GW): 2016/17 95.5%, 2017/18 92.9%, 2018/19 94.5%,
+  2019/20 91.8%, 2020/21 91.6%, 2021/22 88.4%, 2022/23 91.1%. The misses are fixtures
+  whose football-data collection time (Tuesday/Friday 15:00 UK) falls after the GW's
+  deadline, mostly midweek games in a GW that starts at the weekend. Horizons 1–5: ≤ 0.3%.
+- The model beats the Elo reference in every develop season (all horizons pooled).
+- Tuning grid (half-life × w × prior strength, 120 variants; mean over 2017/18–2022/23 of
+  the ratings' log-likelihood over horizons 1–5): best 45 d / 0.75 / 2 (−1.4516), flat
+  nearby (60 d / 0.75 / 2: −1.4517; 90 d / 0.75 / 5: −1.4521). Stats only (w 0): best
+  −1.4551; market only (w 1): −1.4522. Long half-lives are worse (365 d: ≤ −1.4546).
+- Time (one process): `fit_team` 0.2–0.5 s per cutoff, `team_lambdas` ≤ 0.2 s per
+  deadline.
+
+## `minutes_eval.py`: minutes model measurements
+
+Phase 5 plan, Task 3 (PLAN §6.3, §6.4). Two subcommands, both reading the built `data/` tables
+(read-only, `--data-dir`):
+
+```sh
+uv run python dev/minutes_eval.py --data-dir data inference
+uv run python dev/minutes_eval.py --data-dir data walk --seasons 2017-2022 [--grid g.json] \
+    [--horizon-decays 1,0.85 | --predict-grid p.json] [--jobs 6] [--out <dir>]
+```
+
+- `inference`: accuracy of the inferred starters (11 most minutes per team-fixture, ties by
+  `player_key`) where FPL's `starts` exist (2022/23 GW16 – 2024/25; this measures the proxy,
+  not a model).
+- `walk`: develop only (refuses seasons after 2022/23). At every GW deadline: fit at the refit
+  cutoff (`refit_deadline`, every 4 GWs), predict, apply the availability layer (from 2021/22),
+  score each (player, fixture) with a `player_match` row. 3-class (0 / 1–59 / 60+) log loss and
+  RPS, Brier and reliability of P(start), per horizon group (0, 1–5), against the last-5
+  reference (smoothed class frequencies over the player's last 5 rows). The in-memory store holds
+  only seasons ≤ the last requested one. ~33 min for 6 GBM variants × 5 horizon decays at
+  `--jobs 6`.
+
+### Results (2026-10-08)
+
+Start inference, 75,022 rows: accuracy 98.65%, false positives 0.96% of real non-starts, false
+negatives 2.30% of real starts; 441 of 2,008 team-fixtures have an error, 569 of the 1,016 wrong
+rows are 45-minute half-time ties.
+
+Develop walk-forward (2017/18–2022/23, mean over seasons; defaults: `GbmParams()`,
+`season_decay` 0.7, `horizon_decay` 0.85):
+
+| | log loss h0 | RPS h0 | Brier P(start) h0 | log loss h1–5 | RPS h1–5 | Brier h1–5 |
+|---|---|---|---|---|---|---|
+| model, no flags | 0.532 | 0.105 | 0.101 | 0.650 | 0.140 | 0.138 |
+| last-5 reference | 0.632 | 0.124 | 0.122 | 0.736 | 0.153 | 0.151 |
+| 2021/22–2022/23: no flags | 0.512 | 0.099 | 0.094 | 0.622 | 0.132 | 0.129 |
+| 2021/22–2022/23: with flags | 0.476 | 0.089 | 0.087 | 0.607 | 0.127 | 0.125 |
+
+## `shares_eval.py`: goal/assist shares and penalties
+
+Phase 5 plan, Task 4 (PLAN §6.2, §3; `fplopt.models.shares`). Two subcommands, both reading the
+built `data/` tables read-only into an in-memory store (`--data-dir`):
+
+```sh
+uv run python dev/shares_eval.py --data-dir data npxg-check                      # ~1 min
+uv run python dev/shares_eval.py --data-dir data walk --seasons 2017-2022 \
+    [--grid g.json] [--jobs 6] [--out <dir>]                          # ~2.5 min + ~0.2 min / variant
+```
+
+- `npxg-check`: the PLAN §3 VERIFY. On the 27,825 played rows of 2022/23 GW16 – 2024/25 (to
+  2025-04-07) where Understat and FPL/Opta both exist (a data-source check, so these validate
+  seasons may be read; nothing from 2025/26 is loaded), Understat `us_npxg` vs FPL `fpl_xg` −
+  penalty xG × attempts, and `us_xa` vs `fpl_xa`.
+- `walk`: develop only (deadlines of 2017/18–2022/23; anything else is refused). At every GW
+  deadline the team model, the minutes model (+ the availability layer from 2021/22) and the
+  shares, each fitted at the refit cutoff; every (player, fixture) with a `player_match` row is
+  scored at horizon 0 and pooled over horizons 1–5: Poisson log-likelihood of goals and of FPL
+  assists, Brier and reliability of P(goal ≥ 1) = 1 − exp(−e_goals). The reference: the
+  position's goals (assists) per 90 over the cutoff's last 3 seasons × e_minutes / 90 × λ_for /
+  the league's mean goals per team-match. `--grid` is a JSON list of predict-time
+  `SharesParams` overrides (default: the 27-variant first round below); all share the fits.
+  Writes `summary.json` and `timings.csv`.
+
+### Results (2026-10-08)
+
+**npxG source check** (closes the PLAN §3 VERIFY):
+- FPL/Opta gives every penalty exactly 0.79 xG (all 30 rows whose only shot was a penalty);
+  Understat 0.761. So the subtraction uses 0.79, not 0.76 (the difference is small: 234
+  attempts).
+- With the true attempts (Understat's penalty goals + FPL misses): per match r 0.932, MAE 0.032;
+  per player-season (1,123 with ≥ 450 min) r 0.992, per-90 r 0.987, but Σ FPL / Σ Understat =
+  0.914 (slope 0.88): Opta's npxG is ~9% lower. A scale factor is needed when sources are mixed:
+  k_goals = 1.095 (fitted walk-forward on the visible overlap by `fit_shares`).
+- Without Understat, penalty goals must be inferred. Only 58% of penalty goals are scored by the
+  club's rank-1 listed taker at kickoff (`penalties_order`), so a hard taker rule fails
+  (a scratch check: counting the candidates of the rank-1 taker only finds ~57% of the
+  penalty rows and adds ~75 false ones; counting everyone's adds ~380 false ones). The module uses the expected value: candidates = min(goals, ⌊(fpl_xg − 0.79·missed) /
+  0.79⌋), × π = 0.55 for the main taker and 0.20 for others (in-sample; from 2022/23 alone
+  0.49 / 0.23). Per match r 0.902, MAE 0.036; per player-season r 0.985, per-90 r 0.981, ratio
+  0.914; among takers (≥ 3 attempts) ratio 0.970 vs 0.908 with the true attempts. Out of sample
+  (π from 2022/23, scored on 2023/24–2024/25): r 0.985, ratio 0.897, takers 0.998. Ignoring
+  penalties (misses only): ratio 0.970 overall but 1.207 for takers (+21% npxG for penalty
+  takers).
+- xA: FPL `fpl_xa` = 0.80 × Understat (per player-season r 0.946, per-90 r 0.908, per match
+  0.746); k_assists = 1.257.
+- Recommendation: the substitution is acceptable for shares with the scale factors (k, fitted on
+  the overlap) and the expected-value penalty inference; shares are ratios within one
+  team-fixture, so a uniform scale cancels unless sources mix (Understat history with FPL
+  current season, i.e. from 2025/26).
+
+**Develop walk** (mean over 2017/18–2022/23; per player-fixture; chosen `SharesParams()`:
+1920 pseudo-minutes, season weights 2-2-1-1, club change 0.5, goals fallback 0.5, price prior
+for everyone):
+
+| | goals LL h0 | assists LL h0 | Brier P(goal) h0 | goals LL h1–5 | assists LL h1–5 | Brier h1–5 |
+|---|---|---|---|---|---|---|
+| model | −0.13552 | −0.13467 | 0.03245 | −0.14074 | −0.13915 | 0.03311 |
+| reference | −0.14039 | −0.13822 | 0.03328 | −0.14540 | −0.14266 | 0.03382 |
+
+- The model beats the reference in every season, at both horizon groups, on goals, assists and
+  Brier. Brier resolution 0.0040 vs 0.0031 (h0), reliability 1.5e-5 vs 1.8e-5. Mean e_goals
+  0.0439 vs 0.0430 realized (h0), e_assists 0.0399 vs 0.0388: both ~2–3% high (the reference
+  too: the team λ sums over pool players, some of whom have no `player_match` row).
+- Reliability is good below P(goal) 0.3; above it the model is a little high at h1–5 (0.34 →
+  0.31, 0.44 → 0.39).
+- Tuning (38 variants; objective: mean over seasons of goals + assists LL, all horizons): round 1
+  pseudo-minutes 240/480/960 × current-season weight 2/3/5 × club-change weight 1/0.5/0.25
+  (27); round 2 1440/1920/2880 and current weight 1, price prior for everyone, goals weight
+  0.25/1 (9); round 3 1920/2880 with the price prior for everyone (2). Pseudo-minutes 240 →
+  −0.2803 … 960 → −0.2786, flat from 1440 (−0.27815 to −0.27823 with the price prior);
+  current weight 2 best (1: −0.2788, 5: −0.2791); the club-change weight moves the objective
+  by ≤ 0.00005 between 0.25 and 1; goals weight 0.25/0.5/1 within 0.00008.
+- Time (6 processes in parallel, the chosen settings): `fit_shares` 0.15–0.59 s per cutoff
+  (1.0 s on the full `data/` store at 2022/23), `predict_shares` 0.10–0.27 s per deadline
+  (median 0.17 s). The walk takes ~2.5 min for one variant at `--jobs 6`.
+
+## `calibrate_v1.py`: v1 calibration and the ban residual
+
+> **Re-run after the review (2026-10-08):** the flag mapping now uses out-of-fold P(start).
+> `walk --seasons 2016-2024 --jobs 9 --ban-residual --out results/p5-review-walk` (3.2 min),
+> then `fit --walk results/p5-review-walk --first-fit 2017 --parts p_start:1+ --write`.
+> Develop means: none MSE h0 4.2608 / h1–5 4.6867; chosen (p_start:1+) 4.2608 / 4.6845. The
+> other parts are still worse. The walk writes `params.txt` (the `V1Params` fingerprint),
+> which `fit --write` stores as `CALIBRATION_PARAMS`. The numbers below are from the first
+> run.
+
+Phase 5 plan, Task 5 (PLAN §5 *Calibration*; `fplopt.models.assemble`, `.calibration`). Reads
+the built `data/` tables read-only into an in-memory store (`--data-dir`):
+
+```sh
+uv run python dev/calibrate_v1.py --data-dir data walk --seasons 2016-2024 --jobs 6 \
+    --out results/p5-task5-walk [--ban-residual]                           # ~4.5 min
+uv run python dev/calibrate_v1.py fit --walk results/p5-task5-walk-ban --first-fit 2017 \
+    --parts "p_start:1+" [--variant SPECS ...] [--write]                   # ~5 min
+uv run python dev/calibrate_v1.py ban --off results/p5-task5-walk --on results/p5-task5-walk-ban
+```
+
+- `walk`: v1's uncalibrated per player-fixture components (every horizon) at every deadline of
+  2016/17–2024/25 (fitted at the refit cutoffs), joined to each fixture's realized minutes,
+  start (real, else inferred), goals, clean sheet, the club's goals against and the re-scored
+  points. One parquet per season. The validate seasons are walked only so that the 2024/25
+  and 2025/26+ calibration entries can be fitted; nothing scores them.
+- `fit`: the expanding-window calibrations (season S: fitted on the walk rows of seasons in
+  [`--first-fit`, S)) and their effect on develop (2017/18–2022/23 only): per-fixture xP MSE
+  (horizon 0, 1–5), Brier of P(start), of the team's P(CS) and of P(goal ≥ 1), minutes log
+  loss and goals log-likelihood, means over seasons. Part specs: `name` (all horizons), `name:0`
+  or `name:1+`. `--write` regenerates `src/fplopt/models/calibration_table.py`.
+- `ban`: the ban residual (`MinutesParams.ban_residual`) against P(start) = 0 on develop.
+
+### Results (2026-10-08)
+
+**Ban residual** (develop, mean over 2017/18–2022/23; ~47 banned player-fixtures per season,
+31% of which started): adopted.
+
+| | minutes log loss (all horizons) | on banned rows | Brier P(start) on banned rows | xP MSE h0 | xP MSE h1–5 |
+|---|---|---|---|---|---|
+| P(start) = 0 | 0.6302 | 11.62 | 0.311 | 4.26088 | 4.68698 |
+| residual | 0.6287 | 0.78 | 0.229 | 4.26034 | 4.68695 |
+
+**Calibration** (on the ban-residual walk, `--first-fit 2017`: 2016/17 is burn-in, so 2017/18
+is uncalibrated and 2018/19 is the first calibrated season; develop means over 2017/18–2022/23,
+per player-fixture):
+
+| variant | xP MSE h0 | xP MSE h1–5 | Brier P(start) h0 / h1–5 | team P(CS) Brier | P(goal) Brier h0 |
+|---|---|---|---|---|---|
+| none | 4.26034 | 4.68695 | 0.09848 / 0.13618 | 0.18740 | 0.03244 |
+| P(start), all horizons | 4.27054 | 4.68355 | 0.09958 / 0.13572 | | |
+| P(start), h0 only | 4.26104 | 4.68740 | 0.09852 / 0.13616 | | |
+| **P(start), h1+ (kept)** | **4.26034** | **4.68426** | **0.09848 / 0.13577** | | |
+| team P(CS) | 4.26222 | 4.68763 | | 0.18783 | |
+| team P(CS), h1+ | 4.26034 | 4.68820 | | 0.18778 | |
+| P(goal ≥ 1) | 4.26316 | 4.68645 | | | 0.03246 |
+| P(goal ≥ 1), h1+ | 4.26034 | 4.68630 | | | |
+| linear xP per position | 4.26717 | 4.68560 | | | |
+
+- Uncalibrated v1 is already calibrated in the large (horizon 0: mean xP 1.317 vs 1.327 realized;
+  P(start) 0.353 vs 0.352; e_goals 0.0437 vs 0.0428; e_bonus 0.104 vs 0.103), so most maps only
+  add noise. P(CS) as p_60 · team P(CS) runs 8% under the player's realized FPL clean sheets
+  (0.094 vs 0.102: a player off after 60+ minutes keeps a clean sheet the team later loses);
+  p_cs^(m_sixty/90) closes half of it but moved xP MSE by < 0.002 either way, so the plan's
+  formula stays.
+- Only isotonic P(start) at horizons ≥ 1 improves its component and xP; it is the only part in
+  the table. P(start) + P(goal) at h1+ together: 4.68596 (worse than P(start) alone).
+- With `--first-fit 2016` (2017/18 calibrated on 2016/17 alone) every part was worse still
+  (e.g. all parts: xP MSE h0 4.2756; on the walk without the ban residual).
+- Time: the walk fits 1.1 s (2016/17 cutoffs) to 21 s (2024/25) per cutoff, predicts 0.5–1.5 s
+  per deadline; ~4.5 min for 2016–2024 at `--jobs 6`.

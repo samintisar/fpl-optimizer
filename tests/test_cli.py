@@ -164,6 +164,7 @@ def test_every_parsed_command_has_a_job():
         "backtest run": ["--seasons", "2023"],
         "backtest compare": ["--seasons", "2023", "--a", "greedy:rolling", "--b", "roll:rolling"],
         "optimize plan": ["--season", "2023", "--gw", "5"],
+        "models eval": ["--models", "rolling", "--seasons", "2023"],
     }
     for name in cli.JOBS:
         args = parser.parse_args(name.split() + extras.get(name, []))
@@ -925,3 +926,92 @@ def test_optimize_bench_usage_errors(tmp_path, monkeypatch, league, capsys, argv
         cli.main(["optimize", "bench", *argv], settings=make_settings(tmp_path))
     assert info.value.code == 2
     assert message in capsys.readouterr().err
+
+
+# --- models eval ------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def models_eval(tmp_path, monkeypatch, league):
+    """Runs `fplopt models eval ...` on the synthetic league; returns (exit code, alerts)."""
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+
+    def run(*argv):
+        return cli.main(["models", "eval", *argv], settings=make_settings(tmp_path)), alerts
+
+    return run
+
+
+def test_parse_models():
+    assert cli.parse_models("rolling, ep_next") == ("rolling", "ep_next")
+    for text, message in (("rolling,v0", "unknown xP model"), ("rolling,rolling", "repeated")):
+        with pytest.raises(argparse.ArgumentTypeError, match=message):
+            cli.parse_models(text)
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--models", "rolling", "--seasons", "2024-2025"], "2025-26 is the holdout season"),
+        (["--models", "rolling,nope", "--seasons", "2023"], "unknown xP model(s) nope"),
+        (["--models", "rolling,rolling", "--seasons", "2023"], "repeated xP model"),
+        (["--models", "ep_next", "--seasons", "2019-2020"], "ep_next, which exists only from"),
+        (["--models", "rolling", "--seasons", "2021"], "no gameweek/player_match data for 2021"),
+        (["--models", "rolling", "--seasons", "2023", "--jobs", "0"], "--jobs must be >= 1"),
+        (["--models", "rolling", "--seasons", "2023", "--n-random", "-1"], "--n-random"),
+        (["--seasons", "2023"], "--models"),
+    ],
+)
+def test_models_eval_usage_errors(models_eval, capsys, tmp_path, argv, message):
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit) as info:
+        models_eval(*argv, "--out", str(out))
+    assert info.value.code == 2
+    assert message in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_models_eval_end_to_end(models_eval, tmp_path, capsys):
+    import pandas as pd
+
+    out, log = tmp_path / "out", tmp_path / "results" / "experiments.csv"
+    argv = ["--models", "rolling,ep_next", "--seasons", "2023", "--n-random", "1", "--jobs", "1"]
+    code, alerts = models_eval(*argv, "--out", str(out), "--experiments", str(log))
+    assert code == 0 and alerts == []
+    predictions = pd.read_parquet(out / "predictions.parquet")
+    assert set(predictions["model"]) == {"rolling", "ep_next"}
+    assert set(predictions["season"]) == {2023} and predictions["deadline"].nunique() == 18
+    regrets = pd.read_parquet(out / "regrets.parquet")
+    assert set(regrets["squad"]) == {"template", "random0"}
+    payload = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    assert payload["config"]["models"] == ["rolling", "ep_next"]
+    assert payload["family"] == "eval rolling,ep_next 2023" and payload["n_variants"] == 1
+    metrics = payload["metrics"]
+    assert metrics["seasons"] == {"rolling": [2023], "ep_next": [2023]}
+    h0 = next(
+        r
+        for r in metrics["xp"]
+        if (r["model"], r["split"], r["horizon"]) == ("ep_next", "all", "0")
+    )
+    rows = predictions[(predictions["model"] == "ep_next") & (predictions["horizon"] == 0)]
+    assert h0["mse"] == pytest.approx(float(((rows["xp"] - rows["points"]) ** 2).mean()))
+    printed = capsys.readouterr().out
+    assert "MSE h0" in printed and "Diebold-Mariano" in printed and "validate" in printed
+    assert f"{h0['mse']:.3f}" in printed
+    (logged,) = _experiments(log)
+    assert logged["family"] == "eval rolling,ep_next 2023" and logged["n_variants"] == "1"
+    assert logged["command"].startswith("fplopt models eval --models rolling,ep_next")
+    assert set(json.loads(logged["metrics"])) == {"seasons", "xp", "regret", "dm"}
+    # The same family again counts as a second variant.
+    assert models_eval(*argv, "--out", str(out), "--experiments", str(log))[0] == 0
+    assert [r["n_variants"] for r in _experiments(log)] == ["1", "2"]
+
+
+def test_models_eval_default_out_dir(models_eval, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    code, _ = models_eval("--models", "rolling", "--seasons", "2022", "--n-random", "0")
+    assert code == 0
+    (run_dir,) = (tmp_path / "results").glob("*-eval")
+    assert (run_dir / "predictions.parquet").exists() and (run_dir / "metrics.json").exists()

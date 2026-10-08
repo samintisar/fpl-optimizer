@@ -6,8 +6,13 @@ What is scanned is configured in `TARGETS`, one `ScanTarget` per package (or per
 of a package):
 - `fplopt/features/`: every module (subpackages included) except `store.py` (the reader) and
   `leakcheck.py` (the harness, which loads and corrupts whole tables); registry `FEATURES`;
-- `fplopt/models/`: every module; may also import the scanned feature modules (and the
-  `fplopt.features` package); registry `MODELS`;
+- `fplopt/models/`: every module except `gbm.py`; may also import the scanned feature
+  modules (and the `fplopt.features` package), `gbm`, the pure backtest module `rules` (the
+  scoring rules for xP points: it reads `config/scoring`, never `data/`), and, name by
+  name (`module_attrs`), `scipy.optimize` / `scipy.stats` / `scipy.special`; registry
+  `MODELS`;
+- `fplopt/models/gbm.py`: the only LightGBM entry point; `lightgbm` only through the names
+  it lists (`module_attrs`), no booster file methods (`save_model`, `model_file=`);
 - `fplopt/optimize/`: every module except `bench.py` (the benchmark, an orchestrator that
   opens the `DataStore` and drives the simulator's caches, like the simulator itself); the
   MILP planner the optimizer policy calls at a deadline. May also import the pure backtest
@@ -25,15 +30,17 @@ Rules (`violations`, the same for every target):
   modules only the listed names (from `fplopt.features.store` only `AsOfView`); nothing else
   (no `DataStore`, no `leakcheck`, no other fplopt module, no I/O library). From
   `module_attrs` modules (importable whole) only the listed attributes may be used, as
-  `module.attr` or `from module import attr`. Importing a
+  `module.attr` or `from module import attr`; a dotted one (`scipy.optimize`) only by
+  `from ... import` or with an alias, since `import scipy.optimize` binds `scipy`. Importing a
   submodule by name (`from fplopt.features import leakcheck`) counts as importing it, and
   so does reaching it through a package name (`fplopt.features.store.DataStore` after
   `import fplopt.features.baseline`);
 - no dynamic access: `getattr`/`setattr`/`delattr`/`vars`/`globals`/`locals`/`__import__`/
   `eval`/`exec`/`compile`/`open` calls, dunder attributes that reach into objects or
   modules (`__dict__`, `__globals__`, ...), private attributes (`view._store`);
-- no pandas file readers/writers (`read_*`, `to_parquet`, ...) and no solver file methods
-  (`readModel`, `writeModel`, `writeLP`, `fromMPS`, `toJson`, ...);
+- no pandas file readers/writers (`read_*`, `to_parquet`, ...), no solver or booster file
+  methods (`readModel`, `writeModel`, `writeLP`, `fromMPS`, `toJson`, `save_model`, ...) and
+  no `model_file=` keyword;
 - no state between calls: no `global`/`nonlocal`, no cache decorators, module-level values
   only immutable (constants, tuples, frozensets, a few immutable constructors called with
   immutable arguments; the target's `registries` excepted), and no function mutates a
@@ -126,8 +133,11 @@ SOLVER_FILE_METHODS = frozenset(
         "writeInfo",
         "writePresolvedModel",
         "writeIIS",
+        "save_model",  # LightGBM Booster
+        "save_binary",  # LightGBM Dataset
     }
 )
+FILE_KEYWORDS = frozenset({"model_file"})  # lightgbm.Booster(model_file=...)
 CACHE_DECORATORS = {"cache", "lru_cache", "cached_property"}
 # Module-level calls that build immutable values, when their arguments are immutable
 # (`_immutable_arg`): constants, names, tuples of those, nested immutable calls.
@@ -197,11 +207,30 @@ FEATURES_TARGET = ScanTarget(
     restricted={"fplopt.features.store": STORE_NAMES},
     registries={"__init__.py": frozenset({"FEATURES"})},
 )
+# LightGBM: in-memory datasets and boosters only (no file names; `FILE_KEYWORDS`).
+LIGHTGBM_NAMES = frozenset({"Booster", "Dataset", "train"})
+GBM_TARGET = ScanTarget(
+    package="fplopt.models",
+    files=("gbm.py",),
+    extra_modules=frozenset({"types"}),  # MappingProxyType: read-only parameters
+    module_attrs={"lightgbm": LIGHTGBM_NAMES},
+)
+# scipy for the models' MLE fits and distributions; no I/O name.
+SCIPY_NAMES = {
+    "scipy.optimize": frozenset({"OptimizeResult", "brentq", "least_squares", "minimize"}),
+    "scipy.special": frozenset({"expit", "gammaln", "logit", "xlogy"}),
+    "scipy.stats": frozenset({"nbinom", "norm", "poisson"}),
+}
 MODELS_TARGET = ScanTarget(
     package="fplopt.models",
-    trusted=(FEATURES_TARGET,),
+    exempt=frozenset({"gbm.py"}),  # scanned as GBM_TARGET
+    trusted=(FEATURES_TARGET, GBM_TARGET),
+    # The game rules for xP points (`backtest_rules(season)`): a pure module that reads the
+    # checked-in config/scoring files, never data/; the same rules score the backtest.
+    extra_modules=frozenset({"fplopt.backtest.rules"}),
     restricted={"fplopt.features.store": STORE_NAMES},
     registries={"__init__.py": frozenset({"MODELS"})},
+    module_attrs=SCIPY_NAMES,
 )
 PURE_BACKTEST_MODULES = frozenset(
     {
@@ -252,7 +281,7 @@ BACKTEST_TARGET = ScanTarget(
     registries={"probes.py": frozenset({"PROBES"})},
     freezing_calls=frozenset({"OptimizerParams"}),  # copies mappings into read-only ones
 )
-TARGETS = (FEATURES_TARGET, MODELS_TARGET, OPTIMIZE_TARGET, BACKTEST_TARGET)
+TARGETS = (FEATURES_TARGET, MODELS_TARGET, GBM_TARGET, OPTIMIZE_TARGET, BACKTEST_TARGET)
 
 
 def scanned_files(target: ScanTarget) -> list[Path]:
@@ -332,6 +361,8 @@ def _import_violations(
             for alias in node.names:
                 if alias.name not in allowed:
                     found.append(f"imports {alias.name}")
+                elif alias.name in target.module_attrs and "." in alias.name and not alias.asname:
+                    found.append(f"imports {alias.name} without an alias")
         elif isinstance(node, ast.ImportFrom):
             source = _resolve(node, module, is_package)
             names = [alias.name for alias in node.names]
@@ -548,6 +579,7 @@ def violations(
                 func.attr.startswith(FILE_METHODS) or func.attr in SOLVER_FILE_METHODS
             ):
                 found.append(f"calls .{func.attr}()")
+            found += [f"passes {k.arg}=" for k in node.keywords if k.arg in FILE_KEYWORDS]
         elif isinstance(node, ast.Attribute):
             # `import fplopt.features.baseline` binds `fplopt`: no reaching other modules
             # through it (`fplopt.features.store.DataStore`). Packages on the way to an
@@ -876,13 +908,91 @@ def test_each_target_allows_only_its_own_registry():
     ]
 
 
+def test_lightgbm_only_through_gbm_and_scipy_name_by_name():
+    gbm = MODELS_DIR / "gbm.py"
+    other = MODELS_DIR / "minutes.py"
+    ok_gbm = """
+import lightgbm
+
+def fit(x, y):
+    return lightgbm.train({}, lightgbm.Dataset(x, label=y))
+"""
+    assert violations(ok_gbm, gbm, GBM_TARGET) == []
+    bad_gbm = """
+import lightgbm
+from lightgbm import cv
+
+def fit(x, y, path):
+    booster = lightgbm.Booster(model_file=path)
+    booster.save_model(path)
+    lightgbm.Dataset(x).save_binary(path)
+    return lightgbm.cv({}, x)
+"""
+    assert sorted(violations(bad_gbm, gbm, GBM_TARGET)) == sorted(
+        [
+            "imports cv from lightgbm",
+            "passes model_file=",
+            "calls .save_model()",
+            "calls .save_binary()",
+            "accesses lightgbm.cv",
+        ]
+    )
+    ok_models = """
+import scipy.optimize as opt
+from scipy.optimize import minimize
+from scipy.stats import poisson
+from fplopt.models.gbm import Gbm, train
+from .gbm import GbmParams
+
+def fit(x):
+    return minimize(lambda p: poisson.logpmf(x, p).sum(), 1.0), opt.least_squares
+"""
+    assert violations(ok_models, other, MODELS_TARGET) == []
+    bad_models = """
+import lightgbm
+import scipy.optimize
+import scipy.io
+from scipy.io import loadmat
+from scipy.stats import gaussian_kde
+import scipy.optimize as opt
+
+def fit(x):
+    return opt.root(x)
+"""
+    assert sorted(violations(bad_models, other, MODELS_TARGET)) == sorted(
+        [
+            "imports lightgbm",
+            "imports scipy.optimize without an alias",
+            "imports scipy.io",
+            "imports scipy.io",
+            "imports gaussian_kde from scipy.stats",
+            "accesses scipy.optimize.root",
+        ]
+    )
+
+
 def test_model_builders_take_exactly_the_view():
-    assert list(MODELS) == ["rolling", "ep_next", "ep_next_fade"]
+    from fplopt.models.fitted import FittedModel
+
+    assert list(MODELS) == ["rolling", "ep_next", "ep_next_fade", "v1"]
     for name, model in MODELS.items():
         parameters = list(inspect.signature(model).parameters.values())
         assert len(parameters) == 1, name
         assert parameters[0].annotation in ("AsOfView", fplopt.features.AsOfView), name
         assert model.__module__.startswith("fplopt.models."), name
+        if isinstance(model, FittedModel):
+            # Module-level functions (pickled into backtest workers): fit(view),
+            # predict(view, fitted).
+            for function, arity in ((model.fit, 1), (model.predict, 2)):
+                assert function.__module__.startswith("fplopt.models."), name
+                assert "<" not in function.__qualname__, name
+                required = [
+                    p
+                    for p in inspect.signature(function).parameters.values()
+                    if p.default is inspect.Parameter.empty
+                ]
+                assert len(required) == arity, name
+                assert required[0].annotation in ("AsOfView", fplopt.features.AsOfView), name
 
 
 def test_a_target_of_listed_files_trusting_features_and_models(tmp_path):

@@ -118,7 +118,14 @@ User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, c
 - Backfill from 2016/17. Snapshot-derived fields (status flags, news, ownership, `ep_next`, set-piece orders) exist from 2021/22 via fplcache; earlier seasons lack them.
 - Store raw stat components and **re-score every season under the current season's rules** (scoring config per season in `config/`). Exception: 2019/20–2024/25 have no CBIT/recoveries data in our sources, so they are re-scored **without** defensive-contribution points. 2016/17–2018/19 vaastav files *do* carry `clearances_blocks_interceptions`, `recoveries`, `tackles` (FPL's old detailed stats) — **VERIFY** the definitions match 2025/26+ before scoring defcon for those seasons (if they do, they could also set the defcon prior without FPL-Core-Insights, issue #14).
 - **xG coverage** (no direct Understat — see §12):
-  - Player npxG/xA: Understat mirror. Share of FPL minutes covered: 2016/17 47%, 2017/18 62%, 2018/19 75%, 2019/20 91%, 2020/21–2023/24 100%, 2024/25 80% (the mirror stops at 2025-04-07). From 2025/26: FPL's own `expected_goals` / `expected_assists` (Opta, in vaastav and our `element-summary` archive; available from 2022/23 GW16, so it overlaps the mirror for calibration). FPL xG includes penalties; npxG for 2025/26+ subtracts penalty xG using penalty attempts inferred from takers — approximate, **VERIFY** against the 2022/23–2024/25 overlap.
+  - Player npxG/xA: Understat mirror. Share of FPL minutes covered: 2016/17 47%, 2017/18 62%, 2018/19 75%, 2019/20 91%, 2020/21–2023/24 100%, 2024/25 80% (the mirror stops at 2025-04-07). From 2025/26: FPL's own `expected_goals` / `expected_assists` (Opta, in vaastav and our `element-summary` archive; available from 2022/23 GW16, so it overlaps the mirror for calibration). FPL xG includes penalties.
+    - **npxG for 2025/26+** = FPL xG − 0.79 × penalty attempts (Opta values a penalty at exactly 0.79). Penalty attempts are inferred as an expected value from `penalties_order` and goals.
+    - **Verified 2026-10-08** on the 2022/23 GW16 – 2025-04-07 overlap (27,825 player-matches, Phase 5 Task 4):
+      - per player-season, the inferred npxG correlates with Understat at r 0.985 (0.992 with true penalty attempts);
+      - Opta npxG runs about 9% below Understat (ratio 0.914), and FPL xA about 20% below (0.80);
+      - so `fplopt.models.shares` scales FPL values to Understat's level (k_goals ≈ 1.095, k_assists ≈ 1.257, fitted walk-forward on the overlap). The scale only matters where the two sources mix (2025/26+);
+      - out of sample (fitted on 2022/23, scored on 2023/24–2024/25): r 0.985;
+      - leaving penalties in overstates takers' npxG by 21%.
   - Team xG: Understat mirror 2019/20–2024/25 (2024/25 only to 2025-04-07), football-data `HxG`/`AxG` 2026/27, summed FPL player xG (2022/23 GW16+) otherwise. 2016/17–2018/19: goals only.
   - Derived tables keep each source in its own columns (e.g. `us_npxg`, `fpl_xg`); blending is a modelling decision (Phase 5).
 - Weight older seasons lower in training rather than dropping them.
@@ -248,6 +255,106 @@ Philosophy: **market where it is strong, structure elsewhere.** Betting markets 
 **Store components, not just xP:** P(start), P(60+), Poisson rates, etc. Mean xP for now; full distributions (simulation) later become a small add-on.
 
 Blending rule everywhere: equal weights or a single fixed weight — never weights estimated per fold (they overfit).
+
+**Phase 5 decisions** (plan `docs/superpowers/plans/2026-10-08-phase-5-models.md`):
+- Each component model is split into `fit(view)` and `predict(view, fitted)`. The fit for deadline d uses `view.earlier(cutoff)`, where the cutoff is the deadline of the season's latest refit GW ≤ d (`gw_index` 1, 5, 9, …). The registered model is still one callable on the view, so the leakage check covers the fit. The backtester's `Caches` memoizes fits by cutoff; model modules keep no state.
+- LightGBM runs only through `fplopt.models.gbm`: fixed `seed`, `num_threads=1`, `deterministic=True`, `force_row_wise=True`.
+- `starts` is null before 2022/23 GW16. Before then, a team's 11 players with the most minutes in a fixture count as its starters; Task 3 measures the accuracy (§6.3).
+- Minutes features with no source are dropped: European/cup matches, manager tenure, age.
+- Phase 5 criterion 1 ("beat both baselines on component metrics") is tested on xP and decision metrics, because the baselines have no components. On validate, `v1` vs `rolling` and vs `ep_next` must have:
+  - lower MSE per player-GW (one-sided Diebold-Mariano clustered by GW, p < 0.10);
+  - lower candidate-weighted MSE;
+  - no worse MSE in any predicted-xP band or over horizons 1–5;
+  - no worse captain or XI regret.
+
+  Component metrics (minutes, goals, assists, P(CS)) are reported against simple references for diagnosis.
+
+**Phase 5 results so far** (develop 2016/17–2022/23 only; validate not looked at):
+- **Baselines** (`fplopt models eval`, Task 1):
+  - MSE per player-GW at horizon 0: rolling 5.33 (2016/17–2022/23), ep_next 5.33 (2021/22–2022/23). On their common seasons, rolling 5.10 vs ep_next 5.33, rolling better (DM p 0.001).
+  - MSE over horizons 1–5: rolling 5.80, ep_next 6.31, ep_next_fade 5.17.
+  - XI regret per GW: rolling 6.4, ep_next 5.8. Captain regret: 5.5 and 4.9.
+  - Both overpredict above ~3 xP (rolling: predicted 9.8 → realized 5.8).
+  - About 10% of ep_next horizon-0 values are negative (FPL's own numbers).
+- **Team model** (Task 2, `fplopt.models.team`):
+  - Poisson log-likelihood per side: −1.447 at horizon 0 (Elo-only reference −1.466); about −1.454 at horizons 1–5 (reference about −1.465).
+  - P(CS) Brier: 0.186 vs 0.189.
+  - Beats the reference in every develop season.
+  - Settings: ρ −0.03 (flat profile), power de-vig (Shin equal), ratings half-life 45 days, market weight 0.75, Elo prior strength 2 (grid of 120 variants).
+  - Odds are visible at the deadline for 88–96% of target-GW fixtures per season, and ≤ 0.3% beyond.
+  - Fit 0.2–0.5 s per cutoff.
+- **Minutes model** (Task 3, `fplopt.models.minutes`, `.availability`, `fplopt.features.history`):
+  - Inferred starts (the 11 players with the most minutes) vs real `starts` on 2022/23 GW16–2024/25: 98.65% accurate (false positives 0.96%, false negatives 2.30%; 569 of 1,016 misses are 45-minute half-time ties).
+  - 3-class minutes log loss at horizon 0: 0.532 vs the last-5 reference 0.632. Horizons 1–5: 0.650 vs 0.736. Beats the reference in every season.
+  - With flags (2021/22–2022/23): 0.476 vs 0.512 without.
+  - Expected minutes: three per-class means, not a fourth regression.
+  - Bans zero P(start), but rule-banned develop rows still started 10% of the time: the rules are approximate.
+  - Flags exist from 2020/21 GW32 (fplcache), not only from 2021/22. The flag mapping is fit walk-forward on every visible snapshot season; the §4 check on 2023/24–2024/25 is still open (Task 6).
+  - Settings: `GbmParams()` defaults, season decay 0.7, horizon decay 0.85 (36 variants).
+  - Fit ~11 s per cutoff (minutes + flags), predict 0.4 s.
+- **Shares and penalties** (Task 4, `fplopt.models.shares`), per player-fixture, mean over 2017/18–2022/23:
+  - Poisson log-likelihood at horizon 0: goals −0.1355 vs the position-average reference −0.1404; FPL assists −0.1347 vs −0.1382.
+  - P(goal ≥ 1) Brier 0.0325 vs 0.0333. Horizons 1–5 are similar.
+  - Beats the reference in every season.
+  - Means run 2–3% high (e_goals 0.0439 vs 0.0430 realized).
+  - Prior: 1920 pseudo-minutes at a price-based mean for every player, with season weights 2-2-1-1 (current, −1, −2, −3). That is stronger than §6.2's ~480 minutes at the position average, which scored worse (38 variants tried).
+  - Club changes: half weight on the old club's data. Goals stand in for xG at half weight where xG is missing (2016/17–2018/19).
+  - Own goals (~3.5%) are removed from the non-penalty λ. FPL-assisted fraction of goals ≈ 0.87.
+  - Penalties: P(taker) comes from `penalties_order` (main taker takes 90% of attempts when on the pitch) or from recent attempts, chained down the order by minutes. Club attempt rates and conversion are shrunk to the league.
+  - Fit ≤ 1.3 s, predict ≤ 0.3 s.
+- **`v1`** (Task 5, `fplopt.models.assemble`, `.components`, `.calibration`; `MODELS["v1"]`):
+  - Points under `backtest_rules(season)`, per fixture, summed per GW:
+    - **bonus:** per-position regression on event indicators (last 4 seasons, weighted 0.7^age), applied to expected events;
+    - **GK saves:** Poisson on the opponent's market λ, with a shrunk keeper effect;
+    - **goals conceded:** −E[⌊N/2⌋] with N ~ Poisson(λ_against × fraction on pitch);
+    - **cards and own goals:** shrunk per-90 rates;
+    - **penalty misses:** from the shares' penalty goals and conversion;
+    - **clean sheets:** P(60+)·P(CS), which runs ~8% under realized because a player subbed off after 60 keeps a clean sheet his team later loses.
+  - **Bans:** a walk-forward residual P(start) instead of 0 (banned rows started 31% of the time).
+  - **Calibration:** expanding window by season (season S uses maps fit on the walk-forward predictions of 2017/18 … S−1; 2016/17 is burn-in). Only isotonic P(start) at horizons ≥ 1 improved develop metrics, so it is the only map kept. P(CS), P(goal) and the per-position linear xP map were worse and were dropped. Raw xP is already calibrated in the large: mean 1.317 predicted vs 1.327 realized.
+  - **Develop results** (`models eval`, 2016/17–2022/23):
+
+    | | MSE h0 | MSE h1–5 | candidate MSE | XI regret | captain regret |
+    |---|---|---|---|---|---|
+    | `v1` | 4.31 | 4.79 | 9.16 | 5.46 | 4.77 |
+    | rolling | 5.33 | 5.80 | 11.68 | 6.41 | 5.50 |
+
+    On 2021/22–2022/23 vs `ep_next`: MSE h0 3.99 vs 5.33, XI regret 5.26 vs 5.84 (DM p 0.087), captain regret 4.46 vs 4.85 (p 0.17). `v1` wins every season and is calibrated in every predicted-xP band.
+  - **Component metrics:** minutes log loss 0.527 at h0; player P(CS) Brier 0.077; P(goal) Brier 0.033.
+  - **Runtime:** fit 1–21 s per cutoff (about 30 s with predict at live 2026/27 cutoffs; the flag fit dominates), predict 0.5–1.5 s. `models eval` over develop with all four models: about 4 min at `--jobs 14`.
+  - **Checks:** `fplopt check leakage` passes with `model:v1` (22.6 min; was ~9), and `pytest -m realdata` passes (19.8 min).
+  - **Not tuned yet:** the component priors (cards, keeper, bonus seasons).
+- **Review fixes before the validate run** (2026-10-08, `/code-review` of the 5a branch):
+  - **Flag mapping:** the flag mapping is now fit on out-of-fold P(start): the start model refit on the other season parity, `minutes.out_of_fold_start`. It used to be fit on the minutes model's in-sample predictions on its own training rows, which are sharper than its predictions at a new deadline. Real-data slope at 2021/22–2022/23 cutoffs: 0.77–0.78; injured players' offset about −5.
+  - **Faster fit:** the flag fit now uses Newton's method with the exact Hessian (0.2 s, was 3.2 s over 371 L-BFGS steps). News is parsed once per fit, and the history frame is built once per v1 fit. `fit_availability` at a 2022/23 cutoff: 6 s, was 10 s, including the new out-of-fold fits.
+  - **Calibration tied to settings:** the table records the `V1Params` it was fitted with (`CALIBRATION_PARAMS`, `assemble.calibration_fingerprint`); v1 refuses it with other settings, and a test checks that it matches the defaults. Regenerated after the fixes (`dev/calibrate_v1.py walk` + `fit --write`). Again only P(start) at horizons ≥ 1 helps (MSE h1–5 4.687 → 4.684).
+  - **No silent zeros:** a horizon fixture missing a team λ, or a pool player whose club plays but who has no per-fixture rows, now raises instead of passing silently as 0 xP.
+  - **Candidate test:** `models eval` pairwise candidate tests use the pair's own top-N union (`own_candidate`), so they no longer depend on which other models are in the run.
+  - **Variant counts:** the Phase 5 tuning grids are logged in `results/experiments.csv` with their variant counts (team 120, minutes 42, shares 38, v1 calibration 8).
+  - **Develop after the fixes:** v1 MSE h0 4.31 vs rolling 5.33 (2016/17–2022/23) and vs ep_next 5.33 (v1 3.99 on 2021/22–2022/23); XI regret 5.46 vs 6.41; captain regret 4.77 vs 5.50. These are the same as before the fixes to two decimals.
+- **Criterion 1, validate (2023/24–2024/25), one run** (2026-10-08, after the review fixes; `fplopt models eval --models v1,rolling,ep_next --seasons 2023-2024`, `results/p5-validate`, 4 min). **Met.**
+
+  | | MSE h0 | candidate MSE h0 | MSE h1–5 | XI regret | captain regret |
+  |---|---|---|---|---|---|
+  | `v1` | **3.47** | **8.79** | **3.98** | **4.60** | **4.04** |
+  | rolling | 4.35 | 11.20 | 4.80 | 5.29 | 4.63 |
+  | ep_next | 4.46 | 11.31 | 5.24 | 4.68 | 4.11 |
+
+  - **MSE:** lower than both baselines at horizon 0 and at every horizon 1–5 separately. One-sided DM p < 0.001 everywhere. Candidate MSE on each pair's own top-N union: 9.07 vs 11.63 (rolling) and 9.38 vs 12.10 (ep_next), p < 0.001.
+  - **Seasons:** v1 wins both (3.45 / 3.50 vs rolling 4.36 / 4.35, ep_next 4.44 / 4.48).
+  - **Regrets: no worse** (better, not significantly):
+    - XI regret 4.60 vs 5.29 (rolling, p 0.10) and 4.68 (ep_next, p 0.44);
+    - captain regret 4.04 vs 4.63 (p 0.13) and 4.11 (p 0.44).
+  - **Predicted-xP bands.** The harness's band table puts each model on its *own* bands, so each band holds different players. In bands 4–8 xP v1's MSE is higher there (e.g. 5–6 xP: 22.9 vs 16.6 / 16.1). The reason: v1's high bands hold players who do score high (5–6 xP band: realized 5.96), and high scorers vary more. The baselines' high bands are full of overrated low scorers (realized 3.45 / 3.67).
+    - On identical rows, v1's MSE is lower than both baselines in every band, whether the bands are drawn by rolling's xP, ep_next's, v1's own or the three models' mean (e.g. by mean xP, 5–6: 13.7 vs 19.6 / 22.9; ≥ 8: 40.4 vs 53.1 / 60.5).
+    - The criterion's "no worse in any band" is read as this paired comparison, the only one that compares like with like. The own-band table is kept as a calibration diagnostic: v1's mean realized points track its prediction in every band, the baselines overpredict above ~3 xP.
+  - **Components, validate:**
+    - minutes log loss 0.450 at h0 and 0.610 at h1–5;
+    - P(start) Brier 0.073 at h0 (it underpredicts high P(start) slightly: 0.85 predicted → 0.92 observed);
+    - player P(CS) Brier 0.056; P(goal) Brier 0.030;
+    - e_goals mean 0.0402 vs 0.0402 realized.
+  - **Flag check (§4) on validate:** no separate with/without-flags run was made; the P(start) reliability above includes the flag layer.
+- **After the validate run** (PR #28 review, 2026-10-08): `adjust_minutes` reset every row to "free", so the flag mapping and the team re-normalization also moved fixtures in a predicted ban, overriding the fitted ban residual. The minutes frame now carries `banned`; banned fixtures are left out of the mapping and held fixed. This affects only banned fixtures of flagged-era deadlines (~47 banned player-fixtures per season). The calibration table was regenerated: develop MSE h0 4.2609 (was 4.2608), MSE h1–5 4.6845 (unchanged). Criterion 1 was re-checked on the final code (`results/p5-validate-final`; the same command, as asked in the PR #28 review): MSE h0 3.473 vs 4.352 / 4.458, MSE h1–5 3.976, regrets 4.60 / 4.04. These are identical to the first run to three decimals, so the conclusion stands. A return date ("Expected back" / "Suspended until") still zeroes a banned fixture before that date: it is direct evidence the player is out.
 
 ### 6.1 Team model — market primary
 **Market-implied λ (primary for GWs with odds, typically GW+1, sometimes +2):**
@@ -495,7 +602,7 @@ Horizon, decay and FT value are confounded — tune them jointly.
 | 2 | `as_of` layer + leakage tests | Corrupt-the-future test passes |
 | 3 | Backtester + baselines (rolling avg, `ep_next`) + greedy policy + paired evaluation | Simulated seasons from arbitrary states; baselines scored per §5 |
 | 4 | Optimizer (transfers, captain, bench, chip scenarios, top-3) | Backtest runs end-to-end; ~~beats greedy~~ (deferred to Phase 5, §12); matches open-fpl-solver on no-chip cases; solve times acceptable — **done 2026-10-08** |
-| 5 | Real models (market-implied team model, shares, minutes, components, calibration) | Beat both baselines on component metrics in validation; **and the optimizer beats greedy with Phase 5 xP** (paired, same xP: chosen on develop, confirmed on validate, deflated for the variants tried; full run and the per-decision design fixed in §11) |
+| 5 | Real models (market-implied team model, shares, minutes, components, calibration) | Beat both baselines on component metrics in validation (tested on xP and decision metrics, §6 *Phase 5 decisions*); **and the optimizer beats greedy with Phase 5 xP** (paired, same xP: chosen on develop, confirmed on validate, deflated for the variants tried; full run and the per-decision design fixed in §11) |
 | 6 | Holdout evaluation | Single pre-registered run on 2025/26; result recorded |
 | 7 | Telegram bot + go live | `/register`, `/plan`, alerts working for my team |
 | 8 | Distributions, sensitivity analysis, uncertain fixtures, polish | Each adopted only if it beats the current policy in paired validation |
@@ -529,6 +636,9 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 - Chip terminal values estimated from backtest distributions (now placeholders: WC 6, FH 4, BB 4, TC 3); they set when the planner plays chips.
 - Mid-season start states for transfer-quality tests (the GW1 starts let squad rebuilds dominate full-run differences).
 - Exclude the degenerate 2016/17 GW1 under `rolling` (no earlier matches: every xP is 0) from comparisons, or start 2016/17 at GW2.
+
+**Resolved (2026-10-08):**
+- FPL xG minus penalty xG as npxG for 2025/26+ → §3 *Backfill rules* (verified on the overlap; scale factors fitted walk-forward).
 
 **Resolved (2026-10-07):**
 - Solver performance with chip scenarios over a 6-GW horizon → §7 *Solve times* (#10).
@@ -572,5 +682,7 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-07 | Optimizer: PuLP on in-process HiGHS (1 thread, gap stop), chips by fixed scenarios, hits decayed, open-fpl-solver objective conventions, parallel backtests by (season, start). | PLAN §2/§7; deterministic decisions for the leakage check; like-for-like reference check; hundreds of solves per backtest. |
 | 2026-10-08 | Optimizer defaults `max_hits = 0` (conservative: unlimited hits clearly lose, max 1 with margin 2 undetermined) and `itb_value = 0`; `ep_next_fade` xP; parallel backtests (`--jobs`). Phase 4 full-run gains vs greedy (rolling +0.90/GW, ep_next +1.92/GW) are in-sample only (see the next row); chips +4.3/GW is chips used vs wasted. | Cash in the bank was hoarded (2016/17 GW1 sell-off); realized transfer gains are ~⅕–⅓ of predicted (§7 Phase 4 results). |
 | 2026-10-08 | Merge Phase 4 without its "optimizer beats greedy" criterion; the criterion moves to Phase 5 (with the real xP models: develop-selected, validate-confirmed, deflated). | Out of sample the full-run edge vanishes (validate: rolling −0.03, ep_next −0.13 per GW; 2021/22 carries ~⅔ of it; season-level p 0.14 / 0.11; deflated ≈ +0.08 / +0.44) the split pattern flips with the start set; per decision the optimizer doesn't beat greedy (negative with the roll continuation; with each arm's own continuation positive but reference-dependent, season-level p ≥ 0.22) (§7 *Phase 4 results*). The planner itself is done and correct (reference check, solve times, leakage checks); its edge depends on xP quality. |
+| 2026-10-08 | Phase 5 models fit walk-forward: refit every 4 GWs via `AsOfView.earlier`, with fits memoized by the caller; LightGBM only through `fplopt.models.gbm` (deterministic). Criterion 1 is tested on xP MSE and decision metrics against `rolling` and `ep_next` on validate. Phase 5 ships as two PRs (5a models, 5b decisions). | ~10 fits per season instead of one per deadline, still leak-checked end to end; the baselines have no components to compare; one review per PR stays manageable. |
+| 2026-10-08 | Phase 5 criterion 1 met on validate (2023/24–2024/25). The "no worse in any predicted-xP band" condition is judged on identical rows (bands by each model's xP and by their mean), not on each model's own bands. | v1 MSE 3.47 vs 4.35 / 4.46 (p < 0.001 at every horizon), regrets no worse. Own-band MSE compares different players: v1's high bands hold real high scorers, whose outcomes vary more; on identical rows v1 is lower in every band under every banding. |
 | 2026-10-08 | Backtests use a deterministic node limit, no wall-clock limit (60 s only for `optimize plan`/`bench`); solver status recorded per GW; tie-break ε 1e-4 per buy; parallel units on a pipe-per-worker pool. | Results must not depend on machine load (solves took up to 306 s on a loaded machine); equal-xP GWs made arbitrary transfers; ProcessPoolExecutor's queue semaphores broke under load on Windows (Phase 4 review). |
 | 2026-10-07 | Chip scenarios searched best-first by LP/derived upper bounds (same plan as solving all); bulk PuLP→highspy hand-over; club-aware dominance pruning; top-N 20/60/60/30. | #10 benchmark: 107–750 s → median 14 s per deadline; old dominance lost up to 6.6 pts, 10/30/30/15 up to 1.0. |
