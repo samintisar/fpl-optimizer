@@ -449,8 +449,8 @@ def test_parse_optimizer_policy_spec():
     assert unlimited.params == (("decay", 0.9), ("horizon", 4), ("max_hits", None))
     assert cli.parse_policy_spec(str(unlimited)) == unlimited
     assert unlimited.build().name == "optimizer(rolling,mh=inf,m=0.0,h=4,d=0.9)"
-    itb = cli.parse_policy_spec("optimizer:rolling:itb_value=0,chips=0").build()
-    assert itb.name == "optimizer(rolling,mh=inf,m=0.0,itb=0.0)" and not itb.chips
+    itb = cli.parse_policy_spec("optimizer:rolling:itb_value=0.08,chips=0").build()
+    assert itb.name == "optimizer(rolling,mh=0,m=0.0,itb=0.08)" and not itb.chips
 
 
 @pytest.mark.parametrize(

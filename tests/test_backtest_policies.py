@@ -439,12 +439,12 @@ def test_optimizer_policy_is_frozen_named_and_picklable():
     import pickle
 
     default = OptimizerPolicy()
-    assert default.name == "optimizer(ep_next,mh=inf,m=0.0)"
-    params = OptimizerParams(horizon=4, decay=0.9, max_hits=1, hit_margin=2, itb_value=0.0)
+    assert default.name == "optimizer(ep_next,mh=0,m=0.0)"
+    params = OptimizerParams(horizon=4, decay=0.9, max_hits=1, hit_margin=2, itb_value=0.08)
     policy = OptimizerPolicy("rolling", params, chips=True)
-    assert policy.name == "optimizer(rolling,mh=1,m=2.0,h=4,d=0.9,itb=0.0,chips)"
+    assert policy.name == "optimizer(rolling,mh=1,m=2.0,h=4,d=0.9,itb=0.08,chips)"
     small = OptimizerPolicy(params=SMALL).name
-    assert small == "optimizer(ep_next,mh=inf,m=0.0,h=3,prune=4/10/10/6)"
+    assert small == "optimizer(ep_next,mh=0,m=0.0,h=3,prune=4/10/10/6)"
     assert pickle.loads(pickle.dumps(policy)) == policy
     with pytest.raises(FrozenInstanceError):
         policy.chips = False

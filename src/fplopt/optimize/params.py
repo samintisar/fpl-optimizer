@@ -13,13 +13,22 @@ reference check (Phase 4 Task 4) compares like with like:
   only adds the constant V(ft[0]) to the objective; set it to reproduce that constant.
 - `itb_value`: points per £1m in the bank after each GW's transfers, per GW (inside the
   decay); open-fpl-solver's `itb_value` (£m units; our money is tenths, so bank / 10).
+  **Default 0** (open-fpl-solver: 0.08; Phase 4 Task 5 backtests, PLAN §7): with 0.08 the
+  planner hoards cash (mean bank £3.1m vs greedy's £1.7m), selling premiums for cheap
+  players, and with uninformative xP (2016/17 GW1, no history) it sold down to the
+  cheapest squad and banked £36m. optimizer(rolling, max_hits 0) gained +0.79 pts/GW
+  (80% CI +0.24 to +1.38, 2016/17-2024/25) from 0.08 -> 0.
 - `bench_weights`: (GK slot, outfield slots 1–3), open-fpl-solver's `bench_weights`.
 - `decay`: GW t (horizon offset t, target GW t = 0) is weighted decay**t, as
   open-fpl-solver's `decay_base ** (w − next_gw)`.
 - Hits cost `rules.hit_cost + hit_margin` each, inside the decay (open-fpl-solver's
   `hit_cost × penalized_transfers` sits inside its decayed GW total too).
 - `max_hits`: at most this many hits in every horizon GW (`None` = unlimited, `0` = never
-  take a hit); a safeguard against inflated xP chasing form with hits (Phase 4 Task 5).
+  take a hit); a safeguard against inflated xP chasing form with hits. **Default 0**
+  (Phase 4 Task 5, PLAN §7): against greedy on ep_next_fade 2021/22-2024/25, max_hits 0
+  was -0.9 pts/GW, max_hits 1 with hit_margin 2 -1.4 (28 hits a season) and unlimited
+  -4.0 (77 hits a season); realized transfer gains are ~1/4-1/2 of the predicted ones, so
+  a hit (4 points) rarely pays. `hit_margin` only matters with `max_hits` > 0.
 """
 
 from __future__ import annotations
@@ -60,9 +69,9 @@ class OptimizerParams:
     horizon: int = 6
     decay: float = 0.85
     ft_value: Mapping[int, float] = field(default_factory=lambda: DEFAULT_FT_VALUE)
-    itb_value: float = 0.08
+    itb_value: float = 0.0
     hit_margin: float = 0.0
-    max_hits: int | None = None
+    max_hits: int | None = 0
     bench_weights: tuple[float, float, float, float] = DEFAULT_BENCH_WEIGHTS
     chip_value: Mapping[str, float] = field(default_factory=lambda: DEFAULT_CHIP_VALUE)
     prune_n: Mapping[int, int] | None = field(default_factory=lambda: DEFAULT_PRUNE_N)

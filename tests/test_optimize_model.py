@@ -36,7 +36,8 @@ from fplopt.backtest.state import (  # noqa: E402
 from fplopt.optimize import OptimizerParams, PlanInput, optimize  # noqa: E402
 from fplopt.optimize.model import solve_plan  # noqa: E402
 
-EXACT = OptimizerParams(mip_gap=0.0, prune_n=None, prune_dominated=False)
+# Hits allowed (the default max_hits=0 never takes one): the brute force searches them too.
+EXACT = OptimizerParams(mip_gap=0.0, prune_n=None, prune_dominated=False, max_hits=None)
 
 
 def plan_for(state, pool, xp, params=EXACT, rules=RULES, **kwargs):
@@ -356,7 +357,7 @@ def test_max_hits_caps_the_hits_per_gw(max_hits, n_transfers: int, hits: int) ->
 def test_max_hits_holds_in_every_horizon_gw(seed: int) -> None:
     state, pool, xp = medium_instance(seed, ft=1, n_gws=3)
     churny = xp.assign(xp=xp["xp"] * (1 + 2 * (xp["player_key"] * (xp["horizon"] + 1) % 3)))
-    free = OptimizerParams(horizon=3, hit_margin=-3.5)  # hits nearly free: take many
+    free = OptimizerParams(horizon=3, hit_margin=-3.5, max_hits=None)  # nearly free hits
     _, unlimited = plan_for(state, pool, churny, free)
     assert max(g.hits for g in unlimited.gws) > 1
     for cap in (0, 1):
@@ -388,7 +389,8 @@ def test_max_hits_validation_and_pickling() -> None:
         time_limit=5.0,
     )
     assert len(every.__reduce__()[1]) == len(fields(OptimizerParams))
-    for params in (OptimizerParams(), every, OptimizerParams(prune_n=None)):
+    assert (OptimizerParams().max_hits, OptimizerParams().itb_value) == (0, 0.0)  # Task 5
+    for params in (OptimizerParams(), every, OptimizerParams(prune_n=None, max_hits=None)):
         assert pickle.loads(pickle.dumps(params)) == params
 
 
