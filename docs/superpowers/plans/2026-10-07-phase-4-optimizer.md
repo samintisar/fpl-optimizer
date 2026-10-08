@@ -135,21 +135,21 @@ Phase 4 is done when (PLAN §9):
 - [ ] Report the instances, objectives, gaps and runtimes of both.
 
 ### Task 5: Optimizer policy, backtests, CLI (wave C; needs Tasks 2–3)
-- [ ] **Hit safeguards.** Inflated xP makes a solver chase form with hits: ep_next is form-driven, and the baseline copies it flat over 6 GWs, so the solver takes 4–9 hits a GW.
+- [x] **Hit safeguards.** Inflated xP makes a solver chase form with hits: ep_next is form-driven, and the baseline copies it flat over 6 GWs, so the solver takes 4–9 hits a GW.
   - `OptimizerParams.max_hits` (per GW; `None` = unlimited, `0` = never) next to `hit_margin`.
   - Predicted-vs-realized gain log for executed transfers (PLAN §7 optimizer's curse): per decision, the plan's predicted first-GW and horizon gain vs roll; realized points of the transferred-in minus transferred-out players over the same GWs. Report the slope.
   - A `ep_next_fade` xP model: target GW = ep_next; later GWs fade toward the player's long-run per-fixture rate (rolling mean of his last 10 visible matches, any season), weight 0.5^h on ep_next. `ep_next` is kept unchanged so Phase 3 results stay valid.
   - Backtest the hit variants (`max_hits` 0 / 1 / unlimited × `hit_margin` 0 / 2) against greedy. The defaults follow the data.
-- [ ] `OptimizerPolicy(xp_model, params=OptimizerParams(), chips=False)` gives `decide(ctx)` = plan #1's first-GW decision (top-3 off in backtests).
-- [ ] Architecture scan: the optimizer modules (no file reads; allowed imports add pulp/highspy). The probe `optimizer_ep_next_template` goes in `PROBES` (no chips, small pruning to keep the leakage check fast).
-- [ ] `run_grid(..., jobs=N)` / `per_decision(..., jobs=N)` with a process pool; equal results for jobs=1 vs 2 (test). CLI `--jobs` (default: CPU count − 1).
-- [ ] CLI policy spec `optimizer:xp[:horizon=..,decay=..,chips=1,...]`. `fplopt optimize plan --season S --gw G --start template|random:SEED --xp ep_next` prints top-3 + roll plans with xP gains.
-- [ ] **Real-data runs** (report verbatim with timings):
+- [x] `OptimizerPolicy(xp_model, params=OptimizerParams(), chips=False)` gives `decide(ctx)` = plan #1's first-GW decision (top-3 off in backtests).
+- [x] Architecture scan: the optimizer modules (no file reads; allowed imports add pulp/highspy). The probe `optimizer_ep_next_template` goes in `PROBES` (no chips, small pruning to keep the leakage check fast).
+- [x] `run_grid(..., jobs=N)` / `per_decision(..., jobs=N)` with a process pool; equal results for jobs=1 vs 2 (test). CLI `--jobs` (default: CPU count − 1).
+- [x] CLI policy spec `optimizer:xp[:horizon=..,decay=..,chips=1,...]`. `fplopt optimize plan --season S --gw G --start template|random:SEED --xp ep_next` prints top-3 + roll plans with xP gains.
+- [x] **Real-data runs** (report verbatim with timings; PLAN §7 *Phase 4 results*):
   - (a) optimizer:ep_next vs greedy:ep_next, 2021–2024, `template@1,random:5@1`;
   - (b) optimizer:rolling vs greedy:rolling, 2016–2024, `template@1,random:5@1`;
   - (c) optimizer:ep_next:chips=1 vs optimizer:ep_next, 2021–2024 (full run is the chip metric, PLAN §5).
-- [ ] The optimizer must beat greedy in (a) and (b) (paired, one-sided p < 0.10 on the full run and per-decision). If it doesn't, investigate before tuning (bugs first).
-- [ ] Docs: CLAUDE.md commands, README status, PLAN §7/§9 results.
+- [x] The optimizer must beat greedy in (a) and (b) (paired, one-sided p < 0.10 on the full run and per-decision). If it doesn't, investigate before tuning (bugs first). **Result:** full run yes for rolling and ep_next (after `max_hits = 0`, `itb_value = 0`), per-decision no (negative, not significant); investigated in PLAN §7 *Phase 4 results*.
+- [x] Docs: CLAUDE.md commands, README status, PLAN §7/§9 results.
 
 ### Task 6: Review and PR (lead)
 - [ ] Independent reviews: MILP correctness vs state rules, chips, determinism/leakage, performance. Fix the findings.

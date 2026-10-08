@@ -231,6 +231,7 @@ Luck moves a season total by roughly ±80–100 points, so across 9 develop+vali
 ### Baselines
 - **Rolling average** of points, decisions by the greedy policy.
 - **FPL's own `ep_next`** (2021/22+ via fplcache, live from our archive), decisions by greedy and by the optimizer. Running the optimizer on `ep_next` separates the value of our model from the value of the optimizer.
+- **`ep_next_fade`** (Phase 4): `ep_next` in the target GW; in horizon GW h the per-fixture rate is 0.5^h · ep_next's + (1 − 0.5^h) · the player's mean points over his last 10 matches. ep_next is form-driven and copied flat it inflates later GWs; `ep_next` itself is unchanged so Phase 3 results stay valid. A diagnostic, not a baseline.
 - Every model must beat both.
 - **Phase 3 results** (2026-10-06, `results/experiments.csv`; GW1 starts, means over template + 5 random squads):
   - **greedy(rolling) vs roll(rolling), 2016/17–2024/25:** +11.4 pts/GW full run (80% CI +10.4 to +12.6), +431 per season. Per-decision +9.3 per 4-GW window (+7.6 to +11.1). xG metric agrees (+12.2/GW over the 6 seasons with xG).
@@ -348,7 +349,7 @@ max Σ_t decay^t · [ Σ xP·lineup + xP·captain + Σ_k bench_xP_k + chip terms
     + terminal_value(squad[T], unused chips)
 ```
 - **FT value is concave:** marginal value of the n-th banked FT, starting at {2: 2.0, 3: 1.6, 4: 1.3, 5: 1.1} (open-fpl-solver defaults), tuned.
-- **Money in the bank:** `itb_value` ≈ 0.08 pts per £1m per GW, tuned.
+- **Money in the bank:** `itb_value` pts per £1m per GW. Default 0 (open-fpl-solver: 0.08): with 0.08 the planner hoarded cash (Phase 4 results below).
 - **Bench:** bench_xP_k = xP × P(bench slot k is needed), from the minutes model's P(starter doesn't play) and autosub order. Fallback fixed weights 0.21 / 0.06 / 0.002, GK 0.03.
 
 ### Defaults (tuned by backtest)
@@ -356,7 +357,8 @@ max Σ_t decay^t · [ Σ xP·lineup + xP·captain + Σ_k bench_xP_k + chip terms
 |---|---|
 | Horizon | 6 GWs |
 | Decay | 0.85 per GW |
-| Hit margin | tuned (hits only if gain > 4 + margin) |
+| Hits | `max_hits` 0: never (Phase 4 results); `hit_margin` (hits only if gain > 4 + margin) only applies with `max_hits` > 0 |
+| Money in the bank | `itb_value` 0 |
 | FT value | concave, see above |
 | Bench | P(needed)-weighted; fixed fallback above |
 | Vice-captain | 2nd-highest xP starter |
@@ -369,7 +371,7 @@ Horizon, decay and FT value are confounded — tune them jointly.
 - **Top 3 plans:** solve → add no-good cut excluding that GW's transfer set → re-solve (×2). Plus the "roll transfer" plan as baseline; show each plan's xP gain vs roll over the horizon.
 - **Solve budget:** gap-based stopping (start: 0.5%) with fixed thread count for reproducibility; a generous time cap only as a safety net. Record solve time and final gap per GW.
 - **Reference check:** open-fpl-solver (Apache-2.0) is the external reference. A differential test feeds identical xP to both and checks objectives match on no-chip cases.
-- **Optimizer's curse:** the chosen plan's predicted gain is biased upward. Log predicted vs realized gain of executed transfers (backtest and live); a slope < 1 means raising the hit margin / FT value or shrinking later-GW xP harder.
+- **Optimizer's curse:** the chosen plan's predicted gain is biased upward. Log predicted vs realized gain of executed transfers (backtest and live); a slope < 1 means raising the hit margin / FT value or shrinking later-GW xP harder. Backtest: every simulated GW records `pred_gain` / `real_gain` (players bought minus sold, decision-time xP vs realized points, over the GW and the next 3), and `backtest run|compare` print the slope per policy.
 - **Sensitivity analysis (Phase 8):** re-solve N times with xP perturbed by **estimate uncertainty** from the component models (not outcome noise); report how often each move appears ("robustness %") and backtest "most frequent plan" as a policy.
 - **Uncertain fixtures (Phase 8):** weight scenarios for possible blanks/doubles.
 - **Solve times** (#10, `fplopt optimize bench`, 2026-10-07; 40 cases = 10 deadlines (2021/22 GW2, 33; 2022/23 GW3, 24; 2023/24 GW1, 20; 2024/25 GW7, 11; 2026/27 GW2, 5) × template/random start × ep_next/rolling xP; 6-GW horizon, no chips used yet (205 scenarios, 173 at GW1); defaults; one thread, one process; median / p90 / max):
@@ -404,6 +406,29 @@ Horizon, decay and FT value are confounded — tune them jointly.
   - Top-3 cuts exclude plan #1's first-GW transfer set. Plans #2–3 are re-solved within plan #1's chip scenario (other moves now, given the winning chip plan; every scenario's objective is reported alongside). The roll plan uses the same scenario, minus a Wildcard/Free Hit in the first GW (a transfer chip with no transfers is wasted).
   - Chip terminal values are added undecayed (the value of holding the chip at the horizon's end, in this-GW points); placeholder defaults WC 6, FH 4, BB 4, TC 3. A Free Hit GW credits `itb_value` on the bank carried past it, not the FH squad's leftover.
   - Prices are held fixed over the horizon.
+- **Phase 4 results** (Task 5, 2026-10-08; `results/experiments.csv`, `results/phase4-*`; GW1 starts, template + 5 random squads; `backtest compare --jobs 14`; paired A − B, 80% CI, one-sided p; per-decision = per 4-GW window, roll(rolling) continuation; curse = least-squares slope of realized on predicted transfer gain over the GW and the next 3, GWs after GW1 with transfers, gross of hits, with mean predicted → realized gain per such GW):
+  - **Hit safeguards** (A = optimizer(ep_next_fade, itb 0.08), B = greedy(ep_next_fade), 2021/22–2024/25, ~13 min each):
+
+    | A | hits / season | full run / GW | per-decision / window | curse slope (pred → real) |
+    |---|---|---|---|---|
+    | max_hits 0 | 0 | −0.86 (−2.26 to +0.47), p 0.80 | −1.77 (−3.73 to +0.01), p 0.90 | 0.46 (19.9 → 6.5) |
+    | max_hits 1, hit_margin 2 | 28 | −1.40 (−2.68 to −0.06), p 0.91 | +0.19 (−2.90 to +3.30), p 0.49 | 0.51 (28.2 → 8.2; net of hits 24.9 → 5.0) |
+    | unlimited, hit_margin 0 | 81 | −3.99 (−5.32 to −2.63), p 1.00 | −7.13 (−10.96 to −3.17), p 0.99 | 0.33 (39.0 → 12.0; net 29.8 → 2.8) |
+
+    greedy: slope 0.23 (18.6 → 6.2). Realized transfer gains are a quarter to a half of the predicted ones, so a 4-point hit almost never pays: **default `max_hits = 0`** (`hit_margin` then unused, left at 0).
+  - **Money in the bank:** with `itb_value` 0.08 (open-fpl-solver's) the planner hoarded cash (mean bank £3.1m vs greedy's £1.7m; sold premiums for cheap players), and at 2016/17 GW1, where `rolling` xP is 0 for everyone (no earlier matches), it sold down to the cheapest squad and banked £36m (2016/17: −221 points vs greedy). optimizer(max_hits 0) with `itb_value` 0 vs 0.08 (same B, paired on A): rolling 2016/17–2024/25 **+0.79/GW** (+0.24 to +1.38, p 0.034; xG +0.64, p 0.04); ep_next_fade +0.21 (−0.54 to +1.03, p 0.37). **Default `itb_value = 0`**.
+  - **Defaults (max_hits 0, itb_value 0) vs greedy, same xP:**
+
+    | xP, seasons (wall time) | full run / GW | xG full run | per-decision / window | curse slope optimizer / greedy |
+    |---|---|---|---|---|
+    | ep_next_fade, 2021–24 (15 min) | −0.65 (−2.06 to +0.73), p 0.72 | −0.26, p 0.64 | −1.06 (−3.01 to +0.68), p 0.75 | 0.34 / 0.23 |
+    | ep_next, 2021–24 (9 min) | **+1.92 (+1.01 to +2.87), p 0.005**; +73 / season | +1.70, p 0.002 | −0.72 (−3.31 to +1.89), p 0.62 | 0.25 / 0.17 |
+    | rolling, 2016–24 (19 min) | **+0.90 (+0.38 to +1.41), p 0.013**; +34 / season | +1.30, p 0.001 | −0.86 (−1.99 to +0.30), p 0.84 (on the xG sample, 2019/20+: +0.12, p 0.46) | 0.48 / 0.26 |
+
+  - **Chips** (optimizer(ep_next_fade) with vs without chip scenarios, 2021/22–2024/25, template + 3 random, full run only, 41 min): **+4.33/GW (+2.78 to +5.94), p < 0.001, +163 / season** (xG +3.80); every season positive (+59 to +342).
+  - **Acceptance (PLAN §9 "beats greedy"):** met on the full run with `rolling` and `ep_next` (p 0.013, 0.005, xG agreeing); **not met per decision** (every per-decision mean is negative, none significant), and not met with `ep_next_fade`. Bugs checked first: every simulated decision passes `apply_decision`; at 13 deadlines (2024/25, greedy's states) the MILP's objective is ≥ that of greedy's move fixed in the same model; the plan's XI xP equals the lineup's xP from the frame (captain twice); horizons match the frame's. Why per-decision disagrees: at greedy's states (rolling, 2016/17, 2017/18, 2018/19, 2022/23; 105 decisions where both make one transfer) greedy's move has the larger standalone predicted gain (23.0 vs 20.9 over the 4-GW window; 23.9 vs 21.7 over 6 GWs decayed) and realized gain (4.6 vs 1.1). Greedy maximizes the gain of one move by construction; the optimizer picks the move that fits its 6-GW plan (XI and bench, later moves, FT banking), which the roll continuation never carries out (§5 *Known limitation*). The per-decision test is the go-live gate, so this matters before Phase 6: either a per-decision variant whose continuation is each arm's own policy, or the gate on full runs (decide and log in §12 before Phase 6).
+  - **Optimizer's curse:** slopes 0.25–0.48 (greedy 0.17–0.26): predicted transfer gains are 3–5× the realized ones. The baseline xP models are the cause (Phase 5); until then `max_hits = 0`.
+  - Multiple testing: 7 optimizer variants were compared with greedy in Task 5 (3 hit variants, itb 0 and 0.08 on each xP model) plus the chip run.
 
 ---
 
@@ -515,4 +540,5 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-06 | Backtester: outcomes read at lockdown via `as_of`; develop chip windows on `gw_index`; per-decision states from the baseline's own run; greedy never takes hits. | Same single access path as features; GW numbering gaps (2019/20, 2022/23); a neutral, reproducible reference. |
 | 2026-10-06 | Per-decision windows don't overlap (stride = k, one grid per season); bootstrap blocks counted in GWs; 80% two-sided CIs; `realized@xg` companion rows. | Overlapping windows made the bootstrap reject ~17% at nominal 10%; the 80% lower bound is the gate's one-sided α = 0.10; same-sample sign check. |
 | 2026-10-07 | Optimizer: PuLP on in-process HiGHS (1 thread, gap stop), chips by fixed scenarios, hits decayed, open-fpl-solver objective conventions, parallel backtests by (season, start). | PLAN §2/§7; deterministic decisions for the leakage check; like-for-like reference check; hundreds of solves per backtest. |
+| 2026-10-08 | Optimizer defaults `max_hits = 0` and `itb_value = 0`; `ep_next_fade` xP; parallel backtests (`--jobs`). Phase 4: optimizer beats greedy on full runs (rolling +0.90/GW, ep_next +1.92/GW), not per decision; chips +4.3/GW. | Hits lost points at every setting (realized transfer gains ¼–½ of predicted); cash in the bank was hoarded (2016/17 GW1 sell-off); per-decision windows don't credit a plan's follow-up moves (§7 Phase 4 results). |
 | 2026-10-07 | Chip scenarios searched best-first by LP/derived upper bounds (same plan as solving all); bulk PuLP→highspy hand-over; club-aware dominance pruning; top-N 20/60/60/30. | #10 benchmark: 107–750 s → median 14 s per deadline; old dominance lost up to 6.6 pts, 10/30/30/15 up to 1.0. |

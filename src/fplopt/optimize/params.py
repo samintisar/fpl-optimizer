@@ -27,7 +27,7 @@ reference check (Phase 4 Task 4) compares like with like:
   take a hit); a safeguard against inflated xP chasing form with hits. **Default 0**
   (Phase 4 Task 5, PLAN §7): against greedy on ep_next_fade 2021/22-2024/25, max_hits 0
   was -0.9 pts/GW, max_hits 1 with hit_margin 2 -1.4 (28 hits a season) and unlimited
-  -4.0 (77 hits a season); realized transfer gains are ~1/4-1/2 of the predicted ones, so
+  -4.0 (81 hits a season); realized transfer gains are ~1/4-1/2 of the predicted ones, so
   a hit (4 points) rarely pays. `hit_margin` only matters with `max_hits` > 0.
 """
 
