@@ -17,13 +17,14 @@ from collections.abc import Callable
 import pandas as pd
 
 from fplopt.features.store import AsOfView
-from fplopt.models.baseline import xp_ep_next, xp_rolling
+from fplopt.models.baseline import xp_ep_next, xp_ep_next_fade, xp_rolling
 
 XpModel = Callable[[AsOfView], pd.DataFrame]
 
 MODELS: dict[str, XpModel] = {
     "rolling": xp_rolling,
     "ep_next": xp_ep_next,
+    "ep_next_fade": xp_ep_next_fade,
 }
 
 __all__ = ("MODELS", "XpModel")

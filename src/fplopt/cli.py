@@ -15,7 +15,8 @@ results/experiments.csv; see `_backtest_run`, `_backtest_compare`), `fplopt opti
 solve times, chip scenario search and pruning variants on real deadlines, written to
 results/; `_optimize_bench`). Every job gets a `Context`; failures are logged and alerted
 to Telegram, and the exit code is 1. Bad backtest arguments (season syntax, holdout
-seasons, `ep_next` before 2021/22, seasons without data) are usage errors: exit 2, no alert.
+seasons, `ep_next`/`ep_next_fade` before 2021/22, seasons without data) are usage errors:
+exit 2, no alert.
 After a successful `snapshot daily|tick`, HEALTHCHECK_PING_URL (if set) gets a best-effort
 GET, for an external dead-man's switch that also notices the server being down.
 """
@@ -121,7 +122,8 @@ def _check_leakage(c: Context) -> object:
 
 BACKTEST_SEASONS = range(2016, 2027)  # seasons with built tables and backtest rules
 EP_NEXT_FIRST_SEASON = 2021  # FPL's ep_next is in the snapshots from 2020/21 GW32 on
-XP_MODELS = ("rolling", "ep_next")  # fplopt.models.MODELS keys (a test checks they agree)
+XP_MODELS = ("rolling", "ep_next", "ep_next_fade")  # fplopt.models.MODELS keys (tested)
+EP_NEXT_MODELS = frozenset({"ep_next", "ep_next_fade"})  # need FPL snapshots (2021/22+)
 POLICY_PARAMS: dict[str, dict[str, type]] = {
     "greedy": {"threshold": float, "horizon": int, "decay": float, "max_transfers": int},
     "roll": {},
@@ -322,7 +324,7 @@ def validate_backtest(
         specs.append(args.continuation)
     early = [season for season in args.seasons if season < EP_NEXT_FIRST_SEASON]
     for spec in specs:
-        if spec.xp == "ep_next" and early:
+        if spec.xp in EP_NEXT_MODELS and early:
             parser.error(
                 f"{spec} uses ep_next, which exists only from "
                 f"{season_label(EP_NEXT_FIRST_SEASON)} (FPL snapshots); drop "

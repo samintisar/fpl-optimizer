@@ -15,6 +15,9 @@ rules of tests/test_features_architecture.py apply to this module).
   gain beats a threshold and a free transfer is available (never a hit); repeated up to
   `max_transfers` while FTs last, and at `gw_index == 1` (unlimited free transfers) while the
   gain beats the threshold, up to a whole squad. No chips.
+- `OptimizerPolicy`: the MILP planner (`fplopt.optimize`, PLAN §7) over the xP frame's
+  horizon; executes plan #1's first-GW decision (transfers, lineup, captain, chip if
+  `chips`). One plan, no roll plan (top-3 is for the manager, not the backtest).
 
 Ties are broken by `player_key` everywhere, so decisions are deterministic.
 """
@@ -23,7 +26,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
@@ -41,10 +44,12 @@ from fplopt.backtest.state import (
 )
 from fplopt.features.store import AsOfView
 from fplopt.models import MODELS
+from fplopt.optimize import OptimizerParams, PlanInput, optimize
 
 __all__ = (
     "DecisionContext",
     "GreedyPolicy",
+    "OptimizerPolicy",
     "Policy",
     "RollPolicy",
     "best_lineup",
@@ -319,3 +324,71 @@ class GreedyPolicy:
         squad = _after(state, transfers, ctx.pool)
         lineup = best_lineup(squad, target_xp(ctx.xp), ctx.rules)
         return Decision(transfers=transfers, lineup=lineup, chip=None)
+
+
+def _optimizer_extras(params: OptimizerParams) -> list[str]:
+    """`OptimizerPolicy.name` parts for the parameters other than the hit safeguards that
+    differ from `OptimizerParams()`'s (so distinct policies get distinct names)."""
+    default = OptimizerParams()
+    parts = []
+    if params.horizon != default.horizon:
+        parts.append(f"h={params.horizon}")
+    if params.decay != default.decay:
+        parts.append(f"d={float(params.decay)!r}")
+    if params.itb_value != default.itb_value:
+        parts.append(f"itb={float(params.itb_value)!r}")
+    if params.ft_value != default.ft_value:
+        parts.append("ftv=" + "/".join(f"{k}:{v!r}" for k, v in params.ft_value.items()))
+    if params.bench_weights != default.bench_weights:
+        parts.append("bw=" + "/".join(repr(w) for w in params.bench_weights))
+    if params.chip_value != default.chip_value:
+        parts.append("cv=" + "/".join(f"{k}:{v!r}" for k, v in params.chip_value.items()))
+    if params.prune_n != default.prune_n:
+        prune = "all" if params.prune_n is None else "/".join(map(str, params.prune_n.values()))
+        parts.append(f"prune={prune}")
+    if params.prune_dominated != default.prune_dominated:
+        parts.append(f"dom={int(params.prune_dominated)}")
+    if params.mip_gap != default.mip_gap:
+        parts.append(f"gap={float(params.mip_gap)!r}")
+    if params.threads != default.threads:
+        parts.append(f"threads={params.threads}")
+    if params.time_limit != default.time_limit:
+        parts.append(f"tl={float(params.time_limit)!r}")
+    return parts
+
+
+@dataclass(frozen=True)
+class OptimizerPolicy:
+    """The MILP planner (`fplopt.optimize`): `PlanInput.from_context` on the context's
+    (refreshed) state, pool and xP frame, then `optimize(top_k=1, roll=False,
+    chips=chips)`; the decision is plan #1's first GW. `chips=False` plans without chips
+    (the no-chip scenario only). Deterministic for a given context (HiGHS with fixed
+    threads and gap-based stopping; the time limit is a safety net only).
+
+    `name`: `optimizer(<xp>,mh=<max_hits|inf>,m=<hit_margin>[,...][,chips])`; the hit
+    safeguards are always listed (their defaults are being tuned), other parameters only
+    when they differ from `OptimizerParams()`."""
+
+    xp_model: str = "ep_next"
+    params: OptimizerParams = field(default_factory=OptimizerParams)
+    chips: bool = False
+
+    def __post_init__(self) -> None:
+        _check_model(self.xp_model)
+        if not isinstance(self.params, OptimizerParams):
+            raise TypeError(f"params must be OptimizerParams, got {type(self.params).__name__}")
+
+    @property
+    def name(self) -> str:
+        params = self.params
+        max_hits = "inf" if params.max_hits is None else str(params.max_hits)
+        parts = [self.xp_model, f"mh={max_hits}", f"m={float(params.hit_margin)!r}"]
+        parts += _optimizer_extras(params)
+        if self.chips:
+            parts.append("chips")
+        return f"optimizer({','.join(parts)})"
+
+    def decide(self, ctx: DecisionContext) -> Decision:
+        problem = PlanInput.from_context(ctx.state, ctx.pool, ctx.xp, ctx.rules, self.params)
+        plans = optimize(problem, self.params, top_k=1, chips=self.chips, roll=False)
+        return plans.decision()

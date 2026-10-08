@@ -8,9 +8,14 @@ of a package):
   `leakcheck.py` (the harness, which loads and corrupts whole tables); registry `FEATURES`;
 - `fplopt/models/`: every module; may also import the scanned feature modules (and the
   `fplopt.features` package); registry `MODELS`;
+- `fplopt/optimize/`: every module except `bench.py` (the benchmark, an orchestrator that
+  opens the `DataStore` and drives the simulator's caches, like the simulator itself); the
+  MILP planner the optimizer policy calls at a deadline. May also import the pure backtest
+  modules `rules`, `state`, `gw_score`, the solver (`pulp`, `highspy`) and `time`,
+  `itertools`, `types`; no registry;
 - `fplopt/backtest/`: only `policies.py`, `start_states.py`, `probes.py` (what decides at a
-  deadline); may also import the scanned feature and model modules, the pure backtest
-  modules `rules`, `state`, `gw_score` and `fplopt.seasons`; registry `PROBES`.
+  deadline); may also import the scanned feature, model and optimizer modules, the pure
+  backtest modules `rules`, `state`, `gw_score` and `fplopt.seasons`; registry `PROBES`.
 A later scanned package adds an entry the same way.
 
 Rules (`violations`, the same for every target):
@@ -110,6 +115,7 @@ IMMUTABLE_CALLS = {
     "pd.Timestamp",
     "logging.getLogger",
     "TypeVar",
+    "MappingProxyType",  # a read-only view of a literal nothing else references
 }
 MUTATORS = {
     "append",
@@ -141,6 +147,7 @@ class ScanTarget:
     extra_modules: frozenset[str] = frozenset()  # further importable modules
     restricted: Mapping[str, frozenset[str]] = field(default_factory=dict)  # module -> names
     registries: Mapping[str, frozenset[str]] = field(default_factory=dict)  # file -> names
+    immutable_calls: frozenset[str] = frozenset()  # further immutable module-level calls
     root: Path | None = None  # default: the package's directory under src/
 
     @property
@@ -160,22 +167,37 @@ MODELS_TARGET = ScanTarget(
     restricted={"fplopt.features.store": STORE_NAMES},
     registries={"__init__.py": frozenset({"MODELS"})},
 )
+PURE_BACKTEST_MODULES = frozenset(
+    {
+        "fplopt.backtest.rules",  # reads config/scoring (rules), never data/
+        "fplopt.backtest.state",
+        "fplopt.backtest.gw_score",
+    }
+)
+OPTIMIZE_TARGET = ScanTarget(
+    package="fplopt.optimize",
+    exempt=frozenset({"bench.py"}),  # the benchmark harness: opens the DataStore
+    extra_modules=PURE_BACKTEST_MODULES
+    | frozenset(
+        {
+            "pulp",  # builds the MILP in memory; solved in-process (no files)
+            "highspy",  # HiGHS, in-process
+            "time",  # solve-time statistics only (perf_counter)
+            "itertools",
+            "types",  # MappingProxyType: read-only parameter mappings
+        }
+    ),
+    immutable_calls=frozenset({"ChipScenario"}),  # frozen dataclass of tuples (NO_CHIP)
+)
 BACKTEST_TARGET = ScanTarget(
     package="fplopt.backtest",
     files=("policies.py", "start_states.py", "probes.py"),
-    trusted=(FEATURES_TARGET, MODELS_TARGET),
-    extra_modules=frozenset(
-        {
-            "fplopt.backtest.rules",  # reads config/scoring (rules), never data/
-            "fplopt.backtest.state",
-            "fplopt.backtest.gw_score",
-            "fplopt.seasons",
-        }
-    ),
+    trusted=(FEATURES_TARGET, MODELS_TARGET, OPTIMIZE_TARGET),
+    extra_modules=PURE_BACKTEST_MODULES | frozenset({"fplopt.seasons"}),
     restricted={"fplopt.features.store": STORE_NAMES},
     registries={"probes.py": frozenset({"PROBES"})},
 )
-TARGETS = (FEATURES_TARGET, MODELS_TARGET, BACKTEST_TARGET)
+TARGETS = (FEATURES_TARGET, MODELS_TARGET, OPTIMIZE_TARGET, BACKTEST_TARGET)
 
 
 def scanned_files(target: ScanTarget) -> list[Path]:
@@ -294,26 +316,29 @@ def _module_level_names(tree: ast.Module) -> set[str]:
     return names
 
 
-def _immutable(node: ast.AST | None) -> bool:
-    """A module-level value that cannot be mutated later."""
+def _immutable(node: ast.AST | None, calls: frozenset[str] = frozenset()) -> bool:
+    """A module-level value that cannot be mutated later (`calls`: further immutable
+    constructors besides IMMUTABLE_CALLS)."""
     if node is None or isinstance(node, ast.Constant | ast.Name | ast.Attribute):
         return True
     if isinstance(node, ast.Tuple):
-        return all(_immutable(e) for e in node.elts)
+        return all(_immutable(e, calls) for e in node.elts)
     if isinstance(node, ast.UnaryOp):
-        return _immutable(node.operand)
+        return _immutable(node.operand, calls)
     if isinstance(node, ast.BinOp):
-        return _immutable(node.left) and _immutable(node.right)
+        return _immutable(node.left, calls) and _immutable(node.right, calls)
     if isinstance(node, ast.BoolOp):
-        return all(_immutable(v) for v in node.values)
+        return all(_immutable(v, calls) for v in node.values)
     if isinstance(node, ast.Subscript):  # type aliases, e.g. Callable[[AsOfView], ...]
         return isinstance(node.value, ast.Name | ast.Attribute)
     if isinstance(node, ast.Call):
-        return _dotted(node.func) in IMMUTABLE_CALLS
+        return _dotted(node.func) in IMMUTABLE_CALLS | calls
     return False
 
 
-def _state_violations(tree: ast.Module, allowed: set[str]) -> list[str]:
+def _state_violations(
+    tree: ast.Module, allowed: set[str], calls: frozenset[str] = frozenset()
+) -> list[str]:
     found = []
     for node in tree.body:
         if isinstance(node, ast.Assign | ast.AnnAssign | ast.AugAssign):
@@ -321,7 +346,7 @@ def _state_violations(tree: ast.Module, allowed: set[str]) -> list[str]:
             names = [n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)]
             if isinstance(node, ast.AugAssign):
                 found += [f"module-level {name} is updated in place" for name in names]
-            elif not _immutable(node.value) and not set(names) <= allowed:
+            elif not _immutable(node.value, calls) and not set(names) <= allowed:
                 found += [f"module-level {name} is mutable" for name in names]
     module_names = _module_level_names(tree)
     scopes = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
@@ -398,7 +423,9 @@ def violations(
         elif isinstance(node, ast.Name) and node.id in FORBIDDEN_DUNDERS:
             found.append(f"uses {node.id}")
     relative = path.relative_to(target.directory).as_posix()
-    found += _state_violations(tree, set(target.registries.get(relative, ())))
+    found += _state_violations(
+        tree, set(target.registries.get(relative, ())), target.immutable_calls
+    )
     return found
 
 
@@ -708,7 +735,7 @@ def test_each_target_allows_only_its_own_registry():
 
 
 def test_model_builders_take_exactly_the_view():
-    assert list(MODELS) == ["rolling", "ep_next"]
+    assert list(MODELS) == ["rolling", "ep_next", "ep_next_fade"]
     for name, model in MODELS.items():
         parameters = list(inspect.signature(model).parameters.values())
         assert len(parameters) == 1, name
@@ -851,9 +878,88 @@ def test_probes_take_exactly_the_view():
         "greedy_rolling_random0",
         "greedy_ep_next_template",
         "roll_rolling_template",
+        "optimizer_ep_next_template",
     ]
     for name, probe in PROBES.items():
         parameters = list(inspect.signature(probe).parameters.values())
         assert len(parameters) == 1, name
         assert parameters[0].annotation in ("AsOfView", fplopt.features.AsOfView), name
         assert probe.__module__ == "fplopt.backtest.probes", name
+
+
+# --- optimizer -----------------------------------------------------------------------------
+
+OPTIMIZE_DIR = OPTIMIZE_TARGET.directory
+
+
+def test_the_optimizer_package_is_scanned_except_the_benchmark():
+    names = {p.name for p in scanned_files(OPTIMIZE_TARGET)}
+    assert {"model.py", "plans.py", "params.py", "problem.py", "search.py"} <= names
+    assert "bench.py" not in names
+
+
+def test_optimizer_modules_may_use_the_solver_and_pure_backtest_modules():
+    source = """
+import itertools
+import math
+import time
+from types import MappingProxyType
+
+import pulp
+
+from fplopt.backtest.rules import Rules
+from fplopt.backtest.state import Transfer
+from fplopt.optimize.params import OptimizerParams
+from .chips import ChipScenario
+
+DEFAULTS = MappingProxyType({1: 2.0})
+NO_CHIP = ChipScenario()
+
+def solve(model):
+    import highspy
+
+    start = time.perf_counter()
+    return pulp.LpProblem("x", pulp.LpMaximize), highspy.kHighsInf, start
+"""
+    assert violations(source, OPTIMIZE_DIR / "model.py", OPTIMIZE_TARGET) == []
+
+
+def test_the_scanner_catches_an_optimizer_module_bypass():
+    source = """
+from pathlib import Path
+from fplopt.features.store import DataStore
+from fplopt.backtest.simulator import Caches
+from fplopt.optimize import bench
+import fplopt.features.baseline
+
+PLANS = {}
+OTHER = ChipScenario()
+
+def plan(problem):
+    PLANS[problem] = pd.read_parquet("data/x.parquet")
+    return PLANS
+"""
+    found = violations(source, OPTIMIZE_DIR / "plans.py", OPTIMIZE_TARGET)
+    expected = [
+        "imports pathlib",
+        "imports fplopt.features.store",
+        "imports fplopt.backtest.simulator",
+        "imports bench from fplopt.optimize",
+        "imports fplopt.features.baseline",
+        "module-level PLANS is mutable",
+        "calls .read_parquet()",
+        "mutates module-level PLANS",
+    ]
+    assert sorted(found) == sorted(expected)
+    # ChipScenario() is immutable only in the optimizer package.
+    assert violations("NO_CHIP = ChipScenario()\n") == ["module-level NO_CHIP is mutable"]
+
+
+def test_policies_may_use_the_optimizer_but_not_its_benchmark():
+    ok = "from fplopt.optimize import OptimizerParams, PlanInput, optimize\n"
+    assert violations(ok, BACKTEST_DIR / "policies.py", BACKTEST_TARGET) == []
+    bad = "from fplopt.optimize.bench import run_bench\nfrom fplopt.optimize import bench\n"
+    assert sorted(violations(bad, BACKTEST_DIR / "policies.py", BACKTEST_TARGET)) == [
+        "imports bench from fplopt.optimize",
+        "imports fplopt.optimize.bench",
+    ]

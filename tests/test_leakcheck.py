@@ -426,7 +426,7 @@ def test_probes_do_not_leak_on_the_synthetic_league(kwargs, gameweeks):
     tables = synthetic_tables(**kwargs)
     deadlines = [deadline_of(tables, season, gw) for season, gw in gameweeks]
     probes = {name: b for name, b in checked_builders().items() if name.startswith("probe:")}
-    assert len(probes) == len(PROBES) == 3
+    assert len(probes) == len(PROBES) == 4
     assert check_leakage(tables, deadlines, seed=0, features=probes) == []
     view = DataStore(tables=tables).as_of(deadlines[0])
     frames = {name: probe(view) for name, probe in probes.items()}
