@@ -846,3 +846,23 @@ def test_experiment_family_counts_and_an_old_log_is_migrated(tmp_path):
     ]
     assert path.read_text(encoding="utf-8").splitlines()[0] == ",".join(EXPERIMENT_COLUMNS)
     assert family_variants(tmp_path / "missing.csv", "x") == 0
+
+
+def test_no_semaphore_handle_is_handed_to_a_starting_worker(league, monkeypatch):
+    """The root cause of the flaky parallel runs (Phase 4 review): semaphore handles that
+    the parent duplicates into a worker while it starts were found closed in the worker on
+    Windows under load. The worker pool must not pickle any SemLock into a worker."""
+    import multiprocessing.synchronize
+
+    def refuse(self):
+        raise AssertionError("a SemLock was handed to a worker process")
+
+    monkeypatch.setattr(multiprocessing.synchronize.SemLock, "__getstate__", refuse)
+    _, store, _ = league
+    units = [(SEASON, f"u{i}", None) for i in range(3)]
+    out = evaluate.run_units(store, Caches(), backtest_rules, _unit_name, units, None, 2)
+    assert out == ["u0", "u1", "u2"]
+
+
+def _unit_name(store, caches, rules, unit, payload):
+    return unit[1]
