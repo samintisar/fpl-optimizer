@@ -193,8 +193,6 @@ seasons, mean per side):
 - Time (one process): `fit_team` 0.2–0.5 s per cutoff, `team_lambdas` ≤ 0.2 s per
   deadline.
 
-
-
 ## `minutes_eval.py`: minutes model measurements
 
 Phase 5 plan, Task 3 (PLAN §6.3, §6.4). Two subcommands, both reading the built `data/` tables

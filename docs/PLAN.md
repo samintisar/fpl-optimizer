@@ -262,6 +262,30 @@ Blending rule everywhere: equal weights or a single fixed weight — never weigh
 
   Component metrics (minutes, goals, assists, P(CS)) are reported against simple references for diagnosis.
 
+**Phase 5 results so far** (develop 2016/17–2022/23 only; validate not looked at):
+- **Baselines** (`fplopt models eval`, Task 1):
+  - MSE per player-GW at horizon 0: rolling 5.33 (2016/17–2022/23), ep_next 5.33 (2021/22–2022/23). On their common seasons, rolling 5.10 vs ep_next 5.33, rolling better (DM p 0.001).
+  - MSE over horizons 1–5: rolling 5.80, ep_next 6.31, ep_next_fade 5.17.
+  - XI regret per GW: rolling 6.4, ep_next 5.8. Captain regret: 5.5 and 4.9.
+  - Both overpredict above ~3 xP (rolling: predicted 9.8 → realized 5.8).
+  - About 10% of ep_next horizon-0 values are negative (FPL's own numbers).
+- **Team model** (Task 2, `fplopt.models.team`):
+  - Poisson log-likelihood per side: −1.447 at horizon 0 (Elo-only reference −1.466); about −1.454 at horizons 1–5 (reference about −1.465).
+  - P(CS) Brier: 0.186 vs 0.189.
+  - Beats the reference in every develop season.
+  - Settings: ρ −0.03 (flat profile), power de-vig (Shin equal), ratings half-life 45 days, market weight 0.75, Elo prior strength 2 (grid of 120 variants).
+  - Odds are visible at the deadline for 88–96% of target-GW fixtures per season, and ≤ 0.3% beyond.
+  - Fit 0.2–0.5 s per cutoff.
+- **Minutes model** (Task 3, `fplopt.models.minutes`, `.availability`, `fplopt.features.history`):
+  - Inferred starts (the 11 players with the most minutes) vs real `starts` on 2022/23 GW16–2024/25: 98.65% accurate (false positives 0.96%, false negatives 2.30%; 569 of 1,016 misses are 45-minute half-time ties).
+  - 3-class minutes log loss at horizon 0: 0.532 vs the last-5 reference 0.632. Horizons 1–5: 0.650 vs 0.736. Beats the reference in every season.
+  - With flags (2021/22–2022/23): 0.476 vs 0.512 without.
+  - Expected minutes: three per-class means, not a fourth regression.
+  - Bans zero P(start), but rule-banned develop rows still started 10% of the time: the rules are approximate.
+  - Flags exist from 2020/21 GW32 (fplcache), not only from 2021/22. The flag mapping is fit walk-forward on every visible snapshot season; the §4 check on 2023/24–2024/25 is still open (Task 6).
+  - Settings: `GbmParams()` defaults, season decay 0.7, horizon decay 0.85 (36 variants).
+  - Fit ~11 s per cutoff (minutes + flags), predict 0.4 s.
+
 ### 6.1 Team model — market primary
 **Market-implied λ (primary for GWs with odds, typically GW+1, sometimes +2):**
 - Remove the bookmaker margin with the power method (Shin as an alternative; both beat proportional scaling when there is a clear favourite).
