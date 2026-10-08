@@ -7,6 +7,9 @@ horizon, xp` (int64 x 4, float64; 0 when unknown), sorted by (player_key, horizo
 `MAX_HORIZON` (= `HORIZON` + 1) is the number of GWs a frame covers at most: a planner
 horizon above it would be silently cut to it, so the policies refuse one.
 
+A model may add float columns after those (`v1`'s components); consumers that need only
+xP read only the five standard columns.
+
 Models fitted walk-forward are `FittedModel`s (`fplopt.models.fitted`): callable on the view
 like the others, with `fit` / `predict` exposed so callers can memoize fits by cutoff.
 
@@ -23,6 +26,7 @@ from collections.abc import Callable
 import pandas as pd
 
 from fplopt.features.store import AsOfView
+from fplopt.models.assemble import fit_v1, predict_v1
 from fplopt.models.baseline import HORIZON, xp_ep_next, xp_ep_next_fade, xp_rolling
 from fplopt.models.fitted import FittedModel
 
@@ -33,6 +37,10 @@ MODELS: dict[str, XpModel] = {
     "rolling": xp_rolling,
     "ep_next": xp_ep_next,
     "ep_next_fade": xp_ep_next_fade,
+    # Phase 5 component model (fplopt.models.assemble): walk-forward fits, calibrated xP;
+    # its frames carry per player-GW components (assemble.GW_COMPONENTS) after the xP
+    # columns, which the evaluation scores and the backtester ignores.
+    "v1": FittedModel(fit_v1, predict_v1),
 }
 
 __all__ = ("MAX_HORIZON", "MODELS", "FittedModel", "XpModel")

@@ -129,7 +129,7 @@ def _check_leakage(c: Context) -> object:
 
 BACKTEST_SEASONS = range(2016, 2027)  # seasons with built tables and backtest rules
 EP_NEXT_FIRST_SEASON = 2021  # FPL's ep_next is in the snapshots from 2020/21 GW32 on
-XP_MODELS = ("rolling", "ep_next", "ep_next_fade")  # fplopt.models.MODELS keys (tested)
+XP_MODELS = ("rolling", "ep_next", "ep_next_fade", "v1")  # fplopt.models.MODELS keys
 EP_NEXT_MODELS = frozenset({"ep_next", "ep_next_fade"})  # need FPL snapshots (2021/22+)
 # Planner horizons are capped at the xP frames' GWs (fplopt.models.MAX_HORIZON; a test
 # checks they agree): a longer one would silently plan over fewer GWs.

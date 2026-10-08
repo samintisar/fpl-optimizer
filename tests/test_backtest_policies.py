@@ -349,7 +349,8 @@ def league():
     out = {}
     for gw_index, deadline in zip(gameweeks["gw_index"], gameweeks["deadline_time"], strict=True):
         view = store.as_of(deadline)
-        xp = {name: model(view) for name, model in MODELS.items()}
+        # The models the policies below use (v1 refits per deadline here: too slow).
+        xp = {name: MODELS[name](view) for name in ("rolling", "ep_next")}
         out[int(gw_index)] = (view, player_pool(view), xp)
     return out
 
