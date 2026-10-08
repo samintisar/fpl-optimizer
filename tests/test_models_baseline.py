@@ -293,7 +293,7 @@ def test_rolling_rate_spans_the_season_boundary(league):
         last = last_matches(league, 2023, 3, key)
         assert len(last) == ROLLING_N
         spanning += set(last["season"]) == {2022, 2023}
-        rate = last["total_points"].mean()
+        rate = last["rescored_points"].mean()
         for horizon in range(HORIZON + 1):
             assert xp_of(xp, key, horizon) == pytest.approx(rate)  # one fixture per GW
     assert spanning >= 40  # 2 matches of 2023 (GW1-2) and 3 of 2022
@@ -305,9 +305,9 @@ def test_rolling_counts_zero_minute_rows_and_unknown_players_get_zero(league):
     last = last_matches(tables, 2023, 10, key)
     pm = tables["player_match"]
     benched = last.index[-1]
-    pm.loc[benched, ["minutes", "total_points"]] = 0
+    pm.loc[benched, ["minutes", "total_points", "rescored_points"]] = 0
     pm.loc[benched, SCORED_STATS[:5]] = 0
-    expected = pm.loc[last.index, "total_points"].sum() / ROLLING_N
+    expected = pm.loc[last.index, "rescored_points"].sum() / ROLLING_N
     # A new signing in the newest snapshot only: no matches anywhere.
     snaps = tables["player_snapshot"]
     newest = snaps[snaps["snapshot_at"] == latest_snapshot(tables, 2023, 10)["snapshot_at"].iloc[0]]
@@ -329,7 +329,7 @@ def test_doubles_count_twice_and_blanks_score_zero():
     snapshot = latest_snapshot(tables, 2023, 10)
     for club in (1, opponent):
         for key in club_players(tables, club):
-            rate = last_matches(tables, 2023, 10, key)["total_points"].mean()
+            rate = last_matches(tables, 2023, 10, key)["rescored_points"].mean()
             for horizon, n in ((0, 1), (1, 1), (2, 0), (3, 1), (4, 2), (5, 1)):
                 assert xp_of(rolling, key, horizon) == pytest.approx(n * rate)
             ep_next_ = snapshot.loc[key, "ep_next"]
@@ -408,7 +408,7 @@ def test_ep_next_fade_starts_at_ep_next_and_fades_to_the_long_run_rate():
             ep_rate = 0.0 if pd.isna(ep_rate) else float(ep_rate)  # one fixture in GW10
             last = last_matches(tables, 2023, 10, key, n=LONG_RUN_N)
             assert len(last) == LONG_RUN_N
-            long_run = last["total_points"].mean()
+            long_run = last["rescored_points"].mean()
             for horizon in range(1, HORIZON + 1):
                 w = 0.5**horizon
                 n = n_by_gw.get(10 + horizon, 0)

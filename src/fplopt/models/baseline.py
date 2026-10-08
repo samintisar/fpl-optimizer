@@ -8,8 +8,9 @@ end), columns `player_key, gw, gw_index, horizon (0 = target), xp`, dtypes int64
 float64, sorted by (player_key, horizon), RangeIndex. `xp` is 0 when unknown and in a GW
 where the player's club blanks; in a double it counts both fixtures.
 
-- `xp_rolling`: per-fixture rate = mean `total_points` over the player's last `ROLLING_N`
-  visible `player_match` rows (any season, by kickoff; 0-minute rows count), 0 without rows;
+- `xp_rolling`: per-fixture rate = mean `rescored_points` over the player's last `ROLLING_N`
+  visible `player_match` rows (any season, by kickoff; 0-minute rows count), 0 without rows
+  (re-scored points, so seasons with other scoring rules count on today's scale);
   xP = rate x his club's fixtures in the GW.
 - `xp_ep_next`: FPL's `ep_next` (from the newest player snapshot). Per-fixture rate =
   `ep_next / n_fixtures` of the target GW if his club plays in it, else the snapshot's `form`
@@ -19,7 +20,7 @@ where the player's club blanks; in a double it counts both fixtures.
   2020/21 GW32) every xP is 0 and a warning is logged.
 - `xp_ep_next_fade`: `xp_ep_next` in the target GW; in horizon GW h ≥ 1 the per-fixture
   rate fades from `xp_ep_next`'s rate toward the player's long-run rate (mean
-  `total_points` over his last `LONG_RUN_N` visible `player_match` rows, any season, as
+  `rescored_points` over his last `LONG_RUN_N` visible `player_match` rows, any season, as
   `xp_rolling`; 0 without rows): `FADE**h · ep_rate + (1 − FADE**h) · long_run_rate`, x
   fixtures. ep_next is form-driven and copied flat it inflates later GWs (Phase 4 Task 5);
   `ep_next` itself stays unchanged so Phase 3 results stay valid. Without a snapshot every
@@ -82,15 +83,16 @@ def _finish(grid: pd.DataFrame, xp: pd.Series | np.ndarray) -> pd.DataFrame:
 
 
 def _rolling_rate(view: AsOfView, pool: pd.DataFrame, n: int) -> pd.Series:
-    """Per pool player_key: mean `total_points` over his last `n` visible `player_match`
+    """Per pool player_key: mean `rescored_points` (every season on the backtest rules' scale)
+    over his last `n` visible `player_match`
     rows (any season, by kickoff, then fixture; 0-minute rows count). Players without rows
     are absent."""
-    columns = ["player_key", "kickoff_time", "fixture_key", "total_points"]
+    columns = ["player_key", "kickoff_time", "fixture_key", "rescored_points"]
     matches = view.table("player_match", columns=columns)
     matches = matches[matches["player_key"].isin(pool["player_key"])]
     matches = matches.sort_values(["player_key", "kickoff_time", "fixture_key"], kind="mergesort")
     recent = matches[matches.groupby("player_key").cumcount(ascending=False) < n]
-    return recent.groupby("player_key")["total_points"].mean().astype("float64")
+    return recent.groupby("player_key")["rescored_points"].mean().astype("float64")
 
 
 def xp_rolling(view: AsOfView) -> pd.DataFrame:

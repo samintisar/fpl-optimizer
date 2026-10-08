@@ -395,6 +395,7 @@ PLAYER_MATCH_COLUMNS = [
     "minutes",
     "starts",
     *COUNT_STATS[1:],
+    "rescored_points",
     *DEFENSIVE,
     *OPTIONAL_FLOATS.values(),
     *UNDERSTAT_COLUMNS,
@@ -420,6 +421,7 @@ PLAYER_MATCH_SCHEMA = pa.DataFrameSchema(
             name: pa.Column("int64", None if name in SIGNED_STATS else pa.Check.ge(0))
             for name in COUNT_STATS[1:]
         },
+        "rescored_points": pa.Column("int64"),
         **{name: pa.Column("Int64", pa.Check.ge(0), nullable=True) for name in DEFENSIVE},
         **{
             name: pa.Column("Float64", pa.Check.ge(0), nullable=True)
@@ -559,7 +561,8 @@ def assemble_player_match(
         df[name] = pd.Series(pd.NA, index=df.index, dtype=dtype)
     df["player_key"] = df["player_key"].astype("int64")
     df["fixture_key"] = df["fixture_key"].astype("int64")
-    return df[[*PLAYER_MATCH_COLUMNS, *keep]].reset_index(drop=True)
+    columns = [c for c in PLAYER_MATCH_COLUMNS if c != "rescored_points"]  # added later
+    return df[[*columns, *keep]].reset_index(drop=True)
 
 
 def goal_sum_mismatches(player_match: pd.DataFrame, fixture: pd.DataFrame) -> pd.DataFrame:
@@ -723,12 +726,38 @@ def not_before_listing(player_match: pd.DataFrame, player_season: pd.DataFrame) 
     return player_match.assign(available_at=available_at)
 
 
+def rescored_points(player_match: pd.DataFrame, player_season: pd.DataFrame) -> pd.Series:
+    """FPL points of each row re-scored from its stat components under the backtest rules of
+    its season (`fplopt.backtest.rules.backtest_rules`: the current rules without defcon for
+    2016/17-2024/25, native rules from 2025/26; PLAN §3 *Backfill rules*, §5). Models that
+    learn from points use this rather than `total_points`, so every season is on one scale.
+    Positions from player_season (fixed within a season). Fails (PlayerMatchError) on rows
+    without a player_season row."""
+    from fplopt.backtest.rules import backtest_rules
+    from fplopt.backtest.scoring import score_matches
+
+    positions = player_season.set_index(["season", "player_key"])["element_type"]
+    element_type = positions.reindex(
+        pd.MultiIndex.from_frame(player_match[["season", "player_key"]])
+    )
+    element_type = pd.Series(element_type.to_numpy(), index=player_match.index)
+    _fail_if(element_type.isna(), player_match, "row(s) without a player_season row")
+    out = pd.Series(0, index=player_match.index, dtype="int64")
+    for season, rows in player_match.groupby("season", sort=True):
+        matches = rows.assign(element_type=element_type.loc[rows.index].astype("int64"))
+        out.loc[rows.index] = score_matches(matches, backtest_rules(int(season)))["points"]
+    return out
+
+
 def build_player_match(ctx: BuildContext) -> pd.DataFrame:
     df, _ = assembled_match_rows(ctx)
     fixture = ctx.table("fixture")
     check_goal_sums(df, fixture)
     check_placeholder_zeros(df)
-    return not_before_listing(df, ctx.table("player_season"))
+    player_season = ctx.table("player_season")
+    df = not_before_listing(df, player_season)
+    df = df.assign(rescored_points=rescored_points(df, player_season))
+    return df[PLAYER_MATCH_COLUMNS]
 
 
 # --- player_gw / player_gw_ownership -----------------------------------------------------
