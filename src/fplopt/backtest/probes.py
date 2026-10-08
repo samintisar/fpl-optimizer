@@ -117,11 +117,21 @@ def roll_rolling_template(view: AsOfView) -> pd.DataFrame:
     return run_probe(view, RollPolicy("rolling"), template_state)
 
 
+# The optimizer probes: no chips, a 3-GW horizon and a small candidate pool (8/20/20/10)
+# keep the leakage check fast; the default (deterministic) solver limits apply.
+PROBE_PARAMS = OptimizerParams(horizon=3, prune_n={1: 8, 2: 20, 3: 20, 4: 10})
+
+
 def optimizer_ep_next_template(view: AsOfView) -> pd.DataFrame:
-    """optimizer(ep_next) from template_state, no chips, with a 3-GW horizon and a small
-    candidate pool (8/20/20/10) to keep the leakage check fast."""
-    params = OptimizerParams(horizon=3, prune_n={1: 8, 2: 20, 3: 20, 4: 10})
-    return run_probe(view, OptimizerPolicy("ep_next", params), template_state)
+    """optimizer(ep_next) from template_state (`PROBE_PARAMS`)."""
+    return run_probe(view, OptimizerPolicy("ep_next", PROBE_PARAMS), template_state)
+
+
+def optimizer_rolling_random0(view: AsOfView) -> pd.DataFrame:
+    """optimizer(rolling) from random_state(seed=0) (`PROBE_PARAMS`): the ep_next probe is
+    degenerate before 2020/21 (no ep_next: a refused or all-zero frame), this one decides
+    at every deadline."""
+    return run_probe(view, OptimizerPolicy("rolling", PROBE_PARAMS), _random0)
 
 
 PROBES: dict[str, Callable[[AsOfView], pd.DataFrame]] = {
@@ -129,6 +139,7 @@ PROBES: dict[str, Callable[[AsOfView], pd.DataFrame]] = {
     "greedy_ep_next_template": greedy_ep_next_template,
     "roll_rolling_template": roll_rolling_template,
     "optimizer_ep_next_template": optimizer_ep_next_template,
+    "optimizer_rolling_random0": optimizer_rolling_random0,
 }
 
 __all__ = ("PROBES", "PROBE_DTYPES", "encode", "refused", "run_probe")

@@ -20,6 +20,7 @@ from fplopt.backtest.gw_score import score_gameweek
 from fplopt.backtest.policies import (
     DecisionContext,
     GreedyPolicy,
+    OptimizerPolicy,
     RollPolicy,
     best_lineup,
     greedy_transfers,
@@ -42,6 +43,7 @@ from fplopt.backtest.state import Decision, apply_decision, next_state, refresh
 from fplopt.features.baseline import player_pool
 from fplopt.features.leakcheck import corrupt_future, load_tables, truncate_future
 from fplopt.features.store import DataStore
+from fplopt.optimize import OptimizerParams
 from fplopt.seasons import HOLDOUT_SEASONS, season_label
 
 SEASON = 2023
@@ -422,7 +424,12 @@ def test_regrets_on_a_hand_made_gameweek(league):
 
 # --- leakage ----------------------------------------------------------------------------------
 
-LEAK_POLICIES = (GREEDY, GreedyPolicy("ep_next"))
+# The optimizer on the faded ep_next (its xP reads the player's history): a short horizon
+# and a tiny pool keep the many solves of this check fast.
+LEAK_OPTIMIZER = OptimizerPolicy(
+    "ep_next_fade", OptimizerParams(horizon=2, prune_n={1: 3, 2: 6, 3: 6, 4: 4})
+)
+LEAK_POLICIES = (GREEDY, GreedyPolicy("ep_next"), LEAK_OPTIMIZER)
 LEAK_GWS = (3, 10, 20)
 
 

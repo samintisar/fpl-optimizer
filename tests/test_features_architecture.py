@@ -11,8 +11,9 @@ of a package):
 - `fplopt/optimize/`: every module except `bench.py` (the benchmark, an orchestrator that
   opens the `DataStore` and drives the simulator's caches, like the simulator itself); the
   MILP planner the optimizer policy calls at a deadline. May also import the pure backtest
-  modules `rules`, `state`, `gw_score`, the solver (`pulp`, `highspy`) and `time`,
-  `itertools`, `types`; no registry;
+  modules `rules`, `state`, `gw_score`, `itertools`, `types`, and, attribute by attribute
+  (`module_attrs`), the solver (`pulp`, `highspy`: only the names the planner uses, none
+  that reads or writes model files) and `time` (only `perf_counter`); no registry;
 - `fplopt/backtest/`: only `policies.py`, `start_states.py`, `probes.py` (what decides at a
   deadline); may also import the scanned feature, model and optimizer modules, the pure
   backtest modules `rules`, `state`, `gw_score` and `fplopt.seasons`; registry `PROBES`.
@@ -22,17 +23,22 @@ Rules (`violations`, the same for every target):
 - imports: an allowlist of pure modules (`PURE_MODULES`), the target's sibling modules,
   the modules scanned under its trusted targets, its `extra_modules`, and from `restricted`
   modules only the listed names (from `fplopt.features.store` only `AsOfView`); nothing else
-  (no `DataStore`, no `leakcheck`, no other fplopt module, no I/O library). Importing a
+  (no `DataStore`, no `leakcheck`, no other fplopt module, no I/O library). From
+  `module_attrs` modules (importable whole) only the listed attributes may be used, as
+  `module.attr` or `from module import attr`. Importing a
   submodule by name (`from fplopt.features import leakcheck`) counts as importing it, and
   so does reaching it through a package name (`fplopt.features.store.DataStore` after
   `import fplopt.features.baseline`);
 - no dynamic access: `getattr`/`setattr`/`delattr`/`vars`/`globals`/`locals`/`__import__`/
   `eval`/`exec`/`compile`/`open` calls, dunder attributes that reach into objects or
   modules (`__dict__`, `__globals__`, ...), private attributes (`view._store`);
-- no pandas file readers/writers (`read_*`, `to_parquet`, ...);
+- no pandas file readers/writers (`read_*`, `to_parquet`, ...) and no solver file methods
+  (`readModel`, `writeModel`, `writeLP`, `fromMPS`, `toJson`, ...);
 - no state between calls: no `global`/`nonlocal`, no cache decorators, module-level values
-  only immutable (constants, tuples, frozensets, a few immutable constructors; the target's
-  `registries` excepted), and no function mutates a module-level name.
+  only immutable (constants, tuples, frozensets, a few immutable constructors called with
+  immutable arguments; the target's `registries` excepted), and no function mutates a
+  module-level name (assigning into it, or calling a mutator on anything reached from it:
+  `NAME.append`, `NAME[k].update`, `NAME.attr.clear`, ...).
 """
 
 import ast
@@ -101,11 +107,31 @@ FORBIDDEN_DUNDERS = {
     "__wrapped__",
 }
 FILE_METHODS = ("read_", "to_parquet", "to_csv", "to_pickle", "to_feather", "to_sql")
+# Solver methods that read or write model, solution, basis or option files (PuLP, highspy).
+SOLVER_FILE_METHODS = frozenset(
+    {
+        "readModel",
+        "writeModel",
+        "writeLP",
+        "writeMPS",
+        "fromMPS",
+        "fromJson",
+        "toJson",
+        "readSolution",
+        "writeSolution",
+        "readBasis",
+        "writeBasis",
+        "readOptions",
+        "writeOptions",
+        "writeInfo",
+        "writePresolvedModel",
+        "writeIIS",
+    }
+)
 CACHE_DECORATORS = {"cache", "lru_cache", "cached_property"}
-# Module-level calls that build immutable values.
+# Module-level calls that build immutable values, when their arguments are immutable
+# (`_immutable_arg`): constants, names, tuples of those, nested immutable calls.
 IMMUTABLE_CALLS = {
-    "frozenset",
-    "tuple",
     "str",
     "int",
     "float",
@@ -115,6 +141,13 @@ IMMUTABLE_CALLS = {
     "pd.Timestamp",
     "logging.getLogger",
     "TypeVar",
+}
+# Immutable constructors that freeze their arguments: they may also take a list, set or
+# dict literal or a comprehension, as long as its elements are immutable (the fresh
+# container is copied or only reachable read-only).
+FREEZING_CALLS = {
+    "frozenset",
+    "tuple",
     "MappingProxyType",  # a read-only view of a literal nothing else references
 }
 MUTATORS = {
@@ -148,6 +181,9 @@ class ScanTarget:
     restricted: Mapping[str, frozenset[str]] = field(default_factory=dict)  # module -> names
     registries: Mapping[str, frozenset[str]] = field(default_factory=dict)  # file -> names
     immutable_calls: frozenset[str] = frozenset()  # further immutable module-level calls
+    freezing_calls: frozenset[str] = frozenset()  # further freezing ones (FREEZING_CALLS)
+    # Modules importable whole, but only these attributes of them may be used.
+    module_attrs: Mapping[str, frozenset[str]] = field(default_factory=dict)
     root: Path | None = None  # default: the package's directory under src/
 
     @property
@@ -174,19 +210,37 @@ PURE_BACKTEST_MODULES = frozenset(
         "fplopt.backtest.gw_score",
     }
 )
+# The solver API the planner uses: the model is built in memory and solved in-process; no
+# name that reads or writes files (`SOLVER_FILE_METHODS` covers the object methods).
+PULP_NAMES = frozenset(
+    {
+        "HiGHS",
+        "LpAffineExpression",
+        "LpBinary",
+        "LpInteger",
+        "LpMaximize",
+        "LpProblem",
+        "LpSolveStatus",
+        "lpSum_vars",
+        "lpSum_vars_coefs",
+    }
+)
+HIGHSPY_NAMES = frozenset({"HighsModelStatus", "HighsVarType", "kHighsInf"})
 OPTIMIZE_TARGET = ScanTarget(
     package="fplopt.optimize",
     exempt=frozenset({"bench.py"}),  # the benchmark harness: opens the DataStore
     extra_modules=PURE_BACKTEST_MODULES
     | frozenset(
         {
-            "pulp",  # builds the MILP in memory; solved in-process (no files)
-            "highspy",  # HiGHS, in-process
-            "time",  # solve-time statistics only (perf_counter)
             "itertools",
             "types",  # MappingProxyType: read-only parameter mappings
         }
     ),
+    module_attrs={
+        "pulp": PULP_NAMES,
+        "highspy": HIGHSPY_NAMES,
+        "time": frozenset({"perf_counter"}),  # solve-time statistics only
+    },
     immutable_calls=frozenset({"ChipScenario"}),  # frozen dataclass of tuples (NO_CHIP)
 )
 BACKTEST_TARGET = ScanTarget(
@@ -196,6 +250,7 @@ BACKTEST_TARGET = ScanTarget(
     extra_modules=PURE_BACKTEST_MODULES | frozenset({"fplopt.seasons"}),
     restricted={"fplopt.features.store": STORE_NAMES},
     registries={"probes.py": frozenset({"PROBES"})},
+    freezing_calls=frozenset({"OptimizerParams"}),  # copies mappings into read-only ones
 )
 TARGETS = (FEATURES_TARGET, MODELS_TARGET, OPTIMIZE_TARGET, BACKTEST_TARGET)
 
@@ -224,8 +279,10 @@ def sibling_modules(target: ScanTarget = FEATURES_TARGET) -> set[str]:
 
 
 def allowed_modules(target: ScanTarget) -> set[str]:
-    """Modules a scanned module of `target` may import whole (any name from them)."""
+    """Modules a scanned module of `target` may import whole (any name from them, except
+    `module_attrs` modules: only their listed names)."""
     allowed = set(PURE_MODULES) | set(target.extra_modules) | sibling_modules(target)
+    allowed |= set(target.module_attrs)
     for trusted in target.trusted:
         allowed |= scanned_modules(trusted)
     return allowed
@@ -279,7 +336,13 @@ def _import_violations(
             source = _resolve(node, module, is_package)
             names = [alias.name for alias in node.names]
             found += [f"imports {name}" for name in names if name.startswith(FILE_METHODS)]
-            if source in allowed:
+            if source in target.module_attrs:
+                found += [
+                    f"imports {name} from {source}"
+                    for name in names
+                    if name not in target.module_attrs[source]
+                ]
+            elif source in allowed:
                 # A submodule imported by name is an import of that module.
                 found += [
                     f"imports {name} from {source}"
@@ -316,13 +379,38 @@ def _module_level_names(tree: ast.Module) -> set[str]:
     return names
 
 
-def _immutable(node: ast.AST | None, calls: frozenset[str] = frozenset()) -> bool:
-    """A module-level value that cannot be mutated later (`calls`: further immutable
-    constructors besides IMMUTABLE_CALLS)."""
+@dataclass(frozen=True)
+class Calls:
+    """Immutable constructors: plain ones and freezing ones (FREEZING_CALLS)."""
+
+    plain: frozenset[str] = frozenset(IMMUTABLE_CALLS)
+    freezing: frozenset[str] = frozenset(FREEZING_CALLS)
+
+    @classmethod
+    def of(cls, target: ScanTarget) -> "Calls":
+        return cls(
+            frozenset(IMMUTABLE_CALLS) | target.immutable_calls,
+            frozenset(FREEZING_CALLS) | target.freezing_calls,
+        )
+
+
+DEFAULT_CALLS = Calls()
+
+
+def _immutable(node: ast.AST | None, calls: Calls = DEFAULT_CALLS) -> bool:
+    """A module-level value that cannot be mutated later: constants, names, tuples and
+    operators over those, type-alias subscripts, and immutable constructors (`calls`)
+    whose arguments are immutable (`_immutable_arg`)."""
     if node is None or isinstance(node, ast.Constant | ast.Name | ast.Attribute):
         return True
     if isinstance(node, ast.Tuple):
         return all(_immutable(e, calls) for e in node.elts)
+    if isinstance(node, ast.Starred):  # `*xs` or `*(x for ...)` inside a tuple literal
+        if isinstance(node.value, ast.GeneratorExp | ast.ListComp | ast.SetComp):
+            return _immutable(node.value.elt, calls)
+        return _immutable(node.value, calls)
+    if isinstance(node, ast.JoinedStr | ast.FormattedValue):  # f-strings
+        return True
     if isinstance(node, ast.UnaryOp):
         return _immutable(node.operand, calls)
     if isinstance(node, ast.BinOp):
@@ -332,12 +420,46 @@ def _immutable(node: ast.AST | None, calls: frozenset[str] = frozenset()) -> boo
     if isinstance(node, ast.Subscript):  # type aliases, e.g. Callable[[AsOfView], ...]
         return isinstance(node.value, ast.Name | ast.Attribute)
     if isinstance(node, ast.Call):
-        return _dotted(node.func) in IMMUTABLE_CALLS | calls
+        name = _dotted(node.func)
+        if name not in calls.plain | calls.freezing:
+            return False
+        freezes = name in calls.freezing
+        args = [*node.args, *(k.value for k in node.keywords)]
+        return all(_immutable_arg(a, calls, freezes) for a in args)
     return False
 
 
+def _immutable_arg(node: ast.AST, calls: Calls, freezes: bool) -> bool:
+    """An argument that leaves an immutable constructor's result immutable: an immutable
+    value (`_immutable`); for a freezing constructor also a list/set/dict literal or a
+    comprehension whose elements (keys and values) are immutable values."""
+    if isinstance(node, ast.Starred):
+        return _immutable_arg(node.value, calls, freezes)
+    if _immutable(node, calls):
+        return True
+    if not freezes:
+        return False
+    if isinstance(node, ast.List | ast.Set):
+        return all(_immutable(e, calls) for e in node.elts)
+    if isinstance(node, ast.Dict):
+        keys = all(_immutable(k, calls) for k in node.keys if k is not None)
+        return keys and all(_immutable(v, calls) for v in node.values)
+    if isinstance(node, ast.GeneratorExp | ast.ListComp | ast.SetComp):
+        return _immutable(node.elt, calls)
+    if isinstance(node, ast.DictComp):
+        return _immutable(node.key, calls) and _immutable(node.value, calls)
+    return False
+
+
+def _root_name(node: ast.AST) -> str | None:
+    """The name an expression like `A[k].b.c(...)[0]` is reached from (`A`), if any."""
+    while isinstance(node, ast.Subscript | ast.Attribute | ast.Call):
+        node = node.func if isinstance(node, ast.Call) else node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
 def _state_violations(
-    tree: ast.Module, allowed: set[str], calls: frozenset[str] = frozenset()
+    tree: ast.Module, allowed: set[str], calls: Calls = DEFAULT_CALLS
 ) -> list[str]:
     found = []
     for node in tree.body:
@@ -371,10 +493,9 @@ def _state_violations(
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr in MUTATORS
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id in module_names
+                and _root_name(node.func.value) in module_names
             ):
-                found.append(f"mutates module-level {node.func.value.id}")
+                found.append(f"mutates module-level {_root_name(node.func.value)}")
     for node in ast.walk(tree):
         if isinstance(node, ast.Global | ast.Nonlocal):
             found.append(f"{type(node).__name__.lower()} {', '.join(node.names)}")
@@ -397,12 +518,26 @@ def violations(
     found = _import_violations(tree, module, path.name == "__init__.py", target)
     allowed = allowed_modules(target)
     modules = known_modules()
+    # Local names bound to `module_attrs` modules (`import pulp`, `import pulp as pl`).
+    restricted_aliases = {
+        (alias.asname or alias.name): alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name in target.module_attrs
+    }
     for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            source = restricted_aliases.get(node.value.id)
+            if source is not None and node.attr not in target.module_attrs[source]:
+                found.append(f"accesses {source}.{node.attr}")
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id in FORBIDDEN_CALLS:
                 found.append(f"calls {func.id}()")
-            if isinstance(func, ast.Attribute) and func.attr.startswith(FILE_METHODS):
+            if isinstance(func, ast.Attribute) and (
+                func.attr.startswith(FILE_METHODS) or func.attr in SOLVER_FILE_METHODS
+            ):
                 found.append(f"calls .{func.attr}()")
         elif isinstance(node, ast.Attribute):
             # `import fplopt.features.baseline` binds `fplopt`: no reaching other modules
@@ -423,9 +558,7 @@ def violations(
         elif isinstance(node, ast.Name) and node.id in FORBIDDEN_DUNDERS:
             found.append(f"uses {node.id}")
     relative = path.relative_to(target.directory).as_posix()
-    found += _state_violations(
-        tree, set(target.registries.get(relative, ())), target.immutable_calls
-    )
+    found += _state_violations(tree, set(target.registries.get(relative, ())), Calls.of(target))
     return found
 
 
@@ -879,6 +1012,7 @@ def test_probes_take_exactly_the_view():
         "greedy_ep_next_template",
         "roll_rolling_template",
         "optimizer_ep_next_template",
+        "optimizer_rolling_random0",
     ]
     for name, probe in PROBES.items():
         parameters = list(inspect.signature(probe).parameters.values())
@@ -963,3 +1097,123 @@ def test_policies_may_use_the_optimizer_but_not_its_benchmark():
         "imports bench from fplopt.optimize",
         "imports fplopt.optimize.bench",
     ]
+
+
+# --- review bypasses (Phase 4) ---------------------------------------------------------------
+
+
+def test_immutable_constructors_need_immutable_arguments():
+    """(a) MappingProxyType/ChipScenario/OptimizerParams are immutable only with immutable
+    arguments: a proxy over a dict holding a list, a frozen dataclass holding a list, or a
+    proxy over a mutable call's result can still be mutated."""
+    bad = """
+A = MappingProxyType({"a": []})
+B = MappingProxyType(dict())
+C = MappingProxyType(make_table())
+D = tuple([[1], [2]])
+E = frozenset(set_of_lists())
+"""
+    assert sorted(violations(bad, OPTIMIZE_DIR / "params.py", OPTIMIZE_TARGET)) == [
+        f"module-level {name} is mutable" for name in "ABCDE"
+    ]
+    chips = "X = ChipScenario(chips=[(0, 'wildcard')])\nY = ChipScenario(((0, 'bboost'),))\n"
+    assert violations(chips, OPTIMIZE_DIR / "chips.py", OPTIMIZE_TARGET) == [
+        "module-level X is mutable"
+    ]
+    params = "P = OptimizerParams(prune_n={1: 8}, bench_weights=(0.1, 0.2, 0.3, 0.4))\n"
+    assert violations(params, BACKTEST_DIR / "probes.py", BACKTEST_TARGET) == []
+    leaky = "P = OptimizerParams(prune_n={1: []})\nQ = OptimizerParams(prune_n=loaded())\n"
+    assert violations(leaky, BACKTEST_DIR / "probes.py", BACKTEST_TARGET) == [
+        "module-level P is mutable",
+        "module-level Q is mutable",
+    ]
+    ok = """
+A = MappingProxyType({2: 2.0, 3: 1.6})
+B = frozenset({"a", "b"})
+C = tuple(c for c in COLUMNS if c != "a")
+D = (("x", "int64"), *((f"{s}_y", "Float64") for s in COLUMNS))
+NO_CHIP = ChipScenario()
+"""
+    assert violations(ok, OPTIMIZE_DIR / "params.py", OPTIMIZE_TARGET) == []
+
+
+def test_mutating_through_a_module_level_name_is_caught():
+    """(b) A mutator call whose receiver is reached from a module-level name: subscripts,
+    attributes and call results of it."""
+    source = """
+SEEN = MappingProxyType({"a": ()})
+PARAMS = OptimizerParams()
+
+def f(view):
+    SEEN["a"].append(1)
+    PARAMS.prune_n.update({1: 2})
+    SEEN.get("a").clear()
+    local = {}
+    local["k"].append(1)
+    return local
+"""
+    found = violations(source, BACKTEST_DIR / "policies.py", BACKTEST_TARGET)
+    assert found == [
+        "mutates module-level SEEN",
+        "mutates module-level PARAMS",
+        "mutates module-level SEEN",
+    ]
+
+
+def test_solver_modules_are_restricted_to_the_names_the_planner_uses():
+    """(c) pulp/highspy are importable, but only the in-memory API the planner uses; file
+    methods are forbidden on any object."""
+    source = """
+import pulp
+import highspy as hs
+from pulp import LpProblem, writeLP
+from highspy import Highs
+
+def solve(lp):
+    lp.writeLP("model.lp")
+    lp.writeMPS("model.mps")
+    p2 = pulp.LpProblem.fromMPS("x.mps")
+    data = lp.toJson("x.json")
+    h = hs.Highs()
+    h.readModel("model.mps")
+    h.writeModel("out.mps")
+    cbc = pulp.PULP_CBC_CMD()
+    return pulp.LpProblem("ok"), hs.kHighsInf, data, p2, h, cbc
+"""
+    found = violations(source, OPTIMIZE_DIR / "model.py", OPTIMIZE_TARGET)
+    expected = [
+        "imports writeLP from pulp",
+        "imports Highs from highspy",
+        "calls .writeLP()",
+        "calls .writeMPS()",
+        "calls .fromMPS()",
+        "calls .toJson()",
+        "accesses highspy.Highs",
+        "calls .readModel()",
+        "calls .writeModel()",
+        "accesses pulp.PULP_CBC_CMD",
+    ]
+    assert sorted(found) == sorted(expected)
+
+
+def test_time_is_restricted_to_perf_counter():
+    """(d) `time` for solve-time statistics only: no clocks that could steer a decision."""
+    source = """
+import time
+from time import sleep
+
+def f():
+    start = time.perf_counter()
+    now = time.time()
+    time.sleep(1)
+    return time.perf_counter() - start, now, time.localtime()
+"""
+    found = violations(source, OPTIMIZE_DIR / "search.py", OPTIMIZE_TARGET)
+    assert sorted(found) == sorted(
+        [
+            "imports sleep from time",
+            "accesses time.time",
+            "accesses time.sleep",
+            "accesses time.localtime",
+        ]
+    )
