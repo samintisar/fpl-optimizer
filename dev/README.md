@@ -144,3 +144,52 @@ and first-GW transfers are equal in 19 of 24.
 Not exercised by these instances: an owned player who left the game, and a club over the
 team limit (the latter is not comparable, see above).
 
+## `team_rho.py` and `team_model_eval.py`: the team model on develop
+
+Phase 5 plan, Task 2 (PLAN §6.1; `fplopt.models.team`). Both read the built `data/` tables
+read-only, as of 2023-07-01: develop results only, never validate or the 2025/26 holdout.
+
+```sh
+uv run python dev/team_rho.py [--data-dir data] [--devig power|shin]          # ~1 min
+uv run python dev/team_model_eval.py [--data-dir data] [--quick] [--out DIR]  # ~10 min
+```
+
+**ρ** (`team_rho.py`): for each ρ on a grid, every develop match's market λ is re-solved
+under that ρ and the realized scores are scored under Dixon-Coles; ρ = argmax. On the 2,660
+develop matches with pre-match odds the profile is flat around **ρ = −0.03** (+0.6
+log-likelihood in total over ρ = 0; ρ = −0.10 is 4.1 worse). Hard-coded as `team.RHO`.
+
+**Evaluation** (`team_model_eval.py`): every develop deadline (265), fitted at the
+walk-forward cutoff (`refit_deadline`), predicting the target GW and the next 5. Scores per
+side: Poisson log-likelihood of the team's goals and the P(clean sheet) Brier score, per
+horizon, for the model (market λ where odds are visible, else ratings), the ratings alone,
+an Elo-only reference (log λ linear in the Elo difference + home, Poisson-fitted on the 3
+years before the cutoff, Elo at the deadline) and the market λ. It writes
+`results/<UTC>-team-eval/metrics.json`.
+
+Results (2026-10-08; chosen parameters: half-life 45 d, w 0.75, prior 2; all develop
+seasons, mean per side):
+
+| horizon | model ll | ratings ll | Elo ll | model Brier | ratings Brier | Elo Brier |
+|---|---|---|---|---|---|---|
+| 0 | −1.4471 | −1.4542 | −1.4656 | 0.1859 | 0.1870 | 0.1891 |
+| 1 | −1.4550 | −1.4550 | −1.4657 | 0.1871 | 0.1872 | 0.1889 |
+| 2 | −1.4551 | −1.4551 | −1.4655 | 0.1870 | 0.1870 | 0.1888 |
+| 3 | −1.4548 | −1.4548 | −1.4656 | 0.1873 | 0.1873 | 0.1891 |
+| 4 | −1.4533 | −1.4533 | −1.4634 | 0.1882 | 0.1882 | 0.1898 |
+| 5 | −1.4531 | −1.4531 | −1.4629 | 0.1884 | 0.1884 | 0.1901 |
+
+- Horizon 0, the 2,454 fixtures with visible odds: market −1.4477 / 0.1854, ratings
+  −1.4554 / 0.1866, Elo −1.4670 / 0.1890. Shin's de-vig: −1.4477 / 0.1854 (no difference).
+- Odds visible at the deadline (target GW): 2016/17 95.5%, 2017/18 92.9%, 2018/19 94.5%,
+  2019/20 91.8%, 2020/21 91.6%, 2021/22 88.4%, 2022/23 91.1%. The misses are fixtures
+  whose football-data collection time (Tuesday/Friday 15:00 UK) falls after the GW's
+  deadline, mostly midweek games in a GW that starts at the weekend. Horizons 1–5: ≤ 0.3%.
+- The model beats the Elo reference in every develop season (all horizons pooled).
+- Tuning grid (half-life × w × prior strength, 120 variants; mean over 2017/18–2022/23 of
+  the ratings' log-likelihood over horizons 1–5): best 45 d / 0.75 / 2 (−1.4516), flat
+  nearby (60 d / 0.75 / 2: −1.4517; 90 d / 0.75 / 5: −1.4521). Stats only (w 0): best
+  −1.4551; market only (w 1): −1.4522. Long half-lives are worse (365 d: ≤ −1.4546).
+- Time (one process): `fit_team` 0.2–0.5 s per cutoff, `team_lambdas` ≤ 0.2 s per
+  deadline.
+
