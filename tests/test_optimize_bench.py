@@ -87,6 +87,7 @@ def test_summary_text_is_ascii() -> None:
     assert summary["chips_all"] == {
         "n_cases": 1,
         "matches": 1,
+        "undetermined": 0,
         "all_s": {"median": 400.0, "p90": 400.0, "max": 400.0},
         "bound_s": {"median": 8.0, "p90": 8.0, "max": 8.0},
         "prune_loss": {"median": 0.0, "p90": 0.0, "max": 0.0},
@@ -95,3 +96,36 @@ def test_summary_text_is_ascii() -> None:
     text = summary_text(summary)
     assert text.isascii()  # printed to Windows consoles (cp1252)
     assert "same best plan in 1/1" in text and "default" in text
+
+
+def test_same_plan_is_undetermined_when_a_limit_stopped_a_solve() -> None:
+    """The bench runs under a wall-clock limit: the bound and exhaustive searches are only
+    compared when every solve of both reached the gap."""
+    from types import SimpleNamespace
+
+    from fplopt.optimize.bench import _same_plan
+
+    def plans(status, scenario="none", total=10.0):
+        best = SimpleNamespace(scenario=scenario, total_objective=total)
+        return SimpleNamespace(solver_status=status, best=best)
+
+    limited = "Optimal (1 chip scenario solve(s) stopped at a limit)"
+    assert _same_plan(plans("Optimal"), plans("Optimal")) is True
+    assert _same_plan(plans("Optimal"), plans("Optimal", "bboost@gw3")) is False
+    assert _same_plan(plans("Optimal"), plans("Optimal", total=10.5)) is False
+    assert _same_plan(plans("TimeLimit"), plans("Optimal")) is None
+    assert _same_plan(plans("Optimal"), plans(limited)) is None
+    cases = pd.DataFrame(
+        {
+            "chips_all_s": [400.0, 500.0],
+            "chips_s": [8.0, 9.0],
+            "chips_prune_loss": [0.0, 0.0],
+            "bound_matches_all": [True, None],
+        }
+    )
+    timings = {k: [1.0, 1.0] for k in ("input_s", "build_s", "solve_s", "gap", "top3_s")}
+    timings |= {k: [1.0, 1.0] for k in ("relax_s", "chip_solve_s", "n_scenarios")}
+    timings |= {k: [1, 1] for k in ("n_relaxations", "n_solves", "n_candidates")}
+    summary = summarize(BenchResult(cases.assign(**timings), pd.DataFrame(), {}))
+    assert summary["chips_all"]["matches"] == 1 and summary["chips_all"]["undetermined"] == 1
+    assert "same best plan in 1/2 (1 undetermined" in summary_text(summary)

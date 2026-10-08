@@ -44,7 +44,7 @@ from fplopt.backtest.state import (
     selling_price,
 )
 from fplopt.features.store import AsOfView
-from fplopt.models import MODELS
+from fplopt.models import MAX_HORIZON, MODELS
 from fplopt.optimize import OptimizerParams, PlanInput, optimize
 
 log = logging.getLogger(__name__)
@@ -284,6 +284,13 @@ class RollPolicy:
         return Decision(transfers=(), lineup=lineup, chip=None)
 
 
+def _check_horizon(horizon: int) -> None:
+    """A horizon of 1..MAX_HORIZON GWs: the xP frames cover no more, so a longer horizon
+    would plan over MAX_HORIZON GWs while the policy's name says otherwise."""
+    if not 1 <= horizon <= MAX_HORIZON:
+        raise ValueError(f"horizon must be in 1..{MAX_HORIZON} (the xP frames' GWs), got {horizon}")
+
+
 @dataclass(frozen=True)
 class GreedyPolicy:
     """Best same-position transfer by horizon xP (Σ_{h<horizon} decay^h · xp_h) if the gain
@@ -300,8 +307,7 @@ class GreedyPolicy:
 
     def __post_init__(self) -> None:
         _check_model(self.xp_model)
-        if self.horizon < 1:
-            raise ValueError(f"horizon must be >= 1, got {self.horizon}")
+        _check_horizon(self.horizon)
         if self.max_transfers < 0:
             raise ValueError(f"max_transfers must be >= 0, got {self.max_transfers}")
 
@@ -347,7 +353,8 @@ def _optimizer_extras(params: OptimizerParams) -> list[str]:
     if params.chip_value != default.chip_value:
         parts.append("cv=" + "/".join(f"{k}:{v!r}" for k, v in params.chip_value.items()))
     if params.prune_n != default.prune_n:
-        prune = "all" if params.prune_n is None else "/".join(map(str, params.prune_n.values()))
+        prune_n = params.prune_n
+        prune = "all" if prune_n is None else "/".join(f"{k}:{v}" for k, v in prune_n.items())
         parts.append(f"prune={prune}")
     if params.prune_dominated != default.prune_dominated:
         parts.append(f"dom={int(params.prune_dominated)}")
@@ -387,6 +394,7 @@ class OptimizerPolicy:
         _check_model(self.xp_model)
         if not isinstance(self.params, OptimizerParams):
             raise TypeError(f"params must be OptimizerParams, got {type(self.params).__name__}")
+        _check_horizon(self.params.horizon)
 
     @property
     def name(self) -> str:

@@ -12,7 +12,8 @@ xP) it records:
 - `top3`: `optimize(top_k=3, chips=False)` incl. the roll plan, wall time;
 - `chips`: `optimize(top_k=1, chips=True, roll=False)` with the bound search: wall time,
   scenarios, LP relaxations, MILPs, best scenario and objective; on the first
-  `all_chips` cases also the exhaustive search (`scenario_search="all"`), checked equal,
+  `all_chips` cases also the exhaustive search (`scenario_search="all"`), checked equal
+  (undetermined when a limit stopped a solve),
   and the chip search at a tight gap with the default pool vs dominance pruning only;
 - `prune`: the no-chip solve at a tight gap (`PRUNE_GAP`) per pruning variant
   (`PRUNE_VARIANTS`, from no pruning at all to small N), with candidates, solve time and
@@ -40,7 +41,7 @@ from fplopt.backtest.start_states import StartStateError, random_state, template
 from fplopt.features.store import DataStore
 from fplopt.optimize.model import solve_plan
 from fplopt.optimize.params import OptimizerParams
-from fplopt.optimize.plans import optimize
+from fplopt.optimize.plans import PlanSet, optimize
 from fplopt.optimize.problem import PlanInput
 from fplopt.seasons import HOLDOUT_SEASONS, season_label
 
@@ -123,6 +124,19 @@ def build_case(store: DataStore, caches: Caches, case: BenchCase) -> tuple:
     return state, caches.pool(store, view), caches.xp(store, case.xp, view), rules
 
 
+def _same_plan(bound: PlanSet, full: PlanSet) -> bool | None:
+    """Whether the bound and the exhaustive chip search returned the same plan (scenario
+    and objective); None (undetermined) if a limit stopped a solve of either search: the
+    bench runs under a wall-clock limit, and a solve it stops ends at a load-dependent
+    plan, so equality is only guaranteed when every solve reached `mip_gap`."""
+    if bound.solver_status != "Optimal" or full.solver_status != "Optimal":
+        return None
+    return (
+        full.best.scenario == bound.best.scenario
+        and full.best.total_objective == bound.best.total_objective
+    )
+
+
 def _timed(fn: Callable[[], Any]) -> tuple[Any, float]:
     start = time.perf_counter()
     out = fn()
@@ -181,8 +195,7 @@ def bench_case(
             "chips_all_s": full.seconds,
             "chips_all_scenario": full.best.scenario,
             "chips_all_objective": full.best.total_objective,
-            "bound_matches_all": full.best.scenario == chips.best.scenario
-            and full.best.total_objective == chips.best.total_objective,
+            "bound_matches_all": _same_plan(chips, full),
         }
         # Pruning with chips (a Free Hit wants the best players of one GW, not of the
         # horizon): the default pool vs dominance pruning only, both at the tight gap.
@@ -341,9 +354,11 @@ def summarize(result: BenchResult) -> dict[str, Any]:
     out: dict[str, Any] = {"n_cases": len(cases), "timings": timings}
     if "chips_all_s" in cases:
         done = cases.dropna(subset=["chips_all_s"])
+        same = done["bound_matches_all"].astype("boolean")  # NA: a limit stopped a solve
         out["chips_all"] = {
             "n_cases": len(done),
-            "matches": int(done["bound_matches_all"].astype(bool).sum()),
+            "matches": int(same.fillna(False).sum()),
+            "undetermined": int(same.isna().sum()),
             "all_s": _stats(done["chips_all_s"]),
             "bound_s": _stats(done["chips_s"]),
             "prune_loss": _stats(done["chips_prune_loss"]),
@@ -394,7 +409,13 @@ def summary_text(summary: Mapping[str, Any]) -> str:
             f"\nExhaustive chip search on {c['n_cases']} cases: median "
             f"{fmt(c['all_s']['median'], 1)}s (max {fmt(c['all_s']['max'], 1)}s) vs bound "
             f"search {fmt(c['bound_s']['median'], 1)}s; same best plan in "
-            f"{c['matches']}/{c['n_cases']}; with chips at gap {PRUNE_GAP:g}, default "
+            f"{c['matches']}/{c['n_cases']}"
+            + (
+                f" ({c['undetermined']} undetermined: a solve hit the time limit)"
+                if c.get("undetermined")
+                else ""
+            )
+            + f"; with chips at gap {PRUNE_GAP:g}, default "
             f"pruning loses {fmt(c['prune_loss']['median'], 3)} (max "
             f"{fmt(c['prune_loss']['max'], 3)}) vs dominance pruning only"
         )

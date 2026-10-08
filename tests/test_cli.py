@@ -465,7 +465,10 @@ def test_parse_optimizer_policy_spec():
         ("optimizer:rolling:max_hits=x", "not a valid int or none"),
         ("optimizer:rolling:chips=2", "not a valid 0/1 flag"),
         ("optimizer:rolling:decay=0", "0 < decay <= 1"),
-        ("optimizer:rolling:horizon=0", "horizon >= 1"),
+        ("optimizer:rolling:horizon=0", "1 <= horizon <= 6"),
+        ("optimizer:rolling:horizon=7", "1 <= horizon <= 6"),
+        ("optimizer:rolling:hit_margin=-1", "hit_margin must be a finite number >= 0"),
+        ("optimizer:rolling:itb_value=-0.5", "itb_value must be a finite number >= 0"),
         ("greedy:rolling:threshold=none", "not a valid float"),
         ("greedy:magic", "unknown xP model 'magic'"),
         ("greedy:rolling:foo=1", "no parameter 'foo'"),
@@ -474,7 +477,9 @@ def test_parse_optimizer_policy_spec():
         ("greedy:rolling:threshold=x", "not a valid float"),
         ("greedy:rolling:horizon=2.5", "not a valid int"),
         ("greedy:rolling:threshold=nan", "not finite"),
-        ("greedy:rolling:horizon=0", "horizon >= 1"),
+        ("greedy:rolling:horizon=0", "1 <= horizon <= 6"),
+        ("greedy:rolling:horizon=8", "1 <= horizon <= 6"),
+        ("greedy:rolling:max_transfers=-1", "max_transfers >= 0"),
         ("greedy:rolling:threshold=1,threshold=2", "duplicate policy parameter"),
     ],
 )
@@ -497,6 +502,9 @@ def test_cli_policy_and_model_names_match_the_backtester():
     optimizer = set(cli.POLICY_PARAMS["optimizer"]) - {"chips"}
     assert optimizer <= {f.name for f in fields(OptimizerParams)}
     assert cli.EP_NEXT_MODELS <= set(MODELS)
+    from fplopt.models import MAX_HORIZON
+
+    assert cli.MAX_PLAN_HORIZON == MAX_HORIZON
 
 
 @pytest.fixture(scope="module")
@@ -542,7 +550,8 @@ ROLL_VS_GREEDY = ["--a", "roll:rolling", "--b", "greedy:rolling"]
         (["run", "--seasons", "2021"], "no gameweek/player_match data for 2021-22"),
         (["run", "--seasons", "2023", "--starts", "template"], "--starts: bad start spec"),
         (["run", "--seasons", "2023", "--policy", "roll", "--horizon", "3"], "only for --policy"),
-        (["run", "--seasons", "2023", "--horizon", "0"], "horizon >= 1"),
+        (["run", "--seasons", "2023", "--horizon", "0"], "1 <= horizon <= 6"),
+        (["run", "--seasons", "2023", "--horizon", "7"], "1 <= horizon <= 6"),
         (["compare", "--seasons", "2023", "--a", "roll:rolling", "--b", "roll:rolling"], "same"),
         (  # a default spelled out builds the same policy (same name)
             ["compare", "--seasons", "2023", "--a", "greedy:rolling"]
@@ -856,6 +865,7 @@ def plan(tmp_path, monkeypatch, league):
     def run(*argv):
         return cli.main(["optimize", "plan", *argv], settings=make_settings(tmp_path)), alerts
 
+    run.alerts = alerts
     return run
 
 
@@ -885,7 +895,11 @@ def test_optimize_plan_prints_the_top_plans_and_the_roll_plan(plan, capsys):
         (["--season", "2020", "--gw", "3"], "--xp ep_next uses ep_next"),
         (["--season", "2023", "--gw", "3", "--max-hits", "x"], "--max-hits"),
         (["--season", "2023", "--gw", "3", "--start", "best"], "template or random:SEED"),
-        (["--season", "2023", "--gw", "3", "--horizon", "0"], "must be >= 1"),
+        (["--season", "2023", "--gw", "3", "--horizon", "0"], "--horizon must be in 1..6"),
+        (["--season", "2023", "--gw", "3", "--horizon", "7"], "--horizon must be in 1..6"),
+        (["--season", "2023", "--gw", "3", "--top-k", "0"], "--top-k must be >= 1"),
+        (["--season", "2023", "--gw", "3", "--hit-margin", "-1"], "hit_margin must be"),
+        (["--season", "2023", "--gw", "40", "--xp", "rolling"], "--gw: 2023-24 has no GW40"),
     ],
 )
 def test_optimize_plan_usage_errors(plan, capsys, argv, message):
@@ -893,8 +907,21 @@ def test_optimize_plan_usage_errors(plan, capsys, argv, message):
         plan(*argv)
     assert info.value.code == 2
     assert message in capsys.readouterr().err
+    assert plan.alerts == []
 
 
-def test_optimize_plan_unknown_gw_fails(plan):
-    code, alerts = plan("--season", "2023", "--gw", "40", "--xp", "rolling")
-    assert code == 1 and "has no GW40" in alerts[0]
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--horizon", "7"], "--horizon must be in 1..6"),
+        (["--horizon", "0"], "--horizon must be in 1..6"),
+        (["--deadlines", "0"], "--deadlines must be >= 1"),
+        (["--all-chips", "-1"], "--all-chips >= 0"),
+    ],
+)
+def test_optimize_bench_usage_errors(tmp_path, monkeypatch, league, capsys, argv, message):
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+    with pytest.raises(SystemExit) as info:
+        cli.main(["optimize", "bench", *argv], settings=make_settings(tmp_path))
+    assert info.value.code == 2
+    assert message in capsys.readouterr().err

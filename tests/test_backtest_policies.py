@@ -468,7 +468,11 @@ def test_optimizer_policy_is_frozen_named_and_picklable():
     policy = OptimizerPolicy("rolling", params, chips=True)
     assert policy.name == "optimizer(rolling,mh=1,m=2.0,h=4,d=0.9,itb=0.08,chips)"
     small = OptimizerPolicy(params=SMALL).name
-    assert small == "optimizer(ep_next,mh=0,m=0.0,h=3,prune=4/10/10/6)"
+    assert small == "optimizer(ep_next,mh=0,m=0.0,h=3,prune=1:4/2:10/3:10/4:6)"
+    # Different positions pruned to the same N get different names.
+    gk = OptimizerPolicy(params=OptimizerParams(prune_n={1: 20})).name
+    fwd = OptimizerPolicy(params=OptimizerParams(prune_n={4: 20})).name
+    assert gk == "optimizer(ep_next,mh=0,m=0.0,prune=1:20)" and gk != fwd
     assert pickle.loads(pickle.dumps(policy)) == policy
     with pytest.raises(FrozenInstanceError):
         policy.chips = False
@@ -476,6 +480,21 @@ def test_optimizer_policy_is_frozen_named_and_picklable():
         OptimizerPolicy("nope")
     with pytest.raises(TypeError, match="OptimizerParams"):
         OptimizerPolicy("rolling", {"horizon": 3})
+
+
+def test_policies_refuse_horizons_beyond_the_xp_frame():
+    """xP frames cover MAX_HORIZON GWs, so a longer horizon would silently plan over fewer
+    GWs under a name that says otherwise."""
+    from fplopt.models import MAX_HORIZON
+
+    assert OptimizerPolicy(params=OptimizerParams(horizon=MAX_HORIZON)).params.horizon == 6
+    assert GreedyPolicy(horizon=MAX_HORIZON).horizon == MAX_HORIZON
+    with pytest.raises(ValueError, match=r"horizon must be in 1\.\.6"):
+        OptimizerPolicy(params=OptimizerParams(horizon=MAX_HORIZON + 1))
+    with pytest.raises(ValueError, match=r"horizon must be in 1\.\.6"):
+        GreedyPolicy(horizon=MAX_HORIZON + 1)
+    with pytest.raises(ValueError, match=r"horizon must be in 1\.\.6"):
+        GreedyPolicy(horizon=0)
 
 
 def test_greedy_decisions_are_valid_from_many_random_states(league):

@@ -13,7 +13,9 @@ Season totals are too noisy to compare policies directly, so every comparison is
   (same xP) for k − 1 GWs (truncated at the season's end), or, with `continuation="own"`,
   each arm continues with its own policy (and its own xP model), so a plan's follow-up
   moves are credited to the decision that started it. Each arm's score is its net points
-  over t..t+k−1 (hits at t included).
+  over t..t+k−1 (hits at t included). Each decision is made once: the reference arm's is
+  the reference run's own (same state, deadline and policy), and with `continuation="own"`
+  its window is the reference run's GWs t..t+k−1, read back rather than re-simulated.
   Decision GWs are the reference run's GWs on the season's grid gw_index ≡ 1 (mod
   `stride`), default stride = k, so the windows don't overlap and tile the season: windows
   sharing outcomes would make neighbouring differences dependent and the bootstrap too
@@ -39,7 +41,8 @@ Season totals are too noisy to compare policies directly, so every comparison is
 Parallel runs: `run_grid` and `per_decision` take `jobs`. The work splits into units, one
 per (season, start state), built in this process; with `jobs > 1` spawned worker processes
 (`_run_pool`: one pipe per worker, no shared queue semaphores; a dead worker's unit is
-re-run elsewhere, see `run_units`) run them, each worker opening its own `DataStore` (same
+re-run elsewhere, and one that kills `UNIT_DEATHS` workers stops the run, see
+`run_units`) run them, each worker opening its own `DataStore` (same
 `data_dir`, or a copy of the in-memory tables) and its own `Caches`, and the results are
 concatenated in unit order. Every piece is deterministic, so the output equals `jobs=1`'s.
 Policies and the rules function must be picklable (module-level; `OptimizerParams` pickles
@@ -72,7 +75,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from fplopt.backtest.policies import Policy
+from fplopt.backtest.policies import DecisionContext, Policy
 from fplopt.backtest.rules import Rules, backtest_rules
 from fplopt.backtest.simulator import (
     GW_COLUMNS,
@@ -84,7 +87,7 @@ from fplopt.backtest.simulator import (
     simulate,
 )
 from fplopt.backtest.start_states import StartStateError, random_state, template_state
-from fplopt.backtest.state import SquadState
+from fplopt.backtest.state import Decision, SquadState
 from fplopt.features.store import DataStore
 from fplopt.seasons import DEVELOP_SEASONS, HOLDOUT_SEASONS, VALIDATE_SEASONS, season_label
 
@@ -269,11 +272,21 @@ def _units(
 
 
 POOL_ATTEMPTS = 2  # worker pools tried before the remaining units run in this process
+# Worker deaths during one unit before that unit is blamed and the run fails (UnitCrashed)
+# instead of the unit going to yet another worker and finally to this process. Deaths not
+# caused by the unit (a worker lost at start-up, `_run_pool`) hit each unit at most once
+# per pool, since a re-queued unit only goes to a worker that has finished one.
+UNIT_DEATHS = 3
 _JOIN_SECONDS = 10  # wait for a worker to exit after its stop message, then terminate it
 
 
 class PoolBroken(RuntimeError):
     """Every worker of a pool died before its units were done."""
+
+
+class UnitCrashed(RuntimeError):
+    """One unit killed `UNIT_DEATHS` worker processes (e.g. a native crash or the OOM
+    killer): it would crash this process too, so the run stops and names it."""
 
 
 def _worker_main(conn: Any, spec: StoreSpec, log_level: int) -> None:
@@ -330,12 +343,15 @@ def _run_pool(
     todo: Sequence[int],
     workers: int,
     done: dict[int, Any],
+    deaths: dict[int, int],
 ) -> None:
     """Units `todo` (indices into `units`) on `workers` spawned processes; each result goes
     into `done` as it arrives. Each worker has its own duplex pipe and gets one unit at a
-    time. A worker that dies has its unit re-queued for the others (with a warning); if all
-    die, PoolBroken (the units finished stay in `done`). A unit's own exception is re-raised
-    here (with the worker's traceback as a note). Workers are stopped and joined on exit.
+    time. A worker that dies has its unit re-queued for the others (with a warning) and
+    counted in `deaths` (unit index -> workers lost while running it, kept across pools);
+    a unit that reaches `UNIT_DEATHS` raises UnitCrashed. If all workers die, PoolBroken
+    (the units finished stay in `done`). A unit's own exception is re-raised here (with the
+    worker's traceback as a note). Workers are stopped and joined on exit.
 
     Why not ProcessPoolExecutor: its queues share semaphores whose handles the parent
     duplicates into each worker while the worker is still starting. On Windows under heavy
@@ -402,7 +418,16 @@ def _run_pool(
                     lost = busy.pop(conn, None)
                     if conn in idle:
                         idle.remove(conn)
+                    conn.close()
                     if lost is not None:
+                        deaths[lost] = deaths.get(lost, 0) + 1
+                        if deaths[lost] >= UNIT_DEATHS:
+                            season, start_id, _ = units[lost]
+                            raise UnitCrashed(
+                                f"unit {season_label(season)} {start_id} killed "
+                                f"{deaths[lost]} worker processes (last exit code "
+                                f"{proc.exitcode}); not retried"
+                            )
                         pending.insert(0, lost)
                     log.warning(
                         "worker process %d died (exit code %s)%s; %d worker(s) left",
@@ -411,7 +436,6 @@ def _run_pool(
                         "" if lost is None else f", unit {units[lost][:2]} re-queued",
                         len(procs),
                     )
-                    conn.close()
     finally:
         for conn in procs:
             try:
@@ -441,12 +465,14 @@ def run_units(
     A worker that dies is not fatal: its unit goes to the other workers; if a whole pool
     dies the units left are retried in a fresh pool, and after `POOL_ATTEMPTS` dead pools
     run in this process, each step with a warning. Every unit is deterministic, so the
-    results are the same. A unit's own exception propagates."""
+    results are the same. A unit that kills `UNIT_DEATHS` workers raises UnitCrashed (it
+    would kill this process too). A unit's own exception propagates."""
     if jobs < 1:
         raise ValueError(f"jobs must be >= 1, got {jobs}")
     if jobs == 1 or len(units) <= 1:
         return _run_serial(store, caches, rules_fn, fn, units, payload)
     done: dict[int, Any] = {}
+    deaths: dict[int, int] = {}
     for attempt in range(1, POOL_ATTEMPTS + 1):
         todo = [i for i in range(len(units)) if i not in done]
         if not todo:
@@ -454,7 +480,7 @@ def run_units(
         workers = min(jobs, len(todo))
         log.info("running %d unit(s) on %d worker process(es)", len(todo), workers)
         try:
-            _run_pool(store, rules_fn, fn, units, payload, todo, workers, done)
+            _run_pool(store, rules_fn, fn, units, payload, todo, workers, done, deaths)
         except PoolBroken as exc:
             log.warning(
                 "worker pool broke (attempt %d/%d: %s); %d unit(s) left to run",
@@ -593,7 +619,21 @@ def _window_scores(rows: Sequence[dict[str, Any]]) -> tuple[int, float | None]:
     """Σ net points and Σ xG net points (None if any GW's is null) over an arm's GWs."""
     points = sum(int(r["net_points"]) for r in rows)
     xg = [r["xg_net_points"] for r in rows]
-    return points, (None if any(v is None for v in xg) else float(sum(xg)))
+    return points, (None if any(pd.isna(v) for v in xg) else float(sum(xg)))
+
+
+@dataclass(frozen=True)
+class _Decided:
+    """A policy that plays a decision already made for this GW: an arm's first GW, decided
+    from the same state at the same deadline by `policy_name` (deterministic), so deciding
+    again would give the same decision at the cost of another solve."""
+
+    decision: Decision
+    xp_model: str
+    name: str
+
+    def decide(self, ctx: DecisionContext) -> Decision:
+        return self.decision
 
 
 OWN = "own"  # per_decision continuation: each arm continues with its own policy
@@ -629,20 +669,32 @@ def _per_decision_unit(
         state = ref.states[i]
         window = schedule.iloc[i : i + k]
         deadline = window["deadline_time"].iloc[0]
-        arms = {}
+        # The reference arm's decision is the reference run's (same state, deadline and
+        # policy); only the other arm decides here. Each decision is made once.
+        decisions = {}
         for side, policy in (("a", policy_a), ("b", policy_b)):
-            arms[side] = decide_step(store, rules, policy, state, deadline, caches)
-        same = arms["a"].decision == arms["b"].decision
+            if side == job.reference:
+                decisions[side] = ref.decisions[i]
+            else:
+                step = decide_step(store, rules, policy, state, deadline, caches)
+                decisions[side] = step.decision
+        same = decisions["a"] == decisions["b"]
         scores = {}
         for side, policy in (("a", policy_a), ("b", policy_b)):
             if side == "b" and same and continuation is not None:
                 scores["b"] = scores["a"]  # same decision, same continuation: same window
                 continue
+            if side == job.reference and continuation is None:
+                # Its own policy from its own state: the reference run's GWs i.. again.
+                arm = ref.gws.iloc[i : i + len(window)].to_dict("records")
+                scores[side] = (_window_scores(arm), int(arm[0]["n_transfers"]))
+                continue
+            first = _Decided(decisions[side], policy.xp_model, policy.name)
             then = policy if continuation is None else continuation
             arm_rows, *_ = run_gameweeks(
                 store,
                 rules,
-                lambda j, first=policy, then=then: first if j == 0 else then,
+                lambda j, first=first, then=then: first if j == 0 else then,
                 state,
                 window,
                 caches,

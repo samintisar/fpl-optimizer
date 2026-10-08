@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from fplopt.backtest.evaluate import Summary
     from fplopt.backtest.policies import Policy
     from fplopt.features.store import DataStore
-    from fplopt.optimize import PlanSet
+    from fplopt.optimize import OptimizerParams, PlanSet
 
 log = logging.getLogger("fplopt")
 
@@ -129,6 +129,9 @@ BACKTEST_SEASONS = range(2016, 2027)  # seasons with built tables and backtest r
 EP_NEXT_FIRST_SEASON = 2021  # FPL's ep_next is in the snapshots from 2020/21 GW32 on
 XP_MODELS = ("rolling", "ep_next", "ep_next_fade")  # fplopt.models.MODELS keys (tested)
 EP_NEXT_MODELS = frozenset({"ep_next", "ep_next_fade"})  # need FPL snapshots (2021/22+)
+# Planner horizons are capped at the xP frames' GWs (fplopt.models.MAX_HORIZON; a test
+# checks they agree): a longer one would silently plan over fewer GWs.
+MAX_PLAN_HORIZON = 6
 
 
 def parse_max_hits(text: str) -> int | None:
@@ -284,19 +287,19 @@ def make_policy_spec(name: str, xp: str, params: dict[str, str]) -> PolicySpec:
             raise argparse.ArgumentTypeError(f"{name} {key}={raw!r}: not finite")
         values.append((key, value))
     spec = PolicySpec(name, xp, tuple(sorted(values)))
-    if name == "greedy":
-        horizon = dict(spec.params).get("horizon", 1)
-        max_transfers = dict(spec.params).get("max_transfers", 0)
-        if horizon < 1 or max_transfers < 0:
-            raise argparse.ArgumentTypeError(
-                f"bad policy {spec}: need horizon >= 1 and max_transfers >= 0"
-            )
-    if name == "optimizer":
-        given = dict(spec.params)
-        if given.get("horizon", 1) < 1 or not 0 < given.get("decay", 0.5) <= 1:
-            raise argparse.ArgumentTypeError(
-                f"bad policy {spec}: need horizon >= 1 and 0 < decay <= 1"
-            )
+    given = dict(spec.params)
+    if not 1 <= given.get("horizon", 1) <= MAX_PLAN_HORIZON:
+        raise argparse.ArgumentTypeError(
+            f"bad policy {spec}: need 1 <= horizon <= {MAX_PLAN_HORIZON} (the xP frames' GWs)"
+        )
+    if name == "greedy" and given.get("max_transfers", 0) < 0:
+        raise argparse.ArgumentTypeError(f"bad policy {spec}: need max_transfers >= 0")
+    if name == "optimizer" and not 0 < given.get("decay", 0.5) <= 1:
+        raise argparse.ArgumentTypeError(f"bad policy {spec}: need 0 < decay <= 1")
+    try:  # whatever else the policy rejects (e.g. a negative hit_margin or itb_value)
+        spec.build()
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"bad policy {spec}: {exc}") from None
     return spec
 
 
@@ -937,9 +940,7 @@ def _optimize_bench(c: Context) -> object:
     from fplopt.optimize import OptimizerParams
     from fplopt.optimize.bench import run_bench, summarize, summary_text
 
-    args = c.args
-    if min(args.deadlines, args.horizon) < 1 or args.all_chips < 0:
-        raise ValueError("--deadlines and --horizon must be >= 1, --all-chips >= 0")
+    args = c.args  # validated in main
     store = _backtest_store(c)
     out = _out_dir(args)
     began = time.perf_counter()
@@ -1018,41 +1019,56 @@ def plan_text(plans: PlanSet, names: dict[int, str]) -> str:
     return "\n\n".join(blocks)
 
 
+def plan_gw_index(store: DataStore, season: int, gw: int) -> int | None:
+    """The gw_index of GW `gw` of `season`, or None if the data has no such GW."""
+    from fplopt.backtest.simulator import FAR_FUTURE
+
+    gameweeks = store.as_of(FAR_FUTURE).table("gameweek", columns=["season", "gw", "gw_index"])
+    row = gameweeks[(gameweeks["season"] == season) & (gameweeks["gw"] == gw)]
+    return None if row.empty else int(row["gw_index"].iloc[0])
+
+
+def plan_params(args: argparse.Namespace) -> OptimizerParams:
+    """`optimize plan`'s planner settings: --horizon (1..MAX_PLAN_HORIZON), --max-hits,
+    --hit-margin over `OptimizerParams()`, with the interactive wall-clock cap. ValueError
+    on a value the planner rejects (main reports it as a usage error)."""
+    from fplopt.optimize import OptimizerParams
+
+    if not 1 <= args.horizon <= MAX_PLAN_HORIZON:
+        raise ValueError(f"--horizon must be in 1..{MAX_PLAN_HORIZON} (the xP frames' GWs)")
+    settings: dict[str, Any] = {"horizon": args.horizon, "time_limit": INTERACTIVE_TIME_LIMIT}
+    if args.max_hits is not None:
+        settings["max_hits"] = parse_max_hits(args.max_hits)
+    if args.hit_margin is not None:
+        settings["hit_margin"] = args.hit_margin
+    return OptimizerParams(**settings)
+
+
 def _optimize_plan(c: Context) -> object:
     """`fplopt optimize plan`: the start state (template or random squad) at the deadline
     of --season/--gw, the --xp frame, and `optimize` (top --top-k plans, the roll plan,
     chips unless --no-chips); prints `plan_text`."""
     from fplopt.backtest.rules import backtest_rules
-    from fplopt.backtest.simulator import FAR_FUTURE, season_schedule
+    from fplopt.backtest.simulator import season_schedule
     from fplopt.backtest.start_states import random_state, template_state
     from fplopt.features.baseline import player_pool
     from fplopt.models import MODELS
-    from fplopt.optimize import OptimizerParams, PlanInput, optimize
+    from fplopt.optimize import PlanInput, optimize
 
     args = c.args
     (season,) = args.season
     store = _backtest_store(c)
-    gameweeks = store.as_of(FAR_FUTURE).table("gameweek", columns=["season", "gw", "gw_index"])
-    row = gameweeks[(gameweeks["season"] == season) & (gameweeks["gw"] == args.gw)]
-    if row.empty:
+    gw_index = plan_gw_index(store, season, args.gw)
+    if gw_index is None:  # checked in main as a usage error
         raise ValueError(f"{season_label(season)} has no GW{args.gw}")
-    schedule = season_schedule(store, season, int(row["gw_index"].iloc[0]))
+    schedule = season_schedule(store, season, gw_index)
     view = store.as_of(schedule["deadline_time"].iloc[0])
     rules = backtest_rules(season)
     if args.start == "template":
         state = template_state(view, rules)
     else:
         state = random_state(view, rules, int(args.start.split(":", 1)[1]))
-    params = OptimizerParams(horizon=args.horizon, time_limit=INTERACTIVE_TIME_LIMIT)
-    overrides: dict[str, Any] = {}
-    if args.max_hits is not None:
-        overrides["max_hits"] = parse_max_hits(args.max_hits)
-    if args.hit_margin is not None:
-        overrides["hit_margin"] = args.hit_margin
-    if overrides:
-        from dataclasses import replace
-
-        params = replace(params, **overrides)
+    params = plan_params(args)
     began = time.perf_counter()
     pool = player_pool(view)
     problem = PlanInput.from_context(state, pool, MODELS[args.xp](view), rules, params)
@@ -1186,6 +1202,7 @@ def _add_optimize_parsers(groups: Any) -> None:
     optimize = groups.add_parser("optimize", help="the MILP planner")
     commands = optimize.add_subparsers(dest="command", required=True)
     bench = commands.add_parser("bench", help="solve-time and pruning benchmark (#10)")
+    bench.set_defaults(subparser=bench)
     bench.add_argument("--deadlines", type=int, default=10, help="real deadlines (10)")
     bench.add_argument("--seed", type=int, default=0, help="deadline/random-start seed (0)")
     bench.add_argument("--horizon", type=int, default=6, help="planning horizon in GWs (6)")
@@ -1379,6 +1396,11 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
         # Usage errors (exit 2, no alert); needs the data to check which seasons exist.
         args.store = open_data_store(settings.data_dir)
         validate_backtest(args.subparser, args, args.store)
+    elif name == "optimize bench":
+        if args.deadlines < 1 or args.all_chips < 0:
+            args.subparser.error("--deadlines must be >= 1 and --all-chips >= 0")
+        if not 1 <= args.horizon <= MAX_PLAN_HORIZON:
+            args.subparser.error(f"--horizon must be in 1..{MAX_PLAN_HORIZON} (the xP frames' GWs)")
     elif name == "optimize plan":
         if len(args.season) != 1:
             args.subparser.error("--season: give one season")
@@ -1389,8 +1411,20 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
                 parse_max_hits(args.max_hits)
             except ValueError as exc:
                 args.subparser.error(f"--max-hits: {exc}")
-        if min(args.horizon, args.top_k) < 1:
-            args.subparser.error("--horizon and --top-k must be >= 1")
+        if args.top_k < 1:
+            args.subparser.error("--top-k must be >= 1")
+        try:
+            plan_params(args)
+        except ValueError as exc:
+            args.subparser.error(str(exc))
+        args.store = open_data_store(settings.data_dir)
+        (season,) = args.season
+        try:
+            gw_index = plan_gw_index(args.store, season, args.gw)
+        except FileNotFoundError as exc:
+            args.subparser.error(str(exc))
+        if gw_index is None:
+            args.subparser.error(f"--gw: {season_label(season)} has no GW{args.gw}")
     if not (settings.telegram_bot_token and settings.telegram_admin_chat_id):
         log.warning(
             "TELEGRAM_BOT_TOKEN/TELEGRAM_ADMIN_CHAT_ID not set: failures will not be alerted"

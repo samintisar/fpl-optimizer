@@ -583,6 +583,16 @@ def _die_once(store, caches, rules, unit, payload):
     return (unit[1], os.getpid() == parent_pid)
 
 
+def _poison(store, caches, rules, unit, payload):
+    """Unit `payload[0]` kills every worker process it runs in; the others work."""
+    import os
+
+    bad, parent_pid = payload
+    if unit[1] == bad and os.getpid() != parent_pid:
+        os._exit(5)
+    return unit[1]
+
+
 def _fail_unit(store, caches, rules, unit, payload):
     raise ValueError(f"unit {unit[1]} is bad")
 
@@ -615,9 +625,23 @@ def test_dead_workers_are_replaced_by_their_peers_then_this_process(league, tmp_
     assert out == [(f"u{i}", True) for i in range(4)]  # fell back to this process
     assert caplog.text.count("worker pool broke") == evaluate.POOL_ATTEMPTS
     assert "remaining unit(s) in this process" in caplog.text
-    with pytest.raises(ValueError, match="unit u0 is bad") as info:
+    # Every unit fails; the first worker to report decides which one is named.
+    with pytest.raises(ValueError, match=r"unit u\d is bad") as info:
         evaluate.run_units(store, Caches(), backtest_rules, _fail_unit, units, None, 2)
     assert any("in a worker process" in note for note in info.value.__notes__)
+
+
+def test_a_unit_that_keeps_killing_workers_stops_the_run(league, caplog):
+    """A unit that crashes its worker every time (a native crash, the OOM killer) is not
+    passed from worker to worker and then run in this process, which it would crash too:
+    after UNIT_DEATHS deaths the run fails naming it."""
+    import os
+
+    _, store, _ = league
+    units = [(SEASON, f"u{i}", None) for i in range(4)]
+    with caplog.at_level("WARNING"), pytest.raises(evaluate.UnitCrashed, match="u1 killed 3"):
+        evaluate.run_units(store, Caches(), backtest_rules, _poison, units, ("u1", os.getpid()), 3)
+    assert "remaining unit(s) in this process" not in caplog.text
 
 
 def test_store_spec_and_jobs_validation(league, tmp_path):
@@ -866,3 +890,42 @@ def test_no_semaphore_handle_is_handed_to_a_starting_worker(league, monkeypatch)
 
 def _unit_name(store, caches, rules, unit, payload):
     return unit[1]
+
+
+_CALLS: dict[str, int] = {}
+
+
+class _Counting:
+    """A policy wrapper counting `decide` calls per policy name."""
+
+    def __init__(self, inner):
+        self.inner, self.name, self.xp_model = inner, inner.name, inner.xp_model
+
+    def decide(self, ctx):
+        _CALLS[self.name] = _CALLS.get(self.name, 0) + 1
+        return self.inner.decide(ctx)
+
+
+@pytest.mark.parametrize("continuation", ["own", "fixed"])
+def test_per_decision_makes_each_decision_once(league, continuation):
+    """The reference arm's decision is the reference run's, the other arm decides once per
+    window (no separate decide for the same-decision check), and with own continuation the
+    reference arm's window is read back from the reference run: B (the reference) decides
+    only in its own run, plus the fixed continuation's GWs if there is one."""
+    _, store, _ = league
+    a, b = _Counting(GREEDY), _Counting(ROLL)
+    cont = "own" if continuation == "own" else _Counting(GreedyPolicy("rolling", threshold=0.5))
+    _CALLS.clear()
+    out = per_decision(store, [SEASON], "random@25", a, b, cont, k=3, caches=Caches())
+    rules = backtest_rules(SEASON)
+    ((_, start),) = build_start_states(store, SEASON, "random@25", rules)
+    n_gws = len(simulate(store, rules, ROLL, start, caches=Caches()).gws)
+    assert len(out) > 0
+    if continuation == "own":
+        assert _CALLS[a.name] == out["k"].sum()  # its decision + its own k − 1 GWs
+        assert _CALLS[b.name] == n_gws  # the reference run only
+    else:
+        assert _CALLS[a.name] == len(out)  # one decision per window
+        assert _CALLS[b.name] == n_gws
+        differ = out[~out["same_decision"]]  # arm B is re-simulated only where they differ
+        assert _CALLS[cont.name] == (out["k"] - 1).sum() + (differ["k"] - 1).sum()
