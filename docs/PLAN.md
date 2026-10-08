@@ -118,7 +118,14 @@ User state (SQLite): `users`, `user_state` (squad, purchase prices, bank, FTs, c
 - Backfill from 2016/17. Snapshot-derived fields (status flags, news, ownership, `ep_next`, set-piece orders) exist from 2021/22 via fplcache; earlier seasons lack them.
 - Store raw stat components and **re-score every season under the current season's rules** (scoring config per season in `config/`). Exception: 2019/20–2024/25 have no CBIT/recoveries data in our sources, so they are re-scored **without** defensive-contribution points. 2016/17–2018/19 vaastav files *do* carry `clearances_blocks_interceptions`, `recoveries`, `tackles` (FPL's old detailed stats) — **VERIFY** the definitions match 2025/26+ before scoring defcon for those seasons (if they do, they could also set the defcon prior without FPL-Core-Insights, issue #14).
 - **xG coverage** (no direct Understat — see §12):
-  - Player npxG/xA: Understat mirror. Share of FPL minutes covered: 2016/17 47%, 2017/18 62%, 2018/19 75%, 2019/20 91%, 2020/21–2023/24 100%, 2024/25 80% (the mirror stops at 2025-04-07). From 2025/26: FPL's own `expected_goals` / `expected_assists` (Opta, in vaastav and our `element-summary` archive; available from 2022/23 GW16, so it overlaps the mirror for calibration). FPL xG includes penalties; npxG for 2025/26+ subtracts penalty xG using penalty attempts inferred from takers — approximate, **VERIFY** against the 2022/23–2024/25 overlap.
+  - Player npxG/xA: Understat mirror. Share of FPL minutes covered: 2016/17 47%, 2017/18 62%, 2018/19 75%, 2019/20 91%, 2020/21–2023/24 100%, 2024/25 80% (the mirror stops at 2025-04-07). From 2025/26: FPL's own `expected_goals` / `expected_assists` (Opta, in vaastav and our `element-summary` archive; available from 2022/23 GW16, so it overlaps the mirror for calibration). FPL xG includes penalties.
+    - **npxG for 2025/26+** = FPL xG − 0.79 × penalty attempts (Opta values a penalty at exactly 0.79). Penalty attempts are inferred as an expected value from `penalties_order` and goals.
+    - **Verified 2026-10-08** on the 2022/23 GW16 – 2025-04-07 overlap (27,825 player-matches, Phase 5 Task 4):
+      - per player-season, the inferred npxG correlates with Understat at r 0.985 (0.992 with true penalty attempts);
+      - Opta npxG runs about 9% below Understat (ratio 0.914), and FPL xA about 20% below (0.80);
+      - so `fplopt.models.shares` scales FPL values to Understat's level (k_goals ≈ 1.095, k_assists ≈ 1.257, fitted walk-forward on the overlap). The scale only matters where the two sources mix (2025/26+);
+      - out of sample (fitted on 2022/23, scored on 2023/24–2024/25): r 0.985;
+      - leaving penalties in overstates takers' npxG by 21%.
   - Team xG: Understat mirror 2019/20–2024/25 (2024/25 only to 2025-04-07), football-data `HxG`/`AxG` 2026/27, summed FPL player xG (2022/23 GW16+) otherwise. 2016/17–2018/19: goals only.
   - Derived tables keep each source in its own columns (e.g. `us_npxg`, `fpl_xg`); blending is a modelling decision (Phase 5).
 - Weight older seasons lower in training rather than dropping them.
@@ -285,6 +292,16 @@ Blending rule everywhere: equal weights or a single fixed weight — never weigh
   - Flags exist from 2020/21 GW32 (fplcache), not only from 2021/22. The flag mapping is fit walk-forward on every visible snapshot season; the §4 check on 2023/24–2024/25 is still open (Task 6).
   - Settings: `GbmParams()` defaults, season decay 0.7, horizon decay 0.85 (36 variants).
   - Fit ~11 s per cutoff (minutes + flags), predict 0.4 s.
+- **Shares and penalties** (Task 4, `fplopt.models.shares`), per player-fixture, mean over 2017/18–2022/23:
+  - Poisson log-likelihood at horizon 0: goals −0.1355 vs the position-average reference −0.1404; FPL assists −0.1347 vs −0.1382.
+  - P(goal ≥ 1) Brier 0.0325 vs 0.0333. Horizons 1–5 are similar.
+  - Beats the reference in every season.
+  - Means run 2–3% high (e_goals 0.0439 vs 0.0430 realized).
+  - Prior: 1920 pseudo-minutes at a price-based mean for every player, with season weights 2-2-1-1 (current, −1, −2, −3). That is stronger than §6.2's ~480 minutes at the position average, which scored worse (38 variants tried).
+  - Club changes: half weight on the old club's data. Goals stand in for xG at half weight where xG is missing (2016/17–2018/19).
+  - Own goals (~3.5%) are removed from the non-penalty λ. FPL-assisted fraction of goals ≈ 0.87.
+  - Penalties: P(taker) comes from `penalties_order` (main taker takes 90% of attempts when on the pitch) or from recent attempts, chained down the order by minutes. Club attempt rates and conversion are shrunk to the league.
+  - Fit ≤ 1.3 s, predict ≤ 0.3 s.
 
 ### 6.1 Team model — market primary
 **Market-implied λ (primary for GWs with odds, typically GW+1, sometimes +2):**
@@ -566,6 +583,9 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 - Chip terminal values estimated from backtest distributions (now placeholders: WC 6, FH 4, BB 4, TC 3); they set when the planner plays chips.
 - Mid-season start states for transfer-quality tests (the GW1 starts let squad rebuilds dominate full-run differences).
 - Exclude the degenerate 2016/17 GW1 under `rolling` (no earlier matches: every xP is 0) from comparisons, or start 2016/17 at GW2.
+
+**Resolved (2026-10-08):**
+- FPL xG minus penalty xG as npxG for 2025/26+ → §3 *Backfill rules* (verified on the overlap; scale factors fitted walk-forward).
 
 **Resolved (2026-10-07):**
 - Solver performance with chip scenarios over a 6-GW horizon → §7 *Solve times* (#10).
