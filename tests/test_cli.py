@@ -163,6 +163,7 @@ def test_every_parsed_command_has_a_job():
         "build": ["fixture"],
         "backtest run": ["--seasons", "2023"],
         "backtest compare": ["--seasons", "2023", "--a", "greedy:rolling", "--b", "roll:rolling"],
+        "optimize plan": ["--season", "2023", "--gw", "5"],
     }
     for name in cli.JOBS:
         args = parser.parse_args(name.split() + extras.get(name, []))
@@ -436,13 +437,39 @@ def test_parse_policy_spec():
     assert cli.parse_policy_spec("roll:rolling").build().name == "roll(rolling)"
 
 
+def test_parse_optimizer_policy_spec():
+    spec = cli.parse_policy_spec("optimizer:ep_next_fade:max_hits=0,hit_margin=2,chips=1")
+    assert spec.params == (("chips", 1), ("hit_margin", 2.0), ("max_hits", 0))
+    assert str(spec) == "optimizer:ep_next_fade:chips=1,hit_margin=2.0,max_hits=0"
+    assert cli.parse_policy_spec(str(spec)) == spec
+    policy = spec.build()
+    assert policy.name == "optimizer(ep_next_fade,mh=0,m=2.0,chips)"
+    assert policy.chips and policy.params.max_hits == 0 and policy.params.hit_margin == 2.0
+    unlimited = cli.parse_policy_spec("optimizer:rolling:max_hits=none,horizon=4,decay=0.9")
+    assert unlimited.params == (("decay", 0.9), ("horizon", 4), ("max_hits", None))
+    assert cli.parse_policy_spec(str(unlimited)) == unlimited
+    assert unlimited.build().name == "optimizer(rolling,mh=inf,m=0.0,h=4,d=0.9)"
+    itb = cli.parse_policy_spec("optimizer:rolling:itb_value=0.08,chips=0").build()
+    assert itb.name == "optimizer(rolling,mh=0,m=0.0,itb=0.08)" and not itb.chips
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [
         ("greedy", "expected name:xp"),
         ("greedy:rolling:threshold=1:x", "expected name:xp"),
         (":rolling", "expected name:xp"),
-        ("optimizer:rolling", "unknown policy 'optimizer'"),
+        ("best:rolling", "unknown policy 'best'"),
+        ("optimizer:rolling:threshold=1", "no parameter 'threshold'"),
+        ("optimizer:rolling:max_hits=-1", "not a valid int or none"),
+        ("optimizer:rolling:max_hits=x", "not a valid int or none"),
+        ("optimizer:rolling:chips=2", "not a valid 0/1 flag"),
+        ("optimizer:rolling:decay=0", "0 < decay <= 1"),
+        ("optimizer:rolling:horizon=0", "1 <= horizon <= 6"),
+        ("optimizer:rolling:horizon=7", "1 <= horizon <= 6"),
+        ("optimizer:rolling:hit_margin=-1", "hit_margin must be a finite number >= 0"),
+        ("optimizer:rolling:itb_value=-0.5", "itb_value must be a finite number >= 0"),
+        ("greedy:rolling:threshold=none", "not a valid float"),
         ("greedy:magic", "unknown xP model 'magic'"),
         ("greedy:rolling:foo=1", "no parameter 'foo'"),
         ("roll:rolling:threshold=1", "no parameter 'threshold'"),
@@ -450,7 +477,9 @@ def test_parse_policy_spec():
         ("greedy:rolling:threshold=x", "not a valid float"),
         ("greedy:rolling:horizon=2.5", "not a valid int"),
         ("greedy:rolling:threshold=nan", "not finite"),
-        ("greedy:rolling:horizon=0", "horizon >= 1"),
+        ("greedy:rolling:horizon=0", "1 <= horizon <= 6"),
+        ("greedy:rolling:horizon=8", "1 <= horizon <= 6"),
+        ("greedy:rolling:max_transfers=-1", "max_transfers >= 0"),
         ("greedy:rolling:threshold=1,threshold=2", "duplicate policy parameter"),
     ],
 )
@@ -468,6 +497,14 @@ def test_cli_policy_and_model_names_match_the_backtester():
     assert set(cli.XP_MODELS) == set(MODELS)
     greedy = {f.name for f in fields(GreedyPolicy)} - {"xp_model"}
     assert set(cli.POLICY_PARAMS["greedy"]) == greedy
+    from fplopt.optimize import OptimizerParams
+
+    optimizer = set(cli.POLICY_PARAMS["optimizer"]) - {"chips"}
+    assert optimizer <= {f.name for f in fields(OptimizerParams)}
+    assert cli.EP_NEXT_MODELS <= set(MODELS)
+    from fplopt.models import MAX_HORIZON
+
+    assert cli.MAX_PLAN_HORIZON == MAX_HORIZON
 
 
 @pytest.fixture(scope="module")
@@ -513,7 +550,8 @@ ROLL_VS_GREEDY = ["--a", "roll:rolling", "--b", "greedy:rolling"]
         (["run", "--seasons", "2021"], "no gameweek/player_match data for 2021-22"),
         (["run", "--seasons", "2023", "--starts", "template"], "--starts: bad start spec"),
         (["run", "--seasons", "2023", "--policy", "roll", "--horizon", "3"], "only for --policy"),
-        (["run", "--seasons", "2023", "--horizon", "0"], "horizon >= 1"),
+        (["run", "--seasons", "2023", "--horizon", "0"], "1 <= horizon <= 6"),
+        (["run", "--seasons", "2023", "--horizon", "7"], "1 <= horizon <= 6"),
         (["compare", "--seasons", "2023", "--a", "roll:rolling", "--b", "roll:rolling"], "same"),
         (  # a default spelled out builds the same policy (same name)
             ["compare", "--seasons", "2023", "--a", "greedy:rolling"]
@@ -523,6 +561,13 @@ ROLL_VS_GREEDY = ["--a", "roll:rolling", "--b", "greedy:rolling"]
         (["compare", "--seasons", "2023", *ROLL_VS_GREEDY, "--k", "0"], "must be >= 1"),
         (["compare", "--seasons", "2023", *ROLL_VS_GREEDY, "--stride", "0"], "must be >= 1"),
         (["compare", "--seasons", "2023", "--a", "greedy:x", "--b", "roll:rolling"], "unknown xP"),
+        (
+            ["compare", "--seasons", "2020,2023", "--a", "optimizer:ep_next_fade"]
+            + ["--b", "greedy:rolling"],
+            "optimizer:ep_next_fade uses ep_next",
+        ),
+        (["run", "--seasons", "2023", "--jobs", "0"], "--jobs must be >= 1"),
+        (["run", "--seasons", "2023", "--spec", "roll:rolling", "--xp", "rolling"], "--spec"),
     ],
 )
 def test_backtest_usage_errors_exit_two_without_alert(backtest, capsys, tmp_path, argv, message):
@@ -611,26 +656,64 @@ def test_backtest_compare_end_to_end(backtest, tmp_path, capsys):
     assert summary["policy_a"] == "greedy(ep_next,t=1.0)"
     assert summary["continuation"] == "roll(rolling)"
     comparisons = summary["summary"]["comparisons"]
-    methods = {(c["method"], c["metric"]) for c in comparisons}
+    methods = {(c["method"], c["split"], c["metric"]) for c in comparisons}
     assert methods == {
-        (m, x) for m in ("full_run", "per_decision") for x in ("realized", "realized@xg", "xg")
+        (m, split, x)
+        for m in ("full_run", "per_decision")
+        for split in ("all", "develop", "validate")  # 2022-23 develop, 2023-24 validate
+        for x in ("realized", "realized@xg", "xg")
     }
-    (full,) = [c for c in comparisons if (c["method"], c["metric"]) == ("full_run", "realized")]
+    (full,) = [
+        c
+        for c in comparisons
+        if (c["method"], c["split"], c["metric"]) == ("full_run", "all", "realized")
+    ]
     cells = paired.groupby(["season", "gw_index"])["diff"].mean()
     assert full["mean"] == pytest.approx(cells.mean())
+    assert full["deflated_mean"] == full["mean"]  # the family's first variant
+    assert 0 <= full["p_season_t"] <= 1  # two seasons
     printed = capsys.readouterr().out
     for text in ("Paired differences A - B", "per-decision (k=2, stride=2)", "full run"):
         assert text in printed
     for text in ("Per season", "80% CI", "realized@xg", "per-decision total (k=2)"):
         assert text in printed
+    for text in ("season-t p", "deflated", "develop", "validate", "reference greedy(rolling"):
+        assert text in printed
     assert "2022-23" in printed and "2023-24" in printed
     (logged,) = _experiments(log)
-    assert logged["n_variants"] == "2"
+    assert logged["n_variants"] == "1" and logged["family"] == "greedy:rolling 2022-2023"
     config = json.loads(logged["config"])
     assert config["policies"] == ["greedy:ep_next", "greedy:rolling"]
     assert config["continuation"] == "roll:rolling" and config["k"] == 2
-    assert config["stride"] == 2 and config["ci"] == 0.8
-    assert len(json.loads(logged["metrics"])["comparisons"]) == 6
+    assert config["stride"] == 2 and config["ci"] == 0.8 and config["reference"] == "b"
+    assert len(json.loads(logged["metrics"])["comparisons"]) == 18
+
+
+def test_backtest_compare_own_continuation_reference_and_family(backtest, tmp_path, capsys):
+    """--continuation own --reference a: each arm continues with its own policy from A's
+    states; the experiment family accumulates variants and deflates the mean."""
+    import pandas as pd
+
+    out, log = tmp_path / "out", tmp_path / "experiments.csv"
+    argv = ["compare", "--seasons", "2023", "--a", "greedy:rolling:threshold=0.5", "--b"]
+    argv += ["roll:rolling", "--starts", "random@13", "--k", "3", "--n-boot", "20"]
+    argv += ["--continuation", "own", "--reference", "a", "--jobs", "1"]
+    assert backtest(*argv, "--out", str(out), "--experiments", str(log))[0] == 0
+    decisions = pd.read_parquet(out / "per_decision.parquet")
+    assert (decisions["continuation"] == "own").all() and (decisions["reference"] == "a").all()
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["continuation"] == "own" and summary["reference"] == "a"
+    assert "continuation own, reference greedy(rolling,t=0.5)" in capsys.readouterr().out
+    # Two more variants against the same B on the same seasons: N = 2, 3, deflated means.
+    argv[4] = "greedy:rolling:threshold=1.5"
+    assert backtest(*argv, "--out", str(out), "--experiments", str(log))[0] == 0
+    argv[4] = "greedy:rolling:threshold=2.5"
+    assert backtest(*argv, "--out", str(out), "--experiments", str(log), "--family", "mine")[0] == 0
+    rows = _experiments(log)
+    assert [r["family"] for r in rows] == ["roll:rolling 2023", "roll:rolling 2023", "mine"]
+    assert [r["n_variants"] for r in rows] == ["1", "2", "1"]
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["n_variants"] == 1 and summary["family"] == "mine"
 
 
 def test_backtest_compare_stride_one_evaluates_every_gw(backtest, tmp_path):
@@ -681,3 +764,164 @@ def test_start_gw_of_keeps_fallback_starts_with_their_spec():
         "random0@20": 20,
         "random1@20": 20,
     }
+
+
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("highspy") is None, reason="needs the optimize extra"
+)
+def test_optimize_bench_end_to_end(tmp_path, monkeypatch, league, capsys):
+    """`fplopt optimize bench` on the synthetic league: one deadline × template/random ×
+    both xP models, the exhaustive chip search on the first case, the pruning variants."""
+    import pandas as pd
+
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+    out = tmp_path / "bench"
+    argv = ["optimize", "bench", "--deadlines", "1", "--horizon", "2", "--all-chips", "1"]
+    argv += ["--prune-n", "5,10,10,6"]  # small pools: synthetic instances are hard for HiGHS
+    assert cli.main([*argv, "--out", str(out)], settings=make_settings(tmp_path)) == 0
+    assert alerts == []
+    cases = pd.read_csv(out / "cases.csv")
+    assert len(cases) == 4
+    assert set(cases["xp"]) == {"ep_next", "rolling"}
+    assert set(cases["season"]) <= {2022, 2023}
+    assert (cases["n_solves"] <= cases["n_scenarios"]).all()
+    assert (cases["chips_objective"] >= cases["objective"] - 1e-6).all()
+    assert cases["bound_matches_all"].iloc[0] and cases["bound_matches_all"].iloc[1:].isna().all()
+    prune = pd.read_csv(out / "prune.csv")
+    assert len(prune) == 4 * 5 and (prune["loss"] >= 0).all()
+    assert cases["chips_prune_loss"].iloc[0] >= -1e-6
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["summary"]["n_cases"] == 4
+    assert summary["summary"]["chips_all"]["matches"] == 1
+    assert summary["config"]["params"]["horizon"] == 2
+    printed = capsys.readouterr().out
+    assert "chips, bound search" in printed and "Pruning" in printed and "default" in printed
+    # --prune-n sets the planner's pool; bad values are usage errors.
+    argv = ["optimize", "bench", "--deadlines", "1", "--horizon", "1", "--no-prune-study"]
+    out2 = tmp_path / "bench2"
+    code = cli.main(
+        [*argv, "--prune-n", "3,6,6,4", "--out", str(out2)], settings=make_settings(tmp_path)
+    )
+    assert code == 0
+    config = json.loads((out2 / "summary.json").read_text(encoding="utf-8"))["config"]
+    assert config["params"]["prune_n"] == {"1": 3, "2": 6, "3": 6, "4": 4}
+    assert not (out2 / "prune.csv").read_text(encoding="utf-8").strip()
+    with pytest.raises(SystemExit):
+        cli.main([*argv, "--prune-n", "3,6,6"], settings=make_settings(tmp_path))
+
+
+HAS_HIGHS = __import__("importlib").util.find_spec("highspy") is not None
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="needs the optimize extra")
+def test_backtest_compare_optimizer_with_jobs(backtest, tmp_path, capsys):
+    """An optimizer spec against greedy in two worker processes: runs end to end, prints
+    the transfer-gain table and logs --jobs."""
+    import pandas as pd
+
+    out, log = tmp_path / "out", tmp_path / "experiments.csv"
+    spec = "optimizer:rolling:horizon=2,max_hits=0"
+    argv = ["compare", "--seasons", "2023", "--a", spec, "--b", "greedy:rolling"]
+    argv += ["--starts", "random:2@15", "--k", "2", "--n-boot", "20", "--jobs", "2"]
+    code, alerts = backtest(*argv, "--out", str(out), "--experiments", str(log))
+    assert code == 0 and alerts == []
+    gws = pd.read_parquet(out / "gws.parquet")
+    name = "optimizer(rolling,mh=0,m=0.0,h=2)"
+    assert set(gws["policy"]) == {name, "greedy(rolling,t=1.0)"}
+    assert (gws.loc[gws["policy"] == name, "hits"] == 0).all()
+    assert {"pred_gain", "real_gain"} <= set(gws.columns)
+    printed = capsys.readouterr().out
+    assert "Predicted vs realized transfer gain" in printed and name in printed
+    (logged,) = _experiments(log)
+    assert json.loads(logged["config"])["jobs"] == 2
+    assert "transfer_gains" in json.loads(logged["metrics"])
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert {r["policy"] for r in summary["summary"]["transfer_gains"]} == set(gws["policy"])
+
+
+def test_backtest_run_with_a_spec(backtest, tmp_path):
+    import pandas as pd
+
+    out, log = tmp_path / "out", tmp_path / "experiments.csv"
+    argv = ["run", "--seasons", "2023", "--spec", "greedy:ep_next_fade:threshold=0.5"]
+    argv += ["--starts", "random@16", "--jobs", "1"]
+    assert backtest(*argv, "--out", str(out), "--experiments", str(log))[0] == 0
+    gws = pd.read_parquet(out / "gws.parquet")
+    assert set(gws["policy"]) == {"greedy(ep_next_fade,t=0.5)"}
+    assert json.loads(_experiments(log)[0]["config"])["policies"] == [
+        "greedy:ep_next_fade:threshold=0.5"
+    ]
+
+
+@pytest.fixture
+def plan(tmp_path, monkeypatch, league):
+    """Runs `fplopt optimize plan ...` on the synthetic league; returns (exit code, alerts)."""
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+
+    def run(*argv):
+        return cli.main(["optimize", "plan", *argv], settings=make_settings(tmp_path)), alerts
+
+    run.alerts = alerts
+    return run
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="needs the optimize extra")
+def test_optimize_plan_prints_the_top_plans_and_the_roll_plan(plan, capsys):
+    argv = ["--season", "2023-24", "--gw", "6", "--start", "random:1", "--xp", "rolling"]
+    code, alerts = plan(*argv, "--no-chips", "--horizon", "2", "--max-hits", "1")
+    assert code == 0 and alerts == []
+    printed = capsys.readouterr().out
+    assert "2023-24 GW6 (gw_index 6), random:1 squad, xP rolling, horizon 2 GW(s)" in printed
+    assert "no chips, max_hits 1" in printed
+    for label in ("Plan #1: gain vs roll", "Plan #2", "Plan #3", "Roll plan: gain vs roll +0.00"):
+        assert label in printed
+    assert "transfers (out -> in)" in printed and "captain (vice)" in printed
+    assert " -> " in printed  # the top plans transfer, by player name
+    code, _ = plan("--season", "2023", "--gw", "7", "--xp", "ep_next", "--horizon", "1")
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "template squad" in printed and "Chip scenarios solved" in printed
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--season", "2025", "--gw", "3"], "holdout"),
+        (["--season", "2021-2023", "--gw", "3"], "give one season"),
+        (["--season", "2020", "--gw", "3"], "--xp ep_next uses ep_next"),
+        (["--season", "2023", "--gw", "3", "--max-hits", "x"], "--max-hits"),
+        (["--season", "2023", "--gw", "3", "--start", "best"], "template or random:SEED"),
+        (["--season", "2023", "--gw", "3", "--horizon", "0"], "--horizon must be in 1..6"),
+        (["--season", "2023", "--gw", "3", "--horizon", "7"], "--horizon must be in 1..6"),
+        (["--season", "2023", "--gw", "3", "--top-k", "0"], "--top-k must be >= 1"),
+        (["--season", "2023", "--gw", "3", "--hit-margin", "-1"], "hit_margin must be"),
+        (["--season", "2023", "--gw", "40", "--xp", "rolling"], "--gw: 2023-24 has no GW40"),
+    ],
+)
+def test_optimize_plan_usage_errors(plan, capsys, argv, message):
+    with pytest.raises(SystemExit) as info:
+        plan(*argv)
+    assert info.value.code == 2
+    assert message in capsys.readouterr().err
+    assert plan.alerts == []
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--horizon", "7"], "--horizon must be in 1..6"),
+        (["--horizon", "0"], "--horizon must be in 1..6"),
+        (["--deadlines", "0"], "--deadlines must be >= 1"),
+        (["--all-chips", "-1"], "--all-chips >= 0"),
+    ],
+)
+def test_optimize_bench_usage_errors(tmp_path, monkeypatch, league, capsys, argv, message):
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+    with pytest.raises(SystemExit) as info:
+        cli.main(["optimize", "bench", *argv], settings=make_settings(tmp_path))
+    assert info.value.code == 2
+    assert message in capsys.readouterr().err

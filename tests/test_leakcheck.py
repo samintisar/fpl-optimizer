@@ -426,7 +426,7 @@ def test_probes_do_not_leak_on_the_synthetic_league(kwargs, gameweeks):
     tables = synthetic_tables(**kwargs)
     deadlines = [deadline_of(tables, season, gw) for season, gw in gameweeks]
     probes = {name: b for name, b in checked_builders().items() if name.startswith("probe:")}
-    assert len(probes) == len(PROBES) == 3
+    assert len(probes) == len(PROBES) == 5
     assert check_leakage(tables, deadlines, seed=0, features=probes) == []
     view = DataStore(tables=tables).as_of(deadlines[0])
     frames = {name: probe(view) for name, probe in probes.items()}
@@ -438,6 +438,9 @@ def test_probes_do_not_leak_on_the_synthetic_league(kwargs, gameweeks):
         assert refused["kind"].tolist() == ["refused"]
         assert "no ownership" in refused["note"].iloc[0]
         assert len(frames["probe:greedy_rolling_random0"]) >= 35
+        # Without ep_next the optimizer's rolling probe still decides (not degenerate).
+        rolling = frames["probe:optimizer_rolling_random0"]
+        assert len(rolling) >= 35 and (rolling["kind"] == "starter").sum() == 11
 
 
 def test_probes_are_refused_on_a_coverage_gap_and_still_compare():

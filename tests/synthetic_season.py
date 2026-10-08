@@ -50,6 +50,9 @@ from functools import lru_cache
 import numpy as np
 import pandas as pd
 
+from fplopt.backtest.rules import backtest_rules
+from fplopt.backtest.scoring import score_matches
+
 UTC_US = pd.DatetimeTZDtype("us", "UTC")
 EPOCH = pd.Timestamp(0, tz="UTC").as_unit("us")
 POSITION_NAMES = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
@@ -442,6 +445,14 @@ def _match_rows(
 # --- tables --------------------------------------------------------------------------------
 
 
+def _rescored(matches: pd.DataFrame) -> pd.Series:
+    """`rescored_points` as the build computes it: each season under its backtest rules."""
+    out = pd.Series(0, index=matches.index, dtype="int64")
+    for season, rows in matches.groupby("season"):
+        out.loc[rows.index] = score_matches(rows, backtest_rules(int(season)))["points"]
+    return out
+
+
 def _player_match_frame(rows: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     played = df["minutes"] > 0
@@ -478,6 +489,7 @@ def _player_match_frame(rows: list[dict]) -> pd.DataFrame:
         "total_points",
     ):
         out[column] = df[column].astype("int64")
+    out["rescored_points"] = _rescored(out.assign(element_type=df["element_type"].astype("int64")))
     for column in (
         "clearances_blocks_interceptions",
         "recoveries",

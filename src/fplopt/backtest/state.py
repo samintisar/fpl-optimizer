@@ -39,7 +39,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -117,11 +117,17 @@ class Transfer:
 @dataclass(frozen=True)
 class Decision:
     """One GW's decision: transfers (executed together), the lineup for the post-transfer
-    squad, and an optional chip name (`wildcard`, `freehit`, `bboost`, `3xc`)."""
+    squad, and an optional chip name (`wildcard`, `freehit`, `bboost`, `3xc`).
+
+    `solver_status` / `mip_gap`: how the solver that produced it finished (optimizer
+    policies; None for others), recorded in the simulator's GW rows. Diagnostics only: they
+    take no part in equality, so the same moves compare equal whoever made them."""
 
     transfers: tuple[Transfer, ...]
     lineup: Lineup
     chip: str | None = None
+    solver_status: str | None = field(default=None, compare=False)
+    mip_gap: float | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -206,6 +212,13 @@ def chip_available(state: SquadState, name: str, rules: Rules) -> bool:
     except InvalidDecision:
         return False
     return True
+
+
+def chip_window(state: SquadState, name: str, rules: Rules) -> int:
+    """The `chip_id` that playing chip `name` at `state.gw_index` would use (the lowest
+    open, unused window), or InvalidDecision if the chip can't be played there (same rules
+    as `chip_available`; the optimizer's chip scenarios use it)."""
+    return _chip_window(state, name, rules)
 
 
 def _chip_window(state: SquadState, name: str, rules: Rules) -> int:

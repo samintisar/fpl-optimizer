@@ -12,6 +12,9 @@ _LABEL = re.compile(r"(\d{4})-(\d{2})")
 # The 2025/26 holdout (PLAN §9): no outcome statistics, tuning or leakage-check deadlines
 # from it until Phase 6.
 HOLDOUT_SEASONS = frozenset({2025})
+# PLAN §5 *Splits*: hyperparameters are chosen on develop and confirmed on validate.
+DEVELOP_SEASONS = frozenset(range(2016, 2023))  # 2016/17-2022/23
+VALIDATE_SEASONS = frozenset({2023, 2024})  # 2023/24-2024/25
 
 
 def season_label(start_year: int) -> str:

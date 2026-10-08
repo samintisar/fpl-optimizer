@@ -26,6 +26,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -184,6 +185,13 @@ class DataStore:
 
     def as_of(self, deadline: Any) -> AsOfView:
         return AsOfView(self, _utc(deadline))
+
+    @property
+    def provided_tables(self) -> Mapping[str, pd.DataFrame] | None:
+        """The in-memory tables given as `tables` (read-only), or None for a `data_dir`
+        store: with `data_dir`, enough to open an equivalent store elsewhere (backtest
+        worker processes)."""
+        return None if self._frames is None else MappingProxyType(self._frames)
 
     def _table(self, name: str) -> _Table:
         if name not in TABLES:

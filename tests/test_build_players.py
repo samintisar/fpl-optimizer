@@ -603,3 +603,30 @@ def test_rebuilding_player_season_rebuilds_player_match(caplog):
     ]
     assert "also rebuilding player_match: its rows depend on player_season" in caplog.text
     assert _resolve(["player_gw"]) == ["player_gw"]
+
+
+def test_rescored_points_name_a_season_without_backtest_rules():
+    """A newly archived season (e.g. 2027/28) has no backtest rules yet: the build stops
+    with what to add, not an opaque error from the rules loader."""
+    from fplopt.build.players import PlayerMatchError, rescored_points
+
+    matches = pd.DataFrame({"season": [2027], "player_key": [1]})
+    seasons = pd.DataFrame({"season": [2027], "player_key": [1], "element_type": [3]})
+    with pytest.raises(PlayerMatchError, match=r"2027-28 has no backtest rules.*rules export"):
+        rescored_points(matches, seasons)
+
+
+def test_rescored_points_put_every_season_on_the_backtest_rules(built):
+    """`rescored_points` = the row re-scored from its stats under its season's backtest
+    rules (on real data it equals `total_points` for 2016/17-2024/25 except GK goals, 6 then
+    and 10 now: tests/test_backtest_scoring.py; synthetic raw points are arbitrary)."""
+    from fplopt.backtest.rules import backtest_rules
+    from fplopt.backtest.scoring import score_matches
+
+    matches = built["player_match"]
+    positions = built["player_season"].set_index(["season", "player_key"])["element_type"]
+    element_type = positions.reindex(pd.MultiIndex.from_frame(matches[["season", "player_key"]]))
+    matches = matches.assign(element_type=element_type.to_numpy())
+    for season, rows in matches.groupby("season"):
+        expected = score_matches(rows, backtest_rules(int(season)))["points"]
+        assert rows["rescored_points"].tolist() == expected.tolist(), season

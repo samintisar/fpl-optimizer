@@ -244,18 +244,25 @@ def _window(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
     return out
 
 
-def _form_dtypes() -> dict[str, object]:
-    dtypes: dict[str, object] = {"player_key": "int64"}
-    for suffix in ("last5", "season"):
-        dtypes[f"matches_{suffix}"] = "int64"
-        dtypes[f"apps_{suffix}"] = "int64"
-        dtypes.update({f"{stat}_{suffix}": "Float64" for stat in FORM_STATS})
-    for suffix in ("last5", "season"):
-        dtypes.update({f"{stat}_per90_{suffix}": "Float64" for stat in RATE_STATS})
-    return dtypes
-
-
-FORM_DTYPES = tuple(_form_dtypes().items())
+# player_key; per window (last 5, season): matches, apps, the FORM_STATS sums; then the
+# per-90 RATE_STATS per window. A literal tuple, so the architecture scan sees it immutable.
+FORM_DTYPES = (
+    ("player_key", "int64"),
+    *(
+        item
+        for suffix in ("last5", "season")
+        for item in (
+            (f"matches_{suffix}", "int64"),
+            (f"apps_{suffix}", "int64"),
+            *((f"{stat}_{suffix}", "Float64") for stat in FORM_STATS),
+        )
+    ),
+    *(
+        (f"{stat}_per90_{suffix}", "Float64")
+        for suffix in ("last5", "season")
+        for stat in RATE_STATS
+    ),
+)
 
 
 def recent_form(view: AsOfView) -> pd.DataFrame:

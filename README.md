@@ -14,9 +14,10 @@ Most FPL tools give you a points projection and a solver. This project spends mo
 the part they skip: **proving the recommendations are actually better**, using a backtest that can't
 see the future and statistics that can't be fooled by one lucky season.
 
-> **Status:** work in progress. Phases 0–3 of the nine phases (0–8) are done: a live data
-> archiver, a 10-season point-in-time data warehouse, leakage tests, and a backtester with paired
-> statistical evaluation. The MILP optimizer and the real models come next. No live
+> **Status:** work in progress. Phases 0–4 of the nine phases (0–8) are done: a live data
+> archiver, a 10-season point-in-time data warehouse, leakage tests, a backtester with paired
+> statistical evaluation, and a MILP optimizer verified against open-fpl-solver. The real models
+> come next. No live
 > recommendations until a pre-registered holdout test passes ([roadmap](#roadmap)).
 
 ## Highlights
@@ -125,8 +126,10 @@ uv run fplopt backtest compare --a greedy:rolling --b roll:rolling --seasons 202
 | `fplopt check leakage` | Corrupt-the-future check of every feature, model and decision probe on real data |
 | `fplopt backtest run` | Replay one policy over seasons × start states; prints totals and captain/XI regret |
 | `fplopt backtest compare` | Paired comparison of two policies with bootstrap CIs, realized and xG-scored |
+| `fplopt optimize plan` | Top-3 plans plus the roll plan for a season, GW and start squad |
+| `fplopt optimize bench` | Optimizer solve-time and pruning benchmark on real deadlines |
 
-Policy specs look like `greedy:rolling:threshold=2.0` or `roll:ep_next`. Every `run` and `compare`
+Policy specs look like `greedy:rolling:threshold=2.0`, `roll:ep_next` or `optimizer:ep_next:max_hits=0`. Every `run` and `compare`
 appends a row (git sha, config, metrics, variant count) to `results/experiments.csv`. Run
 `fplopt <group> --help` for all options.
 
@@ -155,8 +158,8 @@ Server setup (systemd user timers, alerts, heartbeat) is in [`deploy/README.md`]
 | 1 | Backfill + ID mapping + Parquet tables | ✅ 10 seasons, 17 tables, one-command rebuild |
 | 2 | `as_of` layer + leakage tests | ✅ In CI and `fplopt check leakage` |
 | 3 | Backtester + baselines + greedy policy | ✅ Paired full-run and per-decision evaluation with block bootstrap |
-| 4 | MILP optimizer (transfers, captain, bench, chips, top-3 plans) | Next |
-| 5 | Real models (market-implied team model, shares, minutes, calibration) | |
+| 4 | MILP optimizer (transfers, captain, bench, chips, top-3 plans) | ✅ Matches open-fpl-solver; "beats greedy" deferred to Phase 5 (not shown out of sample with baseline xP) |
+| 5 | Real models (market-implied team model, shares, minutes, calibration) | Next |
 | 6 | Holdout evaluation on 2025/26 (single, pre-registered run) | |
 | 7 | Telegram bot + go live | |
 | 8 | Distributions, sensitivity analysis, uncertain fixtures | |
@@ -217,7 +220,7 @@ that touch features or models should keep `fplopt check leakage` passing.
 - [football-data.co.uk](https://www.football-data.co.uk/): results and pre-match odds.
 - [The Odds API](https://the-odds-api.com/): live odds.
 - [open-fpl-solver](https://github.com/solioanalytics/open-fpl-solver) (Apache-2.0): the
-  reference the Phase 4 optimizer will be checked against.
+  reference the Phase 4 optimizer is checked against (identical plans on 24 real instances).
 
 Each source has its own terms. Raw snapshots and the Parquet tables built from them are not
 redistributed in this repository. The only data file tracked is

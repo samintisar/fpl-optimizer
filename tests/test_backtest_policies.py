@@ -17,6 +17,7 @@ from fplopt.backtest.gw_score import validate_lineup
 from fplopt.backtest.policies import (
     DecisionContext,
     GreedyPolicy,
+    OptimizerPolicy,
     RollPolicy,
     best_lineup,
     horizon_xp,
@@ -34,6 +35,7 @@ from fplopt.backtest.state import (
 from fplopt.features.baseline import player_pool
 from fplopt.features.store import DataStore
 from fplopt.models import MODELS
+from fplopt.optimize import OptimizerParams
 
 RULES = load_rules("2026-27")
 
@@ -389,6 +391,110 @@ def test_every_decision_passes_apply_decision_along_a_season(league, policy):
         assert transfers == 0
     else:
         assert transfers > 0
+
+
+SMALL = OptimizerParams(horizon=3, prune_n={1: 4, 2: 10, 3: 10, 4: 6})
+
+
+@pytest.mark.parametrize(
+    ("policy", "runs"),
+    [
+        (OptimizerPolicy("ep_next_fade", replace(SMALL, max_hits=0)), ((1, 1, 4), (16, 7, 21))),
+        (  # chip scenarios: a slower solve per GW
+            OptimizerPolicy("rolling", replace(SMALL, horizon=2, max_hits=1), chips=True),
+            ((16, 7, 19),),
+        ),
+    ],
+    ids=["no-chips", "chips"],
+)
+def test_optimizer_decisions_pass_apply_decision(league, policy, runs):
+    """The optimizer GW by GW from random starts (GW1: a squad build): valid,
+    deterministic, within max_hits; a chip only when the policy plays chips."""
+    pytest.importorskip("highspy")
+    rules = backtest_rules(2023)
+    hits = transfers = 0
+    chips = []
+    for first, seed, last in runs:
+        state = random_state(league[first][0], rules, seed)
+        for gw_index in range(first, last + 1):
+            view, pool, xp = league[gw_index]
+            state = refresh(state, pool)
+            context = DecisionContext(view, state, rules, pool, xp[policy.xp_model])
+            decision = policy.decide(context)
+            assert decision == policy.decide(context)
+            gw_state, record = apply_decision(state, decision, pool, rules)
+            assert decision.solver_status == "Optimal" and decision.mip_gap is not None
+            assert record.hits <= policy.params.max_hits
+            hits, transfers = hits + record.hits, transfers + record.n_transfers
+            chips += [decision.chip] if decision.chip else []
+            state = next_state(gw_state, record, rules, gw_index + 1)
+    assert transfers > 0
+    assert policy.chips or not chips
+    if policy.params.max_hits == 0:
+        assert hits == 0
+
+
+def test_optimizer_policy_records_a_limited_solve(league, monkeypatch, caplog):
+    """A solve a limit stopped is executed (the best plan found) but never silently: the
+    decision carries the status and gap, and a warning is logged."""
+    pytest.importorskip("highspy")
+    import fplopt.backtest.policies as policies_mod
+
+    honest = policies_mod.optimize
+
+    def limited(problem, params, **kwargs):
+        plans = honest(problem, params, **kwargs)
+        best = replace(plans.best, status="SolutionLimit", mip_gap=0.2)
+        return replace(plans, plans=(best, *plans.plans[1:]))
+
+    monkeypatch.setattr(policies_mod, "optimize", limited)
+    rules = backtest_rules(2023)
+    view, pool, xp = league[16]
+    state = refresh(random_state(view, rules, 3), pool)
+    policy = OptimizerPolicy("rolling", replace(SMALL, horizon=2))
+    with caplog.at_level("WARNING"):
+        decision = policy.decide(DecisionContext(view, state, rules, pool, xp["rolling"]))
+    assert decision.solver_status == "SolutionLimit" and decision.mip_gap == 0.2
+    assert "solver stopped at a limit (SolutionLimit" in caplog.text
+    apply_decision(state, decision, pool, rules)
+
+
+def test_optimizer_policy_is_frozen_named_and_picklable():
+    import pickle
+
+    default = OptimizerPolicy()
+    assert default.name == "optimizer(ep_next,mh=0,m=0.0)"
+    params = OptimizerParams(horizon=4, decay=0.9, max_hits=1, hit_margin=2, itb_value=0.08)
+    policy = OptimizerPolicy("rolling", params, chips=True)
+    assert policy.name == "optimizer(rolling,mh=1,m=2.0,h=4,d=0.9,itb=0.08,chips)"
+    small = OptimizerPolicy(params=SMALL).name
+    assert small == "optimizer(ep_next,mh=0,m=0.0,h=3,prune=1:4/2:10/3:10/4:6)"
+    # Different positions pruned to the same N get different names.
+    gk = OptimizerPolicy(params=OptimizerParams(prune_n={1: 20})).name
+    fwd = OptimizerPolicy(params=OptimizerParams(prune_n={4: 20})).name
+    assert gk == "optimizer(ep_next,mh=0,m=0.0,prune=1:20)" and gk != fwd
+    assert pickle.loads(pickle.dumps(policy)) == policy
+    with pytest.raises(FrozenInstanceError):
+        policy.chips = False
+    with pytest.raises(ValueError, match="unknown xp_model"):
+        OptimizerPolicy("nope")
+    with pytest.raises(TypeError, match="OptimizerParams"):
+        OptimizerPolicy("rolling", {"horizon": 3})
+
+
+def test_policies_refuse_horizons_beyond_the_xp_frame():
+    """xP frames cover MAX_HORIZON GWs, so a longer horizon would silently plan over fewer
+    GWs under a name that says otherwise."""
+    from fplopt.models import MAX_HORIZON
+
+    assert OptimizerPolicy(params=OptimizerParams(horizon=MAX_HORIZON)).params.horizon == 6
+    assert GreedyPolicy(horizon=MAX_HORIZON).horizon == MAX_HORIZON
+    with pytest.raises(ValueError, match=r"horizon must be in 1\.\.6"):
+        OptimizerPolicy(params=OptimizerParams(horizon=MAX_HORIZON + 1))
+    with pytest.raises(ValueError, match=r"horizon must be in 1\.\.6"):
+        GreedyPolicy(horizon=MAX_HORIZON + 1)
+    with pytest.raises(ValueError, match=r"horizon must be in 1\.\.6"):
+        GreedyPolicy(horizon=0)
 
 
 def test_greedy_decisions_are_valid_from_many_random_states(league):

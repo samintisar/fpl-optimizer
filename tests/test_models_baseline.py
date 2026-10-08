@@ -20,7 +20,15 @@ from fplopt.features import FEATURES, compute_features
 from fplopt.features.baseline import ep_next, player_pool
 from fplopt.features.store import DataStore
 from fplopt.models import MODELS
-from fplopt.models.baseline import HORIZON, ROLLING_N, xp_ep_next, xp_rolling
+from fplopt.models.baseline import (
+    FADE,
+    HORIZON,
+    LONG_RUN_N,
+    ROLLING_N,
+    xp_ep_next,
+    xp_ep_next_fade,
+    xp_rolling,
+)
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 XP_COLUMNS = ["player_key", "gw", "gw_index", "horizon", "xp"]
@@ -57,10 +65,10 @@ def latest_snapshot(tables, season, gw):
     return snaps[snaps["snapshot_at"] == at].set_index("player_key")
 
 
-def last_matches(tables, season, gw, key):
+def last_matches(tables, season, gw, key, n=ROLLING_N):
     pm = tables["player_match"]
     seen = pm[(pm["player_key"] == key) & (pm["available_at"] < deadline(tables, season, gw))]
-    return seen.sort_values(["kickoff_time", "fixture_key"]).tail(ROLLING_N)
+    return seen.sort_values(["kickoff_time", "fixture_key"]).tail(n)
 
 
 def xp_of(frame, key, horizon):
@@ -244,10 +252,14 @@ def test_every_feature_and_model_runs_on_the_synthetic_league(kwargs):
 
 
 def test_registry():
-    assert MODELS == {"rolling": xp_rolling, "ep_next": xp_ep_next}
+    assert MODELS == {
+        "rolling": xp_rolling,
+        "ep_next": xp_ep_next,
+        "ep_next_fade": xp_ep_next_fade,
+    }
 
 
-@pytest.mark.parametrize("model", [xp_rolling, xp_ep_next])
+@pytest.mark.parametrize("model", [xp_rolling, xp_ep_next, xp_ep_next_fade])
 def test_xp_frames_have_fixed_columns_dtypes_and_order(model, league):
     xp = model(view(league, 2023, 10))
     assert list(xp.columns) == XP_COLUMNS
@@ -264,7 +276,7 @@ def test_xp_frames_have_fixed_columns_dtypes_and_order(model, league):
     assert sorted(end["horizon"].unique()) == [0, 1, 2]  # GW36-38: the season ends
 
 
-@pytest.mark.parametrize("model", [xp_rolling, xp_ep_next])
+@pytest.mark.parametrize("model", [xp_rolling, xp_ep_next, xp_ep_next_fade])
 def test_xp_models_are_deterministic(model, league):
     first = model(view(league, 2023, 15))
     pd.testing.assert_frame_equal(first, model(view(league, 2023, 15)))
@@ -281,7 +293,7 @@ def test_rolling_rate_spans_the_season_boundary(league):
         last = last_matches(league, 2023, 3, key)
         assert len(last) == ROLLING_N
         spanning += set(last["season"]) == {2022, 2023}
-        rate = last["total_points"].mean()
+        rate = last["rescored_points"].mean()
         for horizon in range(HORIZON + 1):
             assert xp_of(xp, key, horizon) == pytest.approx(rate)  # one fixture per GW
     assert spanning >= 40  # 2 matches of 2023 (GW1-2) and 3 of 2022
@@ -293,9 +305,9 @@ def test_rolling_counts_zero_minute_rows_and_unknown_players_get_zero(league):
     last = last_matches(tables, 2023, 10, key)
     pm = tables["player_match"]
     benched = last.index[-1]
-    pm.loc[benched, ["minutes", "total_points"]] = 0
+    pm.loc[benched, ["minutes", "total_points", "rescored_points"]] = 0
     pm.loc[benched, SCORED_STATS[:5]] = 0
-    expected = pm.loc[last.index, "total_points"].sum() / ROLLING_N
+    expected = pm.loc[last.index, "rescored_points"].sum() / ROLLING_N
     # A new signing in the newest snapshot only: no matches anywhere.
     snaps = tables["player_snapshot"]
     newest = snaps[snaps["snapshot_at"] == latest_snapshot(tables, 2023, 10)["snapshot_at"].iloc[0]]
@@ -317,7 +329,7 @@ def test_doubles_count_twice_and_blanks_score_zero():
     snapshot = latest_snapshot(tables, 2023, 10)
     for club in (1, opponent):
         for key in club_players(tables, club):
-            rate = last_matches(tables, 2023, 10, key)["total_points"].mean()
+            rate = last_matches(tables, 2023, 10, key)["rescored_points"].mean()
             for horizon, n in ((0, 1), (1, 1), (2, 0), (3, 1), (4, 2), (5, 1)):
                 assert xp_of(rolling, key, horizon) == pytest.approx(n * rate)
             ep_next_ = snapshot.loc[key, "ep_next"]
@@ -379,6 +391,48 @@ def test_ep_next_without_snapshots_is_zero_and_warns(caplog):
     assert len(warnings) == 1 and "no player snapshot" in warnings[0].getMessage()
     # The rolling model does not need snapshots.
     assert (xp_rolling(view(tables, 2023, 10))["xp"] != 0).any()
+
+
+def test_ep_next_fade_starts_at_ep_next_and_fades_to_the_long_run_rate():
+    tables = synthetic_tables(seasons=(2022, 2023), blank=(2023, 12, 1))  # club 1: GW12 -> 14
+    v = view(tables, 2023, 10)
+    fade, ep = xp_ep_next_fade(v), xp_ep_next(v)
+    target = ep[ep["horizon"] == 0].reset_index(drop=True)
+    pd.testing.assert_frame_equal(fade[fade["horizon"] == 0].reset_index(drop=True), target)
+    assert (FADE, LONG_RUN_N) == (0.5, 10)
+    snapshot = latest_snapshot(tables, 2023, 10)
+    for club in (1, 2, 9):
+        n_by_gw = fixtures_of(tables, 2023, club)
+        for key in club_players(tables, club):
+            ep_rate = snapshot.loc[key, "ep_next"]
+            ep_rate = 0.0 if pd.isna(ep_rate) else float(ep_rate)  # one fixture in GW10
+            last = last_matches(tables, 2023, 10, key, n=LONG_RUN_N)
+            assert len(last) == LONG_RUN_N
+            long_run = last["rescored_points"].mean()
+            for horizon in range(1, HORIZON + 1):
+                w = 0.5**horizon
+                n = n_by_gw.get(10 + horizon, 0)
+                expected = n * (w * ep_rate + (1 - w) * long_run)
+                assert xp_of(fade, key, horizon) == pytest.approx(expected), (key, horizon)
+    assert xp_of(fade, club_players(tables, 1)[5], 2) == 0  # the blank
+
+
+def test_ep_next_fade_without_matches_fades_to_zero_and_without_snapshots_is_zero(caplog):
+    tables = synthetic_tables()
+    snaps = tables["player_snapshot"]
+    newest = latest_snapshot(tables, 2023, 2)["snapshot_at"].iloc[0]
+    signing = snaps[snaps["snapshot_at"] == newest].iloc[[0]]
+    signing = signing.assign(player_key=999_999, element_id=999, ep_next=4.0)
+    tables["player_snapshot"] = pd.concat([snaps, signing], ignore_index=True)
+    fade = xp_ep_next_fade(view(tables, 2023, 2))
+    new = fade[fade["player_key"] == 999_999].set_index("horizon")["xp"]
+    n_by_gw = fixtures_of(tables, 2023, int(signing["team_key"].iloc[0]))
+    for horizon, value in new.items():
+        assert value == pytest.approx(n_by_gw.get(2 + horizon, 0) * 4.0 * 0.5**horizon)
+    tables = synthetic_tables(snapshots=False)
+    with caplog.at_level("WARNING", logger="fplopt.models.baseline"):
+        xp = xp_ep_next_fade(view(tables, 2023, 10))
+    assert (xp["xp"] == 0).all() and "no player snapshot" in caplog.text
 
 
 def test_first_deadline_is_a_friday_in_august():
