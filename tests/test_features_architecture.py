@@ -526,7 +526,16 @@ def violations(
         for alias in node.names
         if alias.name in target.module_attrs
     }
+    # Such a module may only appear as `module.attr`: bound to another name (`clock = time`),
+    # passed on or stored, its attributes could be reached unchecked.
+    attribute_bases = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
     for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Name)
+            and node.id in restricted_aliases
+            and id(node) not in attribute_bases
+        ):
+            found.append(f"uses {restricted_aliases[node.id]} other than as an attribute base")
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             source = restricted_aliases.get(node.value.id)
             if source is not None and node.attr not in target.module_attrs[source]:
@@ -1215,5 +1224,31 @@ def f():
             "accesses time.time",
             "accesses time.sleep",
             "accesses time.localtime",
+        ]
+    )
+
+
+def test_restricted_modules_cannot_be_rebound():
+    """A restricted module bound to another name (`clock = time`) or passed on would let its
+    other attributes through unchecked (`clock.time()`), so it may only be used as
+    `module.attr`."""
+    source = """
+import time
+import pulp as pl
+
+def f(run):
+    clock = time
+    solver = pl
+    run(time)
+    pair = (time, 1)
+    return clock.time(), solver.PULP_CBC_CMD(), pair, time.perf_counter(), pl.LpProblem("x")
+"""
+    found = violations(source, OPTIMIZE_DIR / "search.py", OPTIMIZE_TARGET)
+    assert sorted(found) == sorted(
+        [
+            "uses time other than as an attribute base",
+            "uses pulp other than as an attribute base",
+            "uses time other than as an attribute base",
+            "uses time other than as an attribute base",
         ]
     )
