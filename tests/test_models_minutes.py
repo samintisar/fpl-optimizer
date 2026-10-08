@@ -55,7 +55,8 @@ def test_predictions_are_probabilities_with_fixed_schema(league, fitted):
     out = predict_minutes(view(league), fitted)
     assert list(out.columns) == list(MINUTES_COLUMNS)
     assert out.index.equals(pd.RangeIndex(len(out)))
-    assert (out.dtypes.iloc[:7] == "int64").all() and (out.dtypes.iloc[7:] == "float64").all()
+    assert (out.dtypes.iloc[:7] == "int64").all() and (out.dtypes.iloc[7:-1] == "float64").all()
+    assert out["banned"].dtype == bool
     keys = ["player_key", "horizon", "fixture_key"]
     assert out.equals(out.sort_values(keys, kind="mergesort").reset_index(drop=True))
     assert not out.duplicated(["player_key", "fixture_key"]).any()

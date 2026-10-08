@@ -152,6 +152,23 @@ def test_flags_move_p_start_and_teams_stay_normalized(league, fits):
     assert (sums - 11).abs().median() < 1e-6
 
 
+def test_banned_fixtures_keep_their_residual(league, fits):
+    """A predicted ban keeps the minutes model's P(start) through the flag mapping and the
+    team re-normalization, even for a flagged player."""
+    minutes, fit = fits
+    v = view(league)
+    predicted = predict_minutes(v, minutes)
+    snaps = league["player_snapshot"]
+    newest = snaps[newest_snapshot(league, v.deadline)]
+    injured = newest.loc[newest["status"] == "i", "player_key"]
+    ban = predicted["player_key"].isin(injured)
+    assert ban.any()
+    adjusted = adjust_minutes(v, predicted.assign(banned=ban.to_numpy()), fit)
+    assert adjusted["banned"].tolist() == ban.tolist()
+    np.testing.assert_allclose(adjusted.loc[ban, "p_start"], predicted.loc[ban, "p_start"])
+    np.testing.assert_allclose(adjusted.loc[ban, "p_sub"], predicted.loc[ban, "p_sub"])
+
+
 def test_a_return_date_zeroes_the_fixtures_before_it(league, fits):
     minutes, _ = fits
     identity = AvailabilityFit(1.0, (), minutes.minutes_sub, 5.0, 2.0, 0)

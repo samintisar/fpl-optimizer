@@ -354,6 +354,7 @@ Blending rule everywhere: equal weights or a single fixed weight — never weigh
     - player P(CS) Brier 0.056; P(goal) Brier 0.030;
     - e_goals mean 0.0402 vs 0.0402 realized.
   - **Flag check (§4) on validate:** no separate with/without-flags run was made; the P(start) reliability above includes the flag layer.
+- **After the validate run** (PR #28 review, 2026-10-08): `adjust_minutes` reset every row to "free", so the flag mapping and the team re-normalization also moved fixtures in a predicted ban, overriding the fitted ban residual. The minutes frame now carries `banned`; banned fixtures are left out of the mapping and held fixed. This affects only banned fixtures of flagged-era deadlines (~47 banned player-fixtures per season). The calibration table was regenerated: develop MSE h0 4.2609 (was 4.2608), MSE h1–5 4.6845 (unchanged). The validate run was not repeated.
 
 ### 6.1 Team model — market primary
 **Market-implied λ (primary for GWs with odds, typically GW+1, sometimes +2):**

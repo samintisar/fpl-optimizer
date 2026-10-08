@@ -20,8 +20,10 @@ a leap year) is ignored.
 **Mapping** (players without a parsed date): logit p' = slope · logit p + γ[category,
 min(h, 3)], one shared slope, one offset per category and horizon bucket (the flag is about
 the next round; later GWs regress). p_sub's conditional P(sub | no start) is scaled by
-min(1, p'/p): a player unlikely to start is also less likely to come off the bench. Then the
-team normalization (`finish_minutes`) runs again, with zeroed players fixed at 0.
+min(1, p'/p): a player unlikely to start is also less likely to come off the bench.
+Fixtures in a predicted ban (`banned`) are left out of the mapping: they keep the minutes
+model's ban residual, which was fitted on rule-banned rows whatever their flags. Then the
+team normalization (`finish_minutes`) runs again, with zeroed and banned players fixed.
 
 **Fit (`fit_availability(view, minutes_fit)`), leak-free and walk-forward:** every GW
 deadline d of the visible seasons with a player snapshot before d, before the view's
@@ -313,12 +315,15 @@ def adjust_minutes(view: AsOfView, minutes: pd.DataFrame, fit: AvailabilityFit) 
         [offsets.get((c, int(b)), np.nan) for c, b in zip(category, bucket, strict=True)],
         dtype="float64",
     )
-    mapped = back.isna().to_numpy(dtype=bool) & ~np.isnan(offset) & (p > 0)
+    # Predicted bans keep their residual P(start) (fitted on rule-banned rows, flags
+    # included); the mapping is for players the minutes model predicts freely.
+    banned = cond["banned"].to_numpy(dtype=bool)
+    mapped = back.isna().to_numpy(dtype=bool) & ~np.isnan(offset) & (p > 0) & ~banned
     adjusted = expit(fit.slope * logit(np.clip(p, EPS, 1 - EPS)) + np.nan_to_num(offset))
     ratio = np.where(p > 0, adjusted / np.where(p > 0, p, 1.0), 1.0)
     new_p = np.where(mapped, adjusted, p)
     new_csub = np.where(mapped, csub * np.minimum(ratio, 1.0), csub)
     new_p = np.where(out_until_back, 0.0, new_p)
     new_csub = np.where(out_until_back, 0.0, new_csub)
-    cond = cond.assign(p_start=new_p, csub=new_csub, fixed=new_p <= 0)
+    cond = cond.assign(p_start=new_p, csub=new_csub, fixed=banned | (new_p <= 0))
     return finish_minutes(cond, fit.minutes_sub, fit.max_shift, fit.max_scale)

@@ -85,7 +85,9 @@ MAX_MINUTES = 90.0
 EPS = 1e-6
 BISECTIONS = 60
 KEYS = tuple(name for name, _ in PREDICTION_KEYS if name != "kickoff_time")
-MINUTES_COLUMNS = (*KEYS, "p_start", "p_60", "p_sub", "e_minutes", "p_play")
+# `banned`: the fixture falls in a predicted ban (P(start) is the ban residual or 0, held
+# fixed by the team normalization and the availability layer).
+MINUTES_COLUMNS = (*KEYS, "p_start", "p_60", "p_sub", "e_minutes", "p_play", "banned")
 SORT_BY = ("player_key", "horizon", "fixture_key")
 
 
@@ -239,8 +241,9 @@ def finish_minutes(
 ) -> pd.DataFrame:
     """Team normalization and the output columns. `frame` has the KEYS and per row
     `p_start`, `c60` (P(60+ | start)), `csub` (P(sub | no start)), `m_start` (E[minutes |
-    start]) and `fixed` (True: p_start and csub stay as given, e.g. 0 for a ban); returns
-    MINUTES_COLUMNS (see the module docstring), sorted, RangeIndex."""
+    start]) and `fixed` (True: p_start and csub stay as given, e.g. 0 for a ban), and
+    optionally `banned` (carried to the output; False without it); returns MINUTES_COLUMNS
+    (see the module docstring), sorted, RangeIndex."""
     groups = (
         frame["fixture_key"].astype("int64").to_numpy() * 1_000_000
         + frame["team_key"].astype("int64").to_numpy()
@@ -266,10 +269,12 @@ def finish_minutes(
         p_sub=p_sub,
         e_minutes=e_minutes,
         p_play=p_play,
+        banned=frame["banned"].to_numpy(dtype=bool) if "banned" in frame else False,
     )
     dtypes = {
         **{name: "int64" for name in KEYS},
-        **{name: "float64" for name in MINUTES_COLUMNS[len(KEYS) :]},
+        **{name: "float64" for name in MINUTES_COLUMNS[len(KEYS) : -1]},
+        "banned": "bool",
     }
     out = out[list(MINUTES_COLUMNS)].astype(dtypes)
     return out.sort_values(list(SORT_BY), kind="mergesort").reset_index(drop=True)
@@ -278,7 +283,7 @@ def finish_minutes(
 def conditionals(minutes: pd.DataFrame, minutes_sub: float) -> pd.DataFrame:
     """The inverse of `finish_minutes`' last step: from a MINUTES_COLUMNS frame, its KEYS
     with p_start, c60, csub, m_start (0 where p_start is 0; 1 / 0 for c60 / csub when
-    undefined) and fixed (False)."""
+    undefined), `banned` and fixed (= banned: a re-normalization keeps bans as they are)."""
     p_start = minutes["p_start"].to_numpy(dtype="float64")
     p_sub = minutes["p_sub"].to_numpy(dtype="float64")
     started = p_start > 0
@@ -292,7 +297,8 @@ def conditionals(minutes: pd.DataFrame, minutes_sub: float) -> pd.DataFrame:
         c60=np.clip(c60, 0.0, 1.0),
         csub=np.clip(csub, 0.0, 1.0),
         m_start=np.clip(m_start, 0.0, MAX_MINUTES),
-        fixed=False,
+        banned=minutes["banned"].to_numpy(dtype=bool),
+        fixed=minutes["banned"].to_numpy(dtype=bool),
     )
 
 
@@ -315,6 +321,6 @@ def predict_minutes(view: AsOfView, fit: MinutesFit) -> pd.DataFrame:
     csub = np.where(banned, fit.ban_sub, csub)
     m_start = c60 * fit.minutes_sixty + (1.0 - c60) * fit.minutes_short
     parts = frame[list(KEYS)].assign(
-        p_start=p_start, c60=c60, csub=csub, m_start=m_start, fixed=banned
+        p_start=p_start, c60=c60, csub=csub, m_start=m_start, fixed=banned, banned=banned
     )
     return finish_minutes(parts, fit.minutes_sub, params.max_shift, params.max_scale)
