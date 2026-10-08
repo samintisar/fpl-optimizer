@@ -169,6 +169,8 @@ POLICY_PARAMS: dict[str, dict[str, Callable[[str], Any]]] = {
         "hit_margin": float,
         "max_hits": parse_max_hits,
         "itb_value": float,
+        "bench_from_minutes": parse_flag,
+        "min_minutes": float,
         "chips": parse_flag,
     },
 }

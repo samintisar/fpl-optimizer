@@ -368,6 +368,10 @@ def _optimizer_extras(params: OptimizerParams) -> list[str]:
         parts.append(f"nodes={params.node_limit}")
     if params.tie_epsilon != default.tie_epsilon:
         parts.append(f"eps={params.tie_epsilon!r}")
+    if params.bench_from_minutes != default.bench_from_minutes:
+        parts.append(f"bfm={int(params.bench_from_minutes)}")
+    if params.min_minutes != default.min_minutes:
+        parts.append(f"minm={float(params.min_minutes)!r}")
     return parts
 
 

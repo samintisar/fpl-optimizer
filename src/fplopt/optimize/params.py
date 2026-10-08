@@ -18,7 +18,15 @@ reference check (Phase 4 Task 4) compares like with like:
   players, and with uninformative xP (2016/17 GW1, no history) it sold down to the
   cheapest squad and banked £36m. optimizer(rolling, max_hits 0) gained +0.79 pts/GW
   (80% CI +0.24 to +1.38, 2016/17-2024/25) from 0.08 -> 0.
-- `bench_weights`: (GK slot, outfield slots 1–3), open-fpl-solver's `bench_weights`.
+- `bench_weights`: (GK slot, outfield slots 1–3), open-fpl-solver's `bench_weights`: the
+  fixed fallback weights (PLAN §7 *Bench*). With `bench_from_minutes` (default) and an xP
+  frame that carries the minutes model's `p_play` (`v1`), each horizon GW gets its own
+  weights from P(starter doesn't play) instead (`minutes.minutes_bench_weights`); frames
+  without `p_play` (the baseline models) keep `bench_weights` exactly.
+- `min_minutes`: the expected-minutes floor (PLAN §7 *Pruning*): with an xP frame that
+  carries `e_minutes` (`v1`), a non-owned player with fewer expected minutes summed over the
+  horizon is not a candidate (`prune.prune`). 0 = no floor; frames without `e_minutes`
+  are not floored.
 - `decay`: GW t (horizon offset t, target GW t = 0) is weighted decay**t, as
   open-fpl-solver's `decay_base ** (w − next_gw)`.
 - Hits cost `rules.hit_cost + hit_margin` each, inside the decay (open-fpl-solver's
@@ -81,6 +89,7 @@ DEFAULT_CHIP_VALUE = MappingProxyType({"wildcard": 6.0, "freehit": 4.0, "bboost"
 DEFAULT_PRUNE_N = MappingProxyType({1: 20, 2: 60, 3: 60, 4: 30})
 DEFAULT_NODE_LIMIT = 20_000  # HiGHS mip_max_nodes: a deterministic safety net
 DEFAULT_TIE_EPSILON = 1e-4  # points per player bought (tie-break, module docstring)
+DEFAULT_MIN_MINUTES = 0.0  # expected-minutes floor over the horizon (module docstring)
 
 
 @dataclass(frozen=True)
@@ -92,12 +101,13 @@ class OptimizerParams:
     `threads` its thread count (1 for reproducibility), `node_limit` its `mip_max_nodes`
     (deterministic safety net; None = none) and `time_limit` a wall-clock cap in seconds
     (None = none, the default; interactive use only, see the module docstring).
-    `tie_epsilon` is the tie-break cost per player bought.
+    `tie_epsilon` is the tie-break cost per player bought. `bench_from_minutes` and
+    `min_minutes`: the minutes model's bench weights and candidate floor (module docstring).
 
-    Validation: `horizon` ≥ 1, `decay` in (0, 1], `itb_value`, `hit_margin` and
-    `tie_epsilon` ≥ 0, `max_hits` ≥ 0 or None (dominance pruning assumes a cheaper player
-    with ≥ xP is never worse, which a negative `itb_value` would break; a negative hit
-    margin would make hits cheaper than the rules' cost)."""
+    Validation: `horizon` ≥ 1, `decay` in (0, 1], `itb_value`, `hit_margin`,
+    `tie_epsilon` and `min_minutes` ≥ 0, `max_hits` ≥ 0 or None (dominance pruning
+    assumes a cheaper player with ≥ xP is never worse, which a negative `itb_value` would
+    break; a negative hit margin would make hits cheaper than the rules' cost)."""
 
     horizon: int = 6
     decay: float = 0.85
@@ -114,6 +124,8 @@ class OptimizerParams:
     time_limit: float | None = None
     node_limit: int | None = DEFAULT_NODE_LIMIT
     tie_epsilon: float = DEFAULT_TIE_EPSILON
+    bench_from_minutes: bool = True
+    min_minutes: float = DEFAULT_MIN_MINUTES
 
     def __post_init__(self) -> None:
         if self.horizon < 1:
@@ -128,6 +140,7 @@ class OptimizerParams:
             "itb_value": self.itb_value,
             "hit_margin": self.hit_margin,
             "tie_epsilon": self.tie_epsilon,
+            "min_minutes": self.min_minutes,
         }
         for name, raw in nonnegative.items():
             value = float(raw)
@@ -140,6 +153,7 @@ class OptimizerParams:
             # which the FT dynamics (exact) cannot express anyway; keep them meaningful.
             raise ValueError(f"ft_value keys must be >= 1 and values >= 0, got {ft_value}")
         object.__setattr__(self, "ft_value", _frozen(ft_value))
+        object.__setattr__(self, "bench_from_minutes", bool(self.bench_from_minutes))
         if len(self.bench_weights) != 4:
             raise ValueError(f"bench_weights needs 4 values, got {self.bench_weights}")
         object.__setattr__(self, "bench_weights", tuple(float(w) for w in self.bench_weights))
@@ -183,6 +197,8 @@ class OptimizerParams:
                 self.time_limit,
                 self.node_limit,
                 self.tie_epsilon,
+                self.bench_from_minutes,
+                self.min_minutes,
             ),
         )
 

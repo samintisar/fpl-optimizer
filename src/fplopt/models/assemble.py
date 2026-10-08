@@ -56,10 +56,13 @@ xP = their sum.
 a blank is 0). Probabilities are per player-GW only for one fixture: P(start), P(plays),
 P(60+), the 3 minutes classes, P(clean sheet) (= p_60 · team P(CS): the player's FPL clean
 sheet), P(goal ≥ 1); NaN in a double, 0 in a blank (P(0 minutes) 1). Expected minutes,
-goals and assists are sums. The frame keeps the standard xP columns and dtypes first
-(`XP_DTYPES`); the extra columns are the ones `fplopt.evaluate.metrics.COMPONENTS`
-scores. The backtester, policies and optimizer read only player_key, gw, gw_index, horizon
-and xp.
+goals and assists are sums. `p_play_gw` (`GW_EXTRAS`) is P(plays in at least one of the
+GW's fixtures), 1 − Π_f (1 − p_play_f) with the fixtures independent: p_play in a single
+GW, 0 in a blank, defined in a double too (for the optimizer's bench weights, Phase 5b
+Task 8; not scored). The frame keeps the standard xP columns and dtypes first
+(`XP_DTYPES`); then `GW_COMPONENTS`, the ones `fplopt.evaluate.metrics.COMPONENTS` scores,
+and `GW_EXTRAS`. The backtester and policies read player_key, gw, gw_index, horizon and
+xp; the optimizer also reads p_play, p_play_gw and e_minutes (`fplopt.optimize.minutes`).
 
 `MODELS["v1"]` = `FittedModel(fit_v1, predict_v1)`. No state, no file access except the
 rules config (`backtest_rules` reads `config/scoring`, never `data/`).
@@ -98,6 +101,7 @@ from fplopt.models.team import TeamFit, TeamParams, fit_team, team_lambdas
 __all__ = (
     "FIXTURE_COLUMNS",
     "GW_COMPONENTS",
+    "GW_EXTRAS",
     "POINT_COLUMNS",
     "V1Fit",
     "V1Params",
@@ -166,6 +170,9 @@ GW_PROBABILITIES = (
 )
 GW_SUMS = ("e_minutes", "e_goals", "e_assists")
 GW_COMPONENTS = (*GW_PROBABILITIES, *GW_SUMS)
+# Per player-GW columns after the components, not scored: P(plays in >= 1 of the GW's
+# fixtures), defined in doubles (the optimizer's bench weights).
+GW_EXTRAS = ("p_play_gw",)
 POISSON_CAP = 40  # Poisson sums run over N = 0..40 (tail < 1e-15 for rates below 10)
 SHORT_MAX_FRACTION = 59.0 / 90.0
 SAVES_FOR_BONUS = 3  # the bonus regression's `saves3` = saves // 3
@@ -467,13 +474,15 @@ def gw_frame(view: AsOfView, fixtures: pd.DataFrame) -> pd.DataFrame:
         p_min_0=1.0 - fixtures["p_play"],
         p_min_1_59=np.clip(fixtures["p_play"] - fixtures["p_60"], 0.0, None),
         p_min_60=fixtures["p_60"],
+        p_dnp=1.0 - fixtures["p_play"],
     )
     keys = ["player_key", "gw", "gw_index", "horizon"]
     grouped = rows.groupby(keys, sort=True)
     sums = grouped[["xp", *GW_SUMS]].sum()
     firsts = grouped[list(GW_PROBABILITIES)].first()
     counts = grouped.size().rename("n")
-    per_gw = sums.join(firsts).join(counts).reset_index()
+    plays = (1.0 - grouped["p_dnp"].prod()).rename("p_play_gw")
+    per_gw = sums.join(firsts).join(counts).join(plays).reset_index()
     double = per_gw["n"].to_numpy() > 1
     for column in GW_PROBABILITIES:
         per_gw[column] = np.where(double, np.nan, per_gw[column].to_numpy(dtype="float64"))
@@ -489,12 +498,12 @@ def gw_frame(view: AsOfView, fixtures: pd.DataFrame) -> pd.DataFrame:
             f"per-fixture rows, e.g. players {sorted(dropped['player_key'].unique())[:10]}"
         )
     blank = out["n"].isna().to_numpy()
-    for column in ("xp", *GW_COMPONENTS):
+    for column in ("xp", *GW_COMPONENTS, *GW_EXTRAS):
         values = out[column].to_numpy(dtype="float64")
         out[column] = np.where(blank, 1.0 if column == "p_min_0" else 0.0, values)
     base = [name for name, _ in XP_DTYPES]
-    out = out[[*base, *GW_COMPONENTS]].astype(
-        {**dict(XP_DTYPES), **{c: "float64" for c in GW_COMPONENTS}}
+    out = out[[*base, *GW_COMPONENTS, *GW_EXTRAS]].astype(
+        {**dict(XP_DTYPES), **{c: "float64" for c in (*GW_COMPONENTS, *GW_EXTRAS)}}
     )
     return out.sort_values(["player_key", "horizon"], kind="mergesort").reset_index(drop=True)
 

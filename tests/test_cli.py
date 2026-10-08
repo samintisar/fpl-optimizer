@@ -454,6 +454,28 @@ def test_parse_optimizer_policy_spec():
     assert itb.name == "optimizer(rolling,mh=0,m=0.0,itb=0.08)" and not itb.chips
 
 
+def test_parse_optimizer_minutes_keys():
+    """Phase 5b Task 8: the minutes-based bench weights can be switched off and the
+    expected-minutes floor set from a spec; the defaults keep the name unchanged."""
+    spec = cli.parse_policy_spec("optimizer:v1:bench_from_minutes=0,min_minutes=45")
+    assert spec.params == (("bench_from_minutes", 0), ("min_minutes", 45.0))
+    assert cli.parse_policy_spec(str(spec)) == spec
+    policy = spec.build()
+    assert policy.params.bench_from_minutes is False and policy.params.min_minutes == 45.0
+    assert policy.name == "optimizer(v1,mh=0,m=0.0,bfm=0,minm=45.0)"
+    default = cli.parse_policy_spec("optimizer:v1").build()
+    assert default.params.bench_from_minutes is True
+    assert default.name == "optimizer(v1,mh=0,m=0.0)"
+    on = cli.parse_policy_spec("optimizer:v1:bench_from_minutes=1").build()
+    assert on.name == default.name
+    with pytest.raises(argparse.ArgumentTypeError, match="not a valid 0/1 flag"):
+        cli.parse_policy_spec("optimizer:v1:bench_from_minutes=2")
+    with pytest.raises(argparse.ArgumentTypeError, match="min_minutes must be"):
+        cli.parse_policy_spec("optimizer:v1:min_minutes=-1")
+    with pytest.raises(argparse.ArgumentTypeError, match="no parameter 'bench_from_minutes'"):
+        cli.parse_policy_spec("greedy:v1:bench_from_minutes=0")
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [

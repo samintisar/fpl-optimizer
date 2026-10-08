@@ -3,6 +3,9 @@
 Which players the MILP may use, decided per position (element_type):
 
 1. **Owned players are always kept** (they can be held, sold or benched).
+1a. **Minutes floor** (only with `minutes`, PLAN §7 *Pruning*): a non-owned player with
+   fewer than `min_minutes` expected minutes over the horizon is dropped first, so top-N
+   and dominance see only the players above the floor.
 2. **Top-N:** the `prune_n[et]` best by horizon xP (Σ_t decay**h_t · xp_t) and the
    `prune_n[et]` best by horizon xP per price. A position missing from `prune_n` keeps every
    player; `prune_n=None` skips this step.
@@ -61,9 +64,13 @@ def prune(
     rules: Rules,
     prune_n: Mapping[int, int] | None,
     dominated: bool,
+    minutes: np.ndarray | None = None,
+    min_minutes: float = 0.0,
 ) -> np.ndarray:
     """The kept `player_key`s, sorted. Arrays are aligned per player (`xp` is players ×
-    horizon GWs, `team_key` the club); `owned`/`buyable` are boolean masks."""
+    horizon GWs, `team_key` the club); `owned`/`buyable` are boolean masks. `minutes`
+    (expected minutes over the horizon, per player) with `min_minutes` > 0 applies the
+    minutes floor; None (a model without minutes) or a floor of 0 skips it."""
     keys = np.asarray(keys, dtype="int64")
     if len(np.unique(keys)) != len(keys):
         raise ValueError("prune: duplicate player keys")
@@ -74,14 +81,18 @@ def prune(
     buyable = np.asarray(buyable, dtype=bool)
     xp = np.asarray(xp, dtype="float64").reshape(len(keys), -1)
     hxp = horizon_xp(xp, np.asarray(horizons), decay)
+    eligible = np.ones(len(keys), dtype=bool)
+    if minutes is not None and min_minutes > 0:
+        minutes = np.asarray(minutes, dtype="float64")
+        eligible = owned | (np.nan_to_num(minutes, nan=0.0) >= min_minutes)
 
     keep = owned.copy()
     if prune_n is None:
-        keep[:] = True
+        keep[:] = eligible
     else:
         value = hxp / np.maximum(price, 1)
         for et in np.unique(element_type).tolist():
-            idx = np.flatnonzero((element_type == et) & ~owned & buyable)
+            idx = np.flatnonzero((element_type == et) & ~owned & buyable & eligible)
             n = prune_n.get(int(et))
             if n is None:
                 keep[idx] = True

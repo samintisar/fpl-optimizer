@@ -12,7 +12,13 @@ context into plain, immutable data the MILP is built from:
   his buy price;
 - the horizon GWs are those of the xP frame with `horizon < params.horizon`, so near the
   season's end the horizon is shorter. Missing xP counts as 0 (NaN too);
-- candidates are pruned (`prune.prune`); owned players are always candidates.
+- candidates are pruned (`prune.prune`); owned players are always candidates. With a
+  frame that carries `e_minutes` (`v1`) and `params.min_minutes` > 0, non-owned players
+  below the expected-minutes floor are dropped first (`minutes.horizon_minutes`);
+- bench weights: with `params.bench_from_minutes` and a frame that carries `p_play`
+  (`v1`), per horizon GW from the incumbent squad's P(starter doesn't play)
+  (`minutes.minutes_bench_weights`, `PlanInput.bench_weights`); otherwise None, and the
+  model uses the fixed `params.bench_weights` (the baseline models, unchanged).
 
 Pure: no I/O.
 """
@@ -26,6 +32,7 @@ import pandas as pd
 
 from fplopt.backtest.rules import Rules
 from fplopt.backtest.state import POOL_COLUMNS, SquadState, refresh, selling_price
+from fplopt.optimize.minutes import horizon_minutes, minutes_bench_weights
 from fplopt.optimize.params import OptimizerParams
 from fplopt.optimize.prune import prune
 
@@ -64,7 +71,8 @@ class PlanInput:
     included), sorted by `player_key`; `n_pool` is the pool size before pruning. `bank` is in
     tenths of £m and `free_transfers` the FTs for the first horizon GW (ignored when
     `gw1`, the unlimited pre-season GW). `state` is the refreshed squad state (chips used,
-    for the chip scenarios)."""
+    for the chip scenarios). `bench_weights`: per horizon GW (GK slot, outfield slots) from
+    the minutes model, or None for the fixed `params.bench_weights` (`gw_bench_weights`)."""
 
     state: SquadState
     rules: Rules
@@ -74,6 +82,14 @@ class PlanInput:
     free_transfers: int
     gw1: bool
     n_pool: int
+    bench_weights: tuple[tuple[float, ...], ...] | None = None
+
+    def gw_bench_weights(self, t: int, params: OptimizerParams) -> tuple[float, ...]:
+        """Horizon GW t's bench weights without a chip: the minutes-based ones when set,
+        else the fixed `params.bench_weights`."""
+        if self.bench_weights is None:
+            return params.bench_weights
+        return self.bench_weights[t]
 
     @property
     def owned_keys(self) -> tuple[int, ...]:
@@ -135,6 +151,7 @@ class PlanInput:
         if xp_rows.shape[1] != len(horizons):  # empty matrix: no xP rows at all
             xp_rows = np.zeros((len(keys), len(horizons)))
         buyable = np.isin(keys, pool["player_key"].to_numpy())
+        minutes = horizon_minutes(xp, horizons, keys) if params.min_minutes > 0 else None
         kept = prune(
             keys=keys,
             element_type=frame["element_type"].to_numpy(dtype="int64"),
@@ -148,6 +165,8 @@ class PlanInput:
             rules=rules,
             prune_n=params.prune_n,
             dominated=params.prune_dominated,
+            minutes=minutes,
+            min_minutes=params.min_minutes,
         )
         kept_set = set(kept.tolist())
 
@@ -172,6 +191,10 @@ class PlanInput:
                     xp=tuple(float(v) for v in xp_rows[row]),
                 )
             )
+        bench_weights = None
+        if params.bench_from_minutes:
+            squad = [(h.player_key, h.element_type) for h in state.holdings]
+            bench_weights = minutes_bench_weights(squad, xp, horizons, rules, params.bench_weights)
         return cls(
             state=state,
             rules=rules,
@@ -181,6 +204,7 @@ class PlanInput:
             free_transfers=state.free_transfers,
             gw1=state.gw_index == 1,
             n_pool=len(pool),
+            bench_weights=bench_weights,
         )
 
 
