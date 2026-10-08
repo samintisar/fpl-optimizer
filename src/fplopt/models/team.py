@@ -10,8 +10,9 @@ plan, *Team model* and Task 2).
   Asian handicap.
 - De-vig: the power method (`devig_power`: k with Σ (1/odds_i)^k = 1), or Shin's method
   (`devig_shin`), per market: 1X2, O/U 2.5 and the Asian handicap's two sides.
-- λ_home, λ_away: weighted least squares (`scipy.optimize.least_squares`, fixed start, fixed
-  tolerances, analytic Jacobian, λ in `LAMBDA_RANGE`)
+- λ_home, λ_away: weighted least squares (`scipy.optimize.least_squares`, Levenberg-Marquardt
+  on log λ, fixed start `MARKET_START`, fixed tolerances, analytic Jacobian; a solution
+  outside `LAMBDA_RANGE` counts as not converged and the fixture falls back to the ratings)
   of the Dixon-Coles score distribution (`dc_matrix`: goals 0..`MAX_GOALS` per side,
   low-score correction ρ = `RHO`, renormalized) against the de-vigged home/draw/away,
   over/under and, when present, both AH sides.
@@ -29,10 +30,11 @@ plan, *Team model* and Task 2).
 z = the club's Elo (`rating_after` of its newest visible `team_rating` row, the current
 rating) minus the mean Elo of the newest season's clubs, over `ELO_SCALE`. The deviations
 u, v carry a ridge penalty `prior_strength / 2 · Σ (u² + v²)`, so a club with little or no
-history (promoted) sits at its Elo prior. Fitted by time-decayed (half-life
-`half_life_days`, rows older than `MIN_WEIGHT` dropped) weighted quasi-Poisson MLE
-(`scipy.optimize.minimize`, L-BFGS-B, analytic gradient, fixed start) on every finished
-match visible in the view. Target per side: `w · market λ + (1 − w) · stats` with
+history (promoted) sits at its Elo prior. Fitted by time-decayed (weight
+0.5^(age / `half_life_days`); rows weighing less than `MIN_WEIGHT` are dropped) weighted
+quasi-Poisson MLE (`scipy.optimize.minimize`, trust-exact Newton with analytic gradient and
+Hessian, fixed start)
+on every finished match visible in the view. Target per side: `w · market λ + (1 − w) · stats` with
 stats = `XG_WEIGHT · xG + (1 − XG_WEIGHT) · goals` (xG including penalties: Understat
 `us_xg`, else summed FPL `fpl_xg`, else football-data `fd_xg`; goals alone without any), and
 the market λ from the match's own pre-match odds (the stats target alone where it has none).
@@ -81,8 +83,8 @@ XG_WEIGHT = 0.7  # stats target = XG_WEIGHT · xG + (1 − XG_WEIGHT) · goals
 ELO_SCALE = 100.0
 MIN_WEIGHT = 0.01  # training rows whose decay weight is below this are dropped
 MAX_WINDOW_DAYS = 365.25 * 50  # match_history's look-back cap (any half-life)
-FIT_GTOL = 1e-9
-FIT_MAXITER = 2000
+FIT_GTOL = 1e-6  # on the objective per unit of weight (gradients reach ~1e-8 at best)
+FIT_MAXITER = 200
 DEVIG_METHODS = ("power", "shin")
 BISECTION_STEPS = 100
 OUTCOMES_1X2 = ("home", "draw", "away")
@@ -113,13 +115,17 @@ TEAM_DTYPES = (
     ("p_cs", "float64"),
     ("source", "str"),
 )
-SOURCES = ("market", "ratings", "stats")
+SOURCES = ("market", "ratings", "stats")  # team_lambdas `source` values
 __all__ = (
+    "DEVIG_METHODS",
     "MAX_GOALS",
     "RHO",
+    "SOURCES",
     "TEAM_DTYPES",
     "TeamFit",
     "TeamParams",
+    "ah_home_probability",
+    "ah_stakes",
     "dc_matrix",
     "devig",
     "devig_power",
@@ -137,12 +143,18 @@ __all__ = (
 
 @dataclass(frozen=True)
 class TeamParams:
-    """Team-model settings. `half_life_days` and `market_weight` (w) are tuned on develop
-    (dev/team_model_eval.py); the rest are fixed."""
+    """Team-model settings. `half_life_days`, `market_weight` (w) and `prior_strength` were
+    chosen once on develop by `dev/team_model_eval.py` (2026-10-08): a joint grid (half-life
+    30/45/60/90/180/365 d × w 0/0.25/0.5/0.75/1 × prior 1/2/5/20, 120 variants) scored by
+    the ratings' mean per-side Poisson log-likelihood over horizons 1–5, 2017/18–2022/23.
+    Best: 45 d, 0.75, 2 (−1.4516; the surface is flat near it: 60 d / 0.75 / 2 −1.4517,
+    90 d / 0.75 / 5 −1.4521; stats only (w 0) at best −1.4551, market only (w 1) −1.4522).
+    Shin's de-vig scores the same as the power method on develop (market λ at horizon 0:
+    −1.44768 vs −1.44775 per side)."""
 
-    half_life_days: float = 240.0
+    half_life_days: float = 45.0
     market_weight: float = 0.75
-    prior_strength: float = 20.0
+    prior_strength: float = 2.0
     rho: float = RHO
     devig: str = "power"
 
@@ -599,7 +611,8 @@ def fit_ratings(
     params: TeamParams | None = None,
 ) -> TeamFit:
     """The ratings fit on `matches` (`match_history` rows; those available before
-    `cutoff` are used) with Elo priors from `elo` (team_key -> rating); `teams` are rated
+    `cutoff` are used, so a later view's history gives the same fit provided its look-back
+    window covers this cutoff's) with Elo priors from `elo` (team_key -> rating); `teams` are rated
     even without matches (the season's clubs: their Elo prior). Deterministic: rows sorted
     by fixture_key, fixed start, fixed tolerances."""
     params = TeamParams() if params is None else params
@@ -622,45 +635,46 @@ def fit_ratings(
     z = np.array([(elo.get(t, center) - center) / ELO_SCALE for t in all_teams])
     z = np.nan_to_num(z, nan=0.0)
 
-    # Observations: home sides then away sides.
+    # Observations: home sides then away sides. Parameters
+    # x = [base, home, attack_slope, defence_slope, u (n), v (n)]; η = design @ x.
     hi = rows["home_team_key"].map(index).to_numpy(dtype="int64")
     ai = rows["away_team_key"].map(index).to_numpy(dtype="int64")
-    team = np.concatenate([hi, ai])
-    opp = np.concatenate([ai, hi])
-    is_home = np.concatenate([np.ones(len(rows)), np.zeros(len(rows))])
+    team, opp = np.concatenate([hi, ai]), np.concatenate([ai, hi])
+    m = len(team)
+    design = np.zeros((m, 4 + 2 * n))
+    design[:, 0] = 1.0
+    design[: len(rows), 1] = 1.0
+    design[:, 2] = z[team]
+    design[:, 3] = -z[opp]
+    design[np.arange(m), 4 + team] = 1.0
+    design[np.arange(m), 4 + n + opp] = -1.0
     y = np.concatenate([y_home, y_away])
     w = np.concatenate([weight, weight])
-    tau = params.prior_strength
+    ridge = np.concatenate([np.zeros(4), np.full(2 * n, params.prior_strength)])
+    # Per unit of total weight, so the gradient tolerance is relative to the data's size.
+    scale = 1.0 / max(float(w.sum()), 1.0)
+    w, ridge = w * scale, ridge * scale
 
-    # x = [base, home, attack_slope, defence_slope, u (n), v (n)]
     def objective(x: np.ndarray) -> tuple[float, np.ndarray]:
-        base, home, a_slope, d_slope = x[:4]
-        u, v = x[4 : 4 + n], x[4 + n :]
-        attack = a_slope * z + u
-        defence = d_slope * z + v
-        eta = base + home * is_home + attack[team] - defence[opp]
+        eta = design @ x
         mu = np.exp(eta)
-        loss = float(np.sum(w * (mu - y * eta)) + 0.5 * tau * (u @ u + v @ v))
-        r = w * (mu - y)
-        g_attack = np.bincount(team, weights=r, minlength=n)
-        g_defence = -np.bincount(opp, weights=r, minlength=n)
-        grad = np.concatenate(
-            [
-                [r.sum(), r @ is_home, g_attack @ z, g_defence @ z],
-                g_attack + tau * u,
-                g_defence + tau * v,
-            ]
-        )
-        return loss, grad
+        loss = float(w @ (mu - y * eta) + 0.5 * (ridge * x) @ x)
+        return loss, design.T @ (w * (mu - y)) + ridge * x
+
+    def hessian(x: np.ndarray) -> np.ndarray:
+        mu = np.exp(design @ x)
+        return (design * (w * mu)[:, None]).T @ design + np.diag(ridge)
 
     x0 = np.zeros(4 + 2 * n)
     x0[0] = math.log(1.35)
+    # Convex (log link, ridge): Newton trust region from a fixed start.
     result = minimize(
         objective,
         x0,
         jac=True,
-        method="L-BFGS-B",
-        options={"gtol": FIT_GTOL, "ftol": 1e-15, "maxiter": FIT_MAXITER, "maxcor": 30},
+        hess=hessian,
+        method="trust-exact",
+        options={"gtol": FIT_GTOL, "maxiter": FIT_MAXITER},
     )
     if not result.success:
         log.warning("team ratings fit at %s: %s", cutoff, result.message)

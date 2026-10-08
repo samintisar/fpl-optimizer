@@ -552,7 +552,10 @@ def test_rows_available_after_the_cutoff_are_not_used():
     tables = league(odds="visible")
     cut = deadline(tables, 2023, 6)
     view = DataStore(tables=tables).as_of(cut)
-    matches = match_history(DataStore(tables=tables).as_of(deadline(tables, 2023, 12)))
+    # A later view's history (every match: its look-back window covers the cutoff's).
+    later = DataStore(tables=tables).as_of(deadline(tables, 2023, 12))
+    matches = match_history(later, TeamParams(half_life_days=1e4))
+    assert (matches["available_at"] >= cut).any()
     elo = pd.Series(1500.0, index=range(1, 11))
     direct = fit_ratings(matches, elo, list(range(1, 11)), cut)
     assert direct == fit_team(view)
@@ -589,6 +592,7 @@ def test_team_lambdas_schema_and_determinism():
     upcoming = upcoming_fixtures(view).dropna(subset=["fixture_key"])
     assert len(first) == len(upcoming)
     assert sorted(first["horizon"].unique()) == list(range(6))
+    assert set(first["source"]) <= set(team.SOURCES)
     # Both sides of a fixture agree.
     pair = first.merge(first, on="fixture_key", suffixes=("", "_o"))
     pair = pair[pair["team_key"] != pair["team_key_o"]]
