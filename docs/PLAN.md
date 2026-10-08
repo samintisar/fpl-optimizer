@@ -302,6 +302,28 @@ Blending rule everywhere: equal weights or a single fixed weight — never weigh
   - Own goals (~3.5%) are removed from the non-penalty λ. FPL-assisted fraction of goals ≈ 0.87.
   - Penalties: P(taker) comes from `penalties_order` (main taker takes 90% of attempts when on the pitch) or from recent attempts, chained down the order by minutes. Club attempt rates and conversion are shrunk to the league.
   - Fit ≤ 1.3 s, predict ≤ 0.3 s.
+- **`v1`** (Task 5, `fplopt.models.assemble`, `.components`, `.calibration`; `MODELS["v1"]`):
+  - Points under `backtest_rules(season)`, per fixture, summed per GW:
+    - **bonus:** per-position regression on event indicators (last 4 seasons, weighted 0.7^age), applied to expected events;
+    - **GK saves:** Poisson on the opponent's market λ, with a shrunk keeper effect;
+    - **goals conceded:** −E[⌊N/2⌋] with N ~ Poisson(λ_against × fraction on pitch);
+    - **cards and own goals:** shrunk per-90 rates;
+    - **penalty misses:** from the shares' penalty goals and conversion;
+    - **clean sheets:** P(60+)·P(CS), which runs ~8% under realized because a player subbed off after 60 keeps a clean sheet his team later loses.
+  - **Bans:** a walk-forward residual P(start) instead of 0 (banned rows started 31% of the time).
+  - **Calibration:** expanding window by season (season S uses maps fit on the walk-forward predictions of 2017/18 … S−1; 2016/17 is burn-in). Only isotonic P(start) at horizons ≥ 1 improved develop metrics, so it is the only map kept. P(CS), P(goal) and the per-position linear xP map were worse and were dropped. Raw xP is already calibrated in the large: mean 1.317 predicted vs 1.327 realized.
+  - **Develop results** (`models eval`, 2016/17–2022/23):
+
+    | | MSE h0 | MSE h1–5 | candidate MSE | XI regret | captain regret |
+    |---|---|---|---|---|---|
+    | `v1` | 4.31 | 4.79 | 9.16 | 5.46 | 4.77 |
+    | rolling | 5.33 | 5.80 | 11.68 | 6.41 | 5.50 |
+
+    On 2021/22–2022/23 vs `ep_next`: MSE h0 3.99 vs 5.33, XI regret 5.26 vs 5.84 (DM p 0.087), captain regret 4.46 vs 4.85 (p 0.17). `v1` wins every season and is calibrated in every predicted-xP band.
+  - **Component metrics:** minutes log loss 0.527 at h0; player P(CS) Brier 0.077; P(goal) Brier 0.033.
+  - **Runtime:** fit 1–21 s per cutoff (about 30 s with predict at live 2026/27 cutoffs; the flag fit dominates), predict 0.5–1.5 s. `models eval` over develop with all four models: about 4 min at `--jobs 14`.
+  - **Checks:** `fplopt check leakage` passes with `model:v1` (22.6 min; was ~9), and `pytest -m realdata` passes (19.8 min).
+  - **Not tuned yet:** the component priors (cards, keeper, bonus seasons).
 
 ### 6.1 Team model — market primary
 **Market-implied λ (primary for GWs with odds, typically GW+1, sometimes +2):**
