@@ -16,10 +16,12 @@ results/experiments.csv; see `_backtest_run`, `_backtest_compare`; `--jobs N` ru
 search and pruning variants on real deadlines, written to results/; `_optimize_bench`),
 `fplopt optimize plan --season S --gw G [--start template|random:SEED] [--xp M]
 [--chips/--no-chips] [--max-hits N]` (the top plans and the roll plan from a template or
-random squad at a real deadline; `_optimize_plan`). Every job gets a `Context`; failures
-are logged and alerted to Telegram, and the exit code is 1. Bad backtest and plan arguments
-(season syntax, holdout seasons, `ep_next`/`ep_next_fade` before 2021/22, seasons without
-data) are usage errors: exit 2, no alert.
+random squad at a real deadline; `_optimize_plan`), `fplopt models eval --models M1,M2
+--seasons S [--jobs N] [--out DIR] [--family F]` (walk-forward xP and decision metrics of xP
+models, written to results/ and logged to results/experiments.csv; `_models_eval`). Every
+job gets a `Context`; failures are logged and alerted to Telegram, and the exit code is 1.
+Bad backtest, plan and eval arguments (season syntax, holdout seasons, `ep_next`/
+`ep_next_fade` before 2021/22, seasons without data) are usage errors: exit 2, no alert.
 After a successful `snapshot daily|tick`, HEALTHCHECK_PING_URL (if set) gets a best-effort
 GET, for an external dead-man's switch that also notices the server being down.
 """
@@ -922,6 +924,185 @@ def _backtest_compare(c: Context) -> object:
     return summary
 
 
+# --- model evaluation -------------------------------------------------------------------------
+
+
+def parse_models(text: str) -> tuple[str, ...]:
+    """`v1,rolling,ep_next` -> the xP model names in order (argparse.ArgumentTypeError on an
+    unknown or repeated name)."""
+    names = tuple(name.strip() for name in text.split(","))
+    unknown = [name for name in names if name not in XP_MODELS]
+    if not names or unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown xP model(s) {', '.join(unknown) or repr(text)} "
+            f"(models: {', '.join(XP_MODELS)})"
+        )
+    if len(set(names)) != len(names):
+        raise argparse.ArgumentTypeError(f"repeated xP model in {text!r}")
+    return names
+
+
+def validate_models_eval(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, store: DataStore
+) -> None:
+    """Cross-argument and data checks of `models eval`; `parser.error` (exit 2, no alert) on
+    failure. `ep_next`/`ep_next_fade` run only from 2021/22 (earlier seasons are skipped for
+    them, not refused), but each model needs at least one season."""
+    if args.jobs < 1:
+        parser.error("--jobs must be >= 1")
+    if args.n_random < 0:
+        parser.error("--n-random must be >= 0")
+    late = max(args.seasons) < EP_NEXT_FIRST_SEASON
+    early = [m for m in args.models if m in EP_NEXT_MODELS and late]
+    if early:
+        parser.error(
+            f"{', '.join(early)} use(s) ep_next, which exists only from "
+            f"{season_label(EP_NEXT_FIRST_SEASON)}: add a season from then on"
+        )
+    if args.family is None:
+        args.family = f"eval {','.join(args.models)} {format_seasons(args.seasons)}"
+    try:
+        available = seasons_with_data(store)
+    except FileNotFoundError as exc:
+        parser.error(str(exc))
+    missing = sorted(set(args.seasons) - available)
+    if missing:
+        parser.error(
+            f"no gameweek/player_match data for {', '.join(map(season_label, missing))} "
+            "(run fplopt build all?)"
+        )
+
+
+def _horizon_rows(metrics: dict[str, Any]) -> dict[tuple[str, str, str], dict[str, Any]]:
+    return {(r["model"], r["split"], r["horizon"]): r for r in metrics["xp"]}
+
+
+def eval_summary_table(metrics: dict[str, Any]) -> str:
+    """Per model and split: deadlines, MSE at horizon 0, candidate MSE, MAE (diagnostic),
+    MSE over horizons 1-5 pooled, mean XI and captain regret."""
+    xp = _horizon_rows(metrics)
+    regret = {(r["model"], r["split"]): r for r in metrics["regret"]}
+    headers = ["model", "split", "deadlines", "MSE h0", "cand MSE h0", "MAE h0", "MSE h1-5"]
+    headers += ["XI regret", "capt regret"]
+    rows = []
+    for model in metrics["models"]:
+        for split in ("all", "develop", "validate"):
+            h0 = xp.get((model, split, "0"))
+            if h0 is None:
+                continue
+            later = xp.get((model, split, "1-5"), {})
+            r = regret.get((model, split), {})
+            rows.append(
+                [
+                    model,
+                    split,
+                    str(h0["n_deadlines"]),
+                    _num(h0["mse"], 3),
+                    _num(h0["mse_candidates"], 3),
+                    _num(h0["mae"], 3),
+                    _num(later.get("mse"), 3),
+                    _num(r.get("xi_regret"), 2),
+                    _num(r.get("captain_regret"), 2),
+                ]
+            )
+    return text_table(headers, rows, left=2)
+
+
+def eval_dm_table(metrics: dict[str, Any]) -> str:
+    """Pairwise one-sided Diebold-Mariano tests at horizon 0 (and MSE over horizons 1-5):
+    mean loss A and B, mean difference A - B per GW, p (H1: A better), p (H1: B better)."""
+    headers = ["A", "B", "metric", "horizon", "split", "seasons", "A", "B", "A - B", "p(A<B)"]
+    headers += ["p(B<A)"]
+    rows = []
+    for r in metrics["dm"]:
+        if r["horizon"] not in ("0", "1-5") or (r["horizon"] == "1-5" and r["metric"] != "mse"):
+            continue
+        rows.append(
+            [
+                r["a"],
+                r["b"],
+                r["metric"],
+                r["horizon"],
+                r["split"],
+                format_seasons(r["seasons"]),
+                _num(r["value_a"], 3),
+                _num(r["value_b"], 3),
+                _num(r["mean_diff"], 3, sign=True),
+                _num(r["p_a_better"], 3),
+                _num(r["p_b_better"], 3),
+            ]
+        )
+    return text_table(headers, rows, left=6)
+
+
+def _eval_log_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    """The experiment log's metrics: the xP and regret tables and the DM tests (bands,
+    per-season and component tables stay in metrics.json)."""
+    return {key: metrics[key] for key in ("seasons", "xp", "regret", "dm")}
+
+
+def _models_eval(c: Context) -> object:
+    """`fplopt models eval`: walk-forward predictions of --models at every deadline of
+    --seasons (`fplopt.evaluate.run.evaluate`); writes predictions.parquet, regrets.parquet
+    and metrics.json to --out, prints the summary and DM tables and appends the run to the
+    experiment log (family --family, n_variants counting its runs)."""
+    from fplopt.backtest.evaluate import family_variants, log_experiment
+    from fplopt.evaluate.run import evaluate
+
+    args = c.args
+    store = _backtest_store(c)
+    out = _out_dir(args)
+    began = time.perf_counter()
+    result = evaluate(
+        store, args.models, args.seasons, jobs=args.jobs, n_random=args.n_random, seed=args.seed
+    )
+    runtime = time.perf_counter() - began
+    config = {
+        "models": list(args.models),
+        "seasons": list(args.seasons),
+        "n_random": args.n_random,
+        "seed": args.seed,
+        "out": str(out),
+        "jobs": args.jobs,
+        "family": args.family,
+    }
+    n_variants = family_variants(args.experiments, args.family) + 1
+    out.mkdir(parents=True, exist_ok=True)  # only now: a failed run leaves nothing behind
+    result.predictions.to_parquet(out / "predictions.parquet", index=False)
+    result.regrets.to_parquet(out / "regrets.parquet", index=False)
+    payload = {
+        "command": args.command_line,
+        "config": config,
+        "family": args.family,
+        "n_variants": n_variants,
+        "runtime_seconds": round(runtime, 1),
+        "season_seconds": result.timings,
+        "metrics": result.metrics,
+    }
+    _write_json(out / "metrics.json", payload)
+    seasons = ", ".join(
+        f"{model} {format_seasons(s)}" for model, s in result.metrics["seasons"].items()
+    )
+    print(
+        f"models eval: {seasons}; {args.n_random} random squads + template per deadline "
+        f"({runtime:.0f}s)\n\nxP per player-GW (MSE; MAE is a diagnostic) and decision "
+        f"regret per squad-GW\n{eval_summary_table(result.metrics)}\n\n"
+        "Diebold-Mariano, one-sided, clustered by GW (common sample of each pair; "
+        "losses: squared error, regrets)\n"
+        f"{eval_dm_table(result.metrics)}\n\nWritten to {out}",
+        flush=True,
+    )
+    log_experiment(
+        args.experiments,
+        args.command_line,
+        config,
+        _eval_log_metrics(result.metrics),
+        n_variants,
+        args.family,
+    )
+    return result
+
+
 def _continuation_name(continuation: Any) -> str | None:
     """The per-decision continuation's name: a policy's name, 'own', or None (no
     per-decision run)."""
@@ -1125,6 +1306,7 @@ JOBS: dict[str, Job] = {
     "backtest compare": _backtest_compare,
     "optimize bench": _optimize_bench,
     "optimize plan": _optimize_plan,
+    "models eval": _models_eval,
 }
 
 
@@ -1173,6 +1355,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_backtest_parsers(groups)
     _add_optimize_parsers(groups)
+    _add_models_parsers(groups)
     return parser
 
 
@@ -1345,6 +1528,56 @@ def _add_backtest_parsers(groups: Any) -> None:
     compare.add_argument("--seed", type=int, default=0, help="bootstrap seed (0)")
 
 
+def _add_models_parsers(groups: Any) -> None:
+    models = groups.add_parser("models", help="xP model evaluation")
+    commands = models.add_subparsers(dest="command", required=True)
+    evaluate = commands.add_parser(
+        "eval", help="walk-forward xP and decision metrics of models over seasons"
+    )
+    evaluate.set_defaults(subparser=evaluate)
+    evaluate.add_argument(
+        "--models",
+        type=parse_models,
+        required=True,
+        help=f"comma-separated xP models, e.g. rolling,ep_next (models: {', '.join(XP_MODELS)})",
+    )
+    evaluate.add_argument(
+        "--seasons",
+        type=parse_seasons,
+        required=True,
+        help="start years: 2016-2024, 2021,2023, 2021-22 or a mix (the holdout is refused); "
+        "ep_next/ep_next_fade run from 2021-22 only",
+    )
+    evaluate.add_argument(
+        "--out", default=None, help="output directory (default results/<UTC time>-eval)"
+    )
+    evaluate.add_argument(
+        "--experiments",
+        type=Path,
+        default=DEFAULT_EXPERIMENTS,
+        help=f"experiment log to append to (default {DEFAULT_EXPERIMENTS.as_posix()})",
+    )
+    evaluate.add_argument(
+        "--jobs",
+        type=int,
+        default=default_jobs(),
+        help="worker processes over seasons (default: CPUs - 1); results equal --jobs 1",
+    )
+    evaluate.add_argument(
+        "--family",
+        default=None,
+        help="experiment-log family: n_variants counts its runs (default "
+        "'eval <models> <seasons>')",
+    )
+    evaluate.add_argument(
+        "--n-random",
+        type=int,
+        default=3,
+        help="random squads per deadline for the regret metrics, besides the template (3)",
+    )
+    evaluate.add_argument("--seed", type=int, default=0, help="first random squad seed (0)")
+
+
 def job_name(args: argparse.Namespace) -> str:
     """The JOBS key for parsed arguments: '<group> <command>', or just '<group>' for groups
     without a command (build)."""
@@ -1396,6 +1629,9 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
         # Usage errors (exit 2, no alert); needs the data to check which seasons exist.
         args.store = open_data_store(settings.data_dir)
         validate_backtest(args.subparser, args, args.store)
+    elif name == "models eval":
+        args.store = open_data_store(settings.data_dir)
+        validate_models_eval(args.subparser, args, args.store)
     elif name == "optimize bench":
         if args.deadlines < 1 or args.all_chips < 0:
             args.subparser.error("--deadlines must be >= 1 and --all-chips >= 0")
