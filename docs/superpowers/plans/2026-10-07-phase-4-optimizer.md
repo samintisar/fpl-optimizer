@@ -135,6 +135,11 @@ Phase 4 is done when (PLAN §9):
 - [ ] Report the instances, objectives, gaps and runtimes of both.
 
 ### Task 5: Optimizer policy, backtests, CLI (wave C; needs Tasks 2–3)
+- [ ] **Hit safeguards.** Inflated xP makes a solver chase form with hits: ep_next is form-driven, and the baseline copies it flat over 6 GWs, so the solver takes 4–9 hits a GW.
+  - `OptimizerParams.max_hits` (per GW; `None` = unlimited, `0` = never) next to `hit_margin`.
+  - Predicted-vs-realized gain log for executed transfers (PLAN §7 optimizer's curse): per decision, the plan's predicted first-GW and horizon gain vs roll; realized points of the transferred-in minus transferred-out players over the same GWs. Report the slope.
+  - A `ep_next_fade` xP model: target GW = ep_next; later GWs fade toward the player's long-run per-fixture rate (rolling mean of his last 10 visible matches, any season), weight 0.5^h on ep_next. `ep_next` is kept unchanged so Phase 3 results stay valid.
+  - Backtest the hit variants (`max_hits` 0 / 1 / unlimited × `hit_margin` 0 / 2) against greedy. The defaults follow the data.
 - [ ] `OptimizerPolicy(xp_model, params=OptimizerParams(), chips=False)` gives `decide(ctx)` = plan #1's first-GW decision (top-3 off in backtests).
 - [ ] Architecture scan: the optimizer modules (no file reads; allowed imports add pulp/highspy). The probe `optimizer_ep_next_template` goes in `PROBES` (no chips, small pruning to keep the leakage check fast).
 - [ ] `run_grid(..., jobs=N)` / `per_decision(..., jobs=N)` with a process pool; equal results for jobs=1 vs 2 (test). CLI `--jobs` (default: CPU count − 1).
