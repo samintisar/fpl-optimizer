@@ -31,16 +31,19 @@ Understat); its lower weight limits that. `fit_shares` logs the coverage per sea
 
 **Marcel prior** (`marcel_shares`): share = (Σ w·X + μ·D0) / (Σ w·D + D0), over his rows
 of the current season (in-season data up to the deadline) and the 3 before, with
-w = `season_weights`[age] (age 0 = the current season; default 3-2-1-1: the previous
-seasons 2-1-1 and the current season above them) × `club_change_weight` for rows at a club
-other than his current one (a club change keeps the old share with extra shrinkage) ×
-`goals_weight` for fallback rows; D0 = `prior_minutes` / 90 × the league's mean team output
-per 90 (`team_output`), i.e. `prior_minutes` minutes at the prior mean μ. μ is the league
-average of his position (Σ X / Σ D over the last `FIT_SEASONS` seasons); players without a
-played minute in those seasons (new players), or everyone if `price_prior_all`, get the
-position + price prior instead: per position a quasi-Poisson regression X ~ D·exp(a + b·z),
-z = (price − the position's mean price) / 10, fitted on player-seasons (price = his first
-`player_gw` price of the season).
+w = `season_weights`[age] (age 0 = the current season, whose rows enter as they become
+visible, so the in-season weight grows with the minutes played; tuned default 2-2-1-1: the
+previous seasons 2-1-1 and the current season level with the last one) ×
+`club_change_weight` for rows at a club other than his current one (a club change keeps the
+old share with extra shrinkage) × `goals_weight` for fallback rows; D0 = `prior_minutes` /
+90 × the league's mean team output per 90 (`team_output`), i.e. `prior_minutes` minutes at
+the prior mean μ (tuned: 1920, stronger than the plan's ~480). μ is the position + price
+prior: per position a quasi-Poisson regression X ~ D·exp(a + b·z), z = (price − the
+position's mean price) / 10, fitted on the last `FIT_SEASONS` seasons' player-seasons (price
+= his first `player_gw` price of the season; at prediction his pool price). The plan's
+variant, the league average of his position (Σ X / Σ D) for players with history and the
+price prior for new players only (no played minute in the window), is
+`price_prior_all=False`; it scored a little worse on develop.
 
 **Team consistency** (`predict_shares`, per team-fixture over the club's pool players, f =
 e_minutes / 90 from the minutes frame, the expected XI by minutes):
@@ -164,13 +167,18 @@ class SharesParams:
     `price_prior_all` and `taker_prior` act at predict time only (so variants can share a
     fit); `goals_weight` also weighs the fallback rows in the fitted position means, and
     `pen_team_prior` / `conversion_prior` shrink the fitted club penalty rates. Tuned on
-    develop by `dev/shares_eval.py` (see `dev/README.md`)."""
+    develop by `dev/shares_eval.py` (2017/18–2022/23, 38 variants; objective: mean over
+    seasons of the goals + FPL-assists Poisson log-likelihood per player-fixture, horizons
+    0–5): pseudo-minutes 240 < 480 < 960 < 1440 ≈ 2880 ≈ 1920 (best; the surface is flat
+    from 960 up); current-season weight 2 > 3 > 5 and > 1 (previous seasons 2-1-1); club
+    change weight 0.5 ≈ 0.25 > 1; the price prior for everyone beats it for new players
+    only (+0.0003); goals_weight 0.5 ≥ 0.25 > 1."""
 
-    prior_minutes: float = 480.0  # pseudo-minutes at the prior mean
-    season_weights: tuple[float, ...] = (3.0, 2.0, 1.0, 1.0)  # by age: current, −1, −2, −3
+    prior_minutes: float = 1920.0  # pseudo-minutes at the prior mean
+    season_weights: tuple[float, ...] = (2.0, 2.0, 1.0, 1.0)  # by age: current, −1, −2, −3
     club_change_weight: float = 0.5  # rows at a club other than his current one
     goals_weight: float = 0.5  # rows without his xG (goals / assists fallback)
-    price_prior_all: bool = False  # price prior for everyone, not only new players
+    price_prior_all: bool = True  # price prior for everyone, not only new players
     pen_team_prior: float = 38.0  # pseudo team-matches at the league's penalty rate
     conversion_prior: float = 20.0  # pseudo attempts at the league's conversion
     taker_prior: float = 1.0  # history takers: q = s / (s + taker_prior)

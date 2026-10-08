@@ -154,6 +154,12 @@ def test_taker_probabilities_follow_the_order_and_sum_to_one():
 
 
 def toy_fit(**params):
+    params = {
+        "prior_minutes": 480.0,
+        "season_weights": (3.0, 2.0, 1.0, 1.0),
+        "price_prior_all": False,
+        **params,
+    }
     return SharesFit(
         cutoff=pd.Timestamp("2023-08-01", tz="UTC"),
         params=SharesParams(**params),
@@ -370,8 +376,9 @@ def test_planted_shares_are_recovered(league, inputs):
         dtype="float64",
     )
     matches.loc[rows, "us_npxg"] = 0.6 * team_npxg * matches.loc[rows, "minutes"] / 90
-    _, base = predict(league, inputs)
-    _, planted = predict(tables, inputs)
+    weak = SharesParams(prior_minutes=240.0)  # 14 matches of history: a weak prior
+    _, base = predict(league, inputs, weak)
+    _, planted = predict(tables, inputs, weak)
     mine = lambda out: out[out["player_key"] == star]  # noqa: E731
     assert (mine(planted)["e_np_goals"] > 3 * mine(base)["e_np_goals"]).all()
     club = planted[(planted["team_key"] == 2) & (planted["horizon"] == 0)]

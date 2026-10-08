@@ -230,3 +230,81 @@ Develop walk-forward (2017/18–2022/23, mean over seasons; defaults: `GbmParams
 | last-5 reference | 0.632 | 0.124 | 0.122 | 0.736 | 0.153 | 0.151 |
 | 2021/22–2022/23: no flags | 0.512 | 0.099 | 0.094 | 0.622 | 0.132 | 0.129 |
 | 2021/22–2022/23: with flags | 0.476 | 0.089 | 0.087 | 0.607 | 0.127 | 0.125 |
+
+## `shares_eval.py`: goal/assist shares and penalties
+
+Phase 5 plan, Task 4 (PLAN §6.2, §3; `fplopt.models.shares`). Two subcommands, both reading the
+built `data/` tables read-only into an in-memory store (`--data-dir`):
+
+```sh
+uv run python dev/shares_eval.py --data-dir data npxg-check                      # ~1 min
+uv run python dev/shares_eval.py --data-dir data walk --seasons 2017-2022 \
+    [--grid g.json] [--jobs 6] [--out <dir>]                          # ~2.5 min + ~0.2 min / variant
+```
+
+- `npxg-check`: the PLAN §3 VERIFY. On the 27,825 played rows of 2022/23 GW16 – 2024/25 (to
+  2025-04-07) where Understat and FPL/Opta both exist (a data-source check, so these validate
+  seasons may be read; nothing from 2025/26 is loaded), Understat `us_npxg` vs FPL `fpl_xg` −
+  penalty xG × attempts, and `us_xa` vs `fpl_xa`.
+- `walk`: develop only (deadlines of 2017/18–2022/23; anything else is refused). At every GW
+  deadline the team model, the minutes model (+ the availability layer from 2021/22) and the
+  shares, each fitted at the refit cutoff; every (player, fixture) with a `player_match` row is
+  scored at horizon 0 and pooled over horizons 1–5: Poisson log-likelihood of goals and of FPL
+  assists, Brier and reliability of P(goal ≥ 1) = 1 − exp(−e_goals). The reference: the
+  position's goals (assists) per 90 over the cutoff's last 3 seasons × e_minutes / 90 × λ_for /
+  the league's mean goals per team-match. `--grid` is a JSON list of predict-time
+  `SharesParams` overrides (default: the 27-variant first round below); all share the fits.
+  Writes `summary.json` and `timings.csv`.
+
+### Results (2026-10-08)
+
+**npxG source check** (closes the PLAN §3 VERIFY):
+- FPL/Opta gives every penalty exactly 0.79 xG (all 30 rows whose only shot was a penalty);
+  Understat 0.761. So the subtraction uses 0.79, not 0.76 (the difference is small: 234
+  attempts).
+- With the true attempts (Understat's penalty goals + FPL misses): per match r 0.932, MAE 0.032;
+  per player-season (1,123 with ≥ 450 min) r 0.992, per-90 r 0.987, but Σ FPL / Σ Understat =
+  0.914 (slope 0.88): Opta's npxG is ~9% lower. A scale factor is needed when sources are mixed:
+  k_goals = 1.095 (fitted walk-forward on the visible overlap by `fit_shares`).
+- Without Understat, penalty goals must be inferred. Only 58% of penalty goals are scored by the
+  club's rank-1 listed taker at kickoff (`penalties_order`), so a hard taker rule fails
+  (a scratch check: counting the candidates of the rank-1 taker only finds ~57% of the
+  penalty rows and adds ~75 false ones; counting everyone's adds ~380 false ones). The module uses the expected value: candidates = min(goals, ⌊(fpl_xg − 0.79·missed) /
+  0.79⌋), × π = 0.55 for the main taker and 0.20 for others (in-sample; from 2022/23 alone
+  0.49 / 0.23). Per match r 0.902, MAE 0.036; per player-season r 0.985, per-90 r 0.981, ratio
+  0.914; among takers (≥ 3 attempts) ratio 0.970 vs 0.908 with the true attempts. Out of sample
+  (π from 2022/23, scored on 2023/24–2024/25): r 0.985, ratio 0.897, takers 0.998. Ignoring
+  penalties (misses only): ratio 0.970 overall but 1.207 for takers (+21% npxG for penalty
+  takers).
+- xA: FPL `fpl_xa` = 0.80 × Understat (per player-season r 0.946, per-90 r 0.908, per match
+  0.746); k_assists = 1.257.
+- Recommendation: the substitution is acceptable for shares with the scale factors (k, fitted on
+  the overlap) and the expected-value penalty inference; shares are ratios within one
+  team-fixture, so a uniform scale cancels unless sources mix (Understat history with FPL
+  current season, i.e. from 2025/26).
+
+**Develop walk** (mean over 2017/18–2022/23; per player-fixture; chosen `SharesParams()`:
+1920 pseudo-minutes, season weights 2-2-1-1, club change 0.5, goals fallback 0.5, price prior
+for everyone):
+
+| | goals LL h0 | assists LL h0 | Brier P(goal) h0 | goals LL h1–5 | assists LL h1–5 | Brier h1–5 |
+|---|---|---|---|---|---|---|
+| model | −0.13552 | −0.13467 | 0.03245 | −0.14074 | −0.13915 | 0.03311 |
+| reference | −0.14039 | −0.13822 | 0.03328 | −0.14540 | −0.14266 | 0.03382 |
+
+- The model beats the reference in every season, at both horizon groups, on goals, assists and
+  Brier. Brier resolution 0.0040 vs 0.0031 (h0), reliability 1.5e-5 vs 1.8e-5. Mean e_goals
+  0.0439 vs 0.0430 realized (h0), e_assists 0.0399 vs 0.0388: both ~2–3% high (the reference
+  too: the team λ sums over pool players, some of whom have no `player_match` row).
+- Reliability is good below P(goal) 0.3; above it the model is a little high at h1–5 (0.34 →
+  0.31, 0.44 → 0.39).
+- Tuning (38 variants; objective: mean over seasons of goals + assists LL, all horizons): round 1
+  pseudo-minutes 240/480/960 × current-season weight 2/3/5 × club-change weight 1/0.5/0.25
+  (27); round 2 1440/1920/2880 and current weight 1, price prior for everyone, goals weight
+  0.25/1 (9); round 3 1920/2880 with the price prior for everyone (2). Pseudo-minutes 240 →
+  −0.2803 … 960 → −0.2786, flat from 1440 (−0.27815 to −0.27823 with the price prior);
+  current weight 2 best (1: −0.2788, 5: −0.2791); the club-change weight moves the objective
+  by ≤ 0.00005 between 0.25 and 1; goals weight 0.25/0.5/1 within 0.00008.
+- Time (6 processes in parallel, the chosen settings): `fit_shares` 0.15–0.59 s per cutoff
+  (1.0 s on the full `data/` store at 2022/23), `predict_shares` 0.10–0.27 s per deadline
+  (median 0.17 s). The walk takes ~2.5 min for one variant at `--jobs 6`.
