@@ -163,6 +163,7 @@ def test_every_parsed_command_has_a_job():
         "build": ["fixture"],
         "backtest run": ["--seasons", "2023"],
         "backtest compare": ["--seasons", "2023", "--a", "greedy:rolling", "--b", "roll:rolling"],
+        "optimize plan": ["--season", "2023", "--gw", "5"],
     }
     for name in cli.JOBS:
         args = parser.parse_args(name.split() + extras.get(name, []))
@@ -436,13 +437,36 @@ def test_parse_policy_spec():
     assert cli.parse_policy_spec("roll:rolling").build().name == "roll(rolling)"
 
 
+def test_parse_optimizer_policy_spec():
+    spec = cli.parse_policy_spec("optimizer:ep_next_fade:max_hits=0,hit_margin=2,chips=1")
+    assert spec.params == (("chips", 1), ("hit_margin", 2.0), ("max_hits", 0))
+    assert str(spec) == "optimizer:ep_next_fade:chips=1,hit_margin=2.0,max_hits=0"
+    assert cli.parse_policy_spec(str(spec)) == spec
+    policy = spec.build()
+    assert policy.name == "optimizer(ep_next_fade,mh=0,m=2.0,chips)"
+    assert policy.chips and policy.params.max_hits == 0 and policy.params.hit_margin == 2.0
+    unlimited = cli.parse_policy_spec("optimizer:rolling:max_hits=none,horizon=4,decay=0.9")
+    assert unlimited.params == (("decay", 0.9), ("horizon", 4), ("max_hits", None))
+    assert cli.parse_policy_spec(str(unlimited)) == unlimited
+    assert unlimited.build().name == "optimizer(rolling,mh=inf,m=0.0,h=4,d=0.9)"
+    itb = cli.parse_policy_spec("optimizer:rolling:itb_value=0,chips=0").build()
+    assert itb.name == "optimizer(rolling,mh=inf,m=0.0,itb=0.0)" and not itb.chips
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [
         ("greedy", "expected name:xp"),
         ("greedy:rolling:threshold=1:x", "expected name:xp"),
         (":rolling", "expected name:xp"),
-        ("optimizer:rolling", "unknown policy 'optimizer'"),
+        ("best:rolling", "unknown policy 'best'"),
+        ("optimizer:rolling:threshold=1", "no parameter 'threshold'"),
+        ("optimizer:rolling:max_hits=-1", "not a valid int or none"),
+        ("optimizer:rolling:max_hits=x", "not a valid int or none"),
+        ("optimizer:rolling:chips=2", "not a valid 0/1 flag"),
+        ("optimizer:rolling:decay=0", "0 < decay <= 1"),
+        ("optimizer:rolling:horizon=0", "horizon >= 1"),
+        ("greedy:rolling:threshold=none", "not a valid float"),
         ("greedy:magic", "unknown xP model 'magic'"),
         ("greedy:rolling:foo=1", "no parameter 'foo'"),
         ("roll:rolling:threshold=1", "no parameter 'threshold'"),
@@ -468,6 +492,11 @@ def test_cli_policy_and_model_names_match_the_backtester():
     assert set(cli.XP_MODELS) == set(MODELS)
     greedy = {f.name for f in fields(GreedyPolicy)} - {"xp_model"}
     assert set(cli.POLICY_PARAMS["greedy"]) == greedy
+    from fplopt.optimize import OptimizerParams
+
+    optimizer = set(cli.POLICY_PARAMS["optimizer"]) - {"chips"}
+    assert optimizer <= {f.name for f in fields(OptimizerParams)}
+    assert cli.EP_NEXT_MODELS <= set(MODELS)
 
 
 @pytest.fixture(scope="module")
@@ -523,6 +552,13 @@ ROLL_VS_GREEDY = ["--a", "roll:rolling", "--b", "greedy:rolling"]
         (["compare", "--seasons", "2023", *ROLL_VS_GREEDY, "--k", "0"], "must be >= 1"),
         (["compare", "--seasons", "2023", *ROLL_VS_GREEDY, "--stride", "0"], "must be >= 1"),
         (["compare", "--seasons", "2023", "--a", "greedy:x", "--b", "roll:rolling"], "unknown xP"),
+        (
+            ["compare", "--seasons", "2020,2023", "--a", "optimizer:ep_next_fade"]
+            + ["--b", "greedy:rolling"],
+            "optimizer:ep_next_fade uses ep_next",
+        ),
+        (["run", "--seasons", "2023", "--jobs", "0"], "--jobs must be >= 1"),
+        (["run", "--seasons", "2023", "--spec", "roll:rolling", "--xp", "rolling"], "--spec"),
     ],
 )
 def test_backtest_usage_errors_exit_two_without_alert(backtest, capsys, tmp_path, argv, message):
@@ -727,3 +763,100 @@ def test_optimize_bench_end_to_end(tmp_path, monkeypatch, league, capsys):
     assert not (out2 / "prune.csv").read_text(encoding="utf-8").strip()
     with pytest.raises(SystemExit):
         cli.main([*argv, "--prune-n", "3,6,6"], settings=make_settings(tmp_path))
+
+
+HAS_HIGHS = __import__("importlib").util.find_spec("highspy") is not None
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="needs the optimize extra")
+def test_backtest_compare_optimizer_with_jobs(backtest, tmp_path, capsys):
+    """An optimizer spec against greedy in two worker processes: runs end to end, prints
+    the transfer-gain table and logs --jobs."""
+    import pandas as pd
+
+    out, log = tmp_path / "out", tmp_path / "experiments.csv"
+    spec = "optimizer:rolling:horizon=2,max_hits=0"
+    argv = ["compare", "--seasons", "2023", "--a", spec, "--b", "greedy:rolling"]
+    argv += ["--starts", "random:2@15", "--k", "2", "--n-boot", "20", "--jobs", "2"]
+    code, alerts = backtest(*argv, "--out", str(out), "--experiments", str(log))
+    assert code == 0 and alerts == []
+    gws = pd.read_parquet(out / "gws.parquet")
+    name = "optimizer(rolling,mh=0,m=0.0,h=2)"
+    assert set(gws["policy"]) == {name, "greedy(rolling,t=1.0)"}
+    assert (gws.loc[gws["policy"] == name, "hits"] == 0).all()
+    assert {"pred_gain", "real_gain"} <= set(gws.columns)
+    printed = capsys.readouterr().out
+    assert "Predicted vs realized transfer gain" in printed and name in printed
+    (logged,) = _experiments(log)
+    assert json.loads(logged["config"])["jobs"] == 2
+    assert "transfer_gains" in json.loads(logged["metrics"])
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert {r["policy"] for r in summary["summary"]["transfer_gains"]} == set(gws["policy"])
+
+
+def test_backtest_run_with_a_spec(backtest, tmp_path):
+    import pandas as pd
+
+    out, log = tmp_path / "out", tmp_path / "experiments.csv"
+    argv = ["run", "--seasons", "2023", "--spec", "greedy:ep_next_fade:threshold=0.5"]
+    argv += ["--starts", "random@16", "--jobs", "1"]
+    assert backtest(*argv, "--out", str(out), "--experiments", str(log))[0] == 0
+    gws = pd.read_parquet(out / "gws.parquet")
+    assert set(gws["policy"]) == {"greedy(ep_next_fade,t=0.5)"}
+    assert json.loads(_experiments(log)[0]["config"])["policies"] == [
+        "greedy:ep_next_fade:threshold=0.5"
+    ]
+
+
+@pytest.fixture
+def plan(tmp_path, monkeypatch, league):
+    """Runs `fplopt optimize plan ...` on the synthetic league; returns (exit code, alerts)."""
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+
+    def run(*argv):
+        return cli.main(["optimize", "plan", *argv], settings=make_settings(tmp_path)), alerts
+
+    return run
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="needs the optimize extra")
+def test_optimize_plan_prints_the_top_plans_and_the_roll_plan(plan, capsys):
+    argv = ["--season", "2023-24", "--gw", "6", "--start", "random:1", "--xp", "rolling"]
+    code, alerts = plan(*argv, "--no-chips", "--horizon", "2", "--max-hits", "1")
+    assert code == 0 and alerts == []
+    printed = capsys.readouterr().out
+    assert "2023-24 GW6 (gw_index 6), random:1 squad, xP rolling, horizon 2 GW(s)" in printed
+    assert "no chips, max_hits 1" in printed
+    for label in ("Plan #1: gain vs roll", "Plan #2", "Plan #3", "Roll plan: gain vs roll +0.00"):
+        assert label in printed
+    assert "transfers (out -> in)" in printed and "captain (vice)" in printed
+    assert " -> " in printed  # the top plans transfer, by player name
+    code, _ = plan("--season", "2023", "--gw", "7", "--xp", "ep_next", "--horizon", "1")
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "template squad" in printed and "Chip scenarios solved" in printed
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--season", "2025", "--gw", "3"], "holdout"),
+        (["--season", "2021-2023", "--gw", "3"], "give one season"),
+        (["--season", "2020", "--gw", "3"], "--xp ep_next uses ep_next"),
+        (["--season", "2023", "--gw", "3", "--max-hits", "x"], "--max-hits"),
+        (["--season", "2023", "--gw", "3", "--start", "best"], "template or random:SEED"),
+        (["--season", "2023", "--gw", "3", "--horizon", "0"], "must be >= 1"),
+    ],
+)
+def test_optimize_plan_usage_errors(plan, capsys, argv, message):
+    with pytest.raises(SystemExit) as info:
+        plan(*argv)
+    assert info.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_optimize_plan_unknown_gw_fails(plan):
+    code, alerts = plan("--season", "2023", "--gw", "40", "--xp", "rolling")
+    assert code == 1 and "has no GW40" in alerts[0]
