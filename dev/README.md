@@ -144,3 +144,41 @@ and first-GW transfers are equal in 19 of 24.
 Not exercised by these instances: an owned player who left the game, and a club over the
 team limit (the latter is not comparable, see above).
 
+
+## `minutes_eval.py`: minutes model measurements
+
+Phase 5 plan, Task 3 (PLAN §6.3, §6.4). Two subcommands, both reading the built `data/` tables
+(read-only, `--data-dir`):
+
+```sh
+uv run python dev/minutes_eval.py --data-dir data inference
+uv run python dev/minutes_eval.py --data-dir data walk --seasons 2017-2022 [--grid g.json] \
+    [--horizon-decays 1,0.85 | --predict-grid p.json] [--jobs 6] [--out <dir>]
+```
+
+- `inference`: accuracy of the inferred starters (11 most minutes per team-fixture, ties by
+  `player_key`) where FPL's `starts` exist (2022/23 GW16 – 2024/25; this measures the proxy,
+  not a model).
+- `walk`: develop only (refuses seasons after 2022/23). At every GW deadline: fit at the refit
+  cutoff (`refit_deadline`, every 4 GWs), predict, apply the availability layer (from 2021/22),
+  score each (player, fixture) with a `player_match` row. 3-class (0 / 1–59 / 60+) log loss and
+  RPS, Brier and reliability of P(start), per horizon group (0, 1–5), against the last-5
+  reference (smoothed class frequencies over the player's last 5 rows). The in-memory store holds
+  only seasons ≤ the last requested one. ~33 min for 6 GBM variants × 5 horizon decays at
+  `--jobs 6`.
+
+### Results (2026-10-08)
+
+Start inference, 75,022 rows: accuracy 98.65%, false positives 0.96% of real non-starts, false
+negatives 2.30% of real starts; 441 of 2,008 team-fixtures have an error, 569 of the 1,016 wrong
+rows are 45-minute half-time ties.
+
+Develop walk-forward (2017/18–2022/23, mean over seasons; defaults: `GbmParams()`,
+`season_decay` 0.7, `horizon_decay` 0.85):
+
+| | log loss h0 | RPS h0 | Brier P(start) h0 | log loss h1–5 | RPS h1–5 | Brier h1–5 |
+|---|---|---|---|---|---|---|
+| model, no flags | 0.532 | 0.105 | 0.101 | 0.650 | 0.140 | 0.138 |
+| last-5 reference | 0.632 | 0.124 | 0.122 | 0.736 | 0.153 | 0.151 |
+| 2021/22–2022/23: no flags | 0.512 | 0.099 | 0.094 | 0.622 | 0.132 | 0.129 |
+| 2021/22–2022/23: with flags | 0.476 | 0.089 | 0.087 | 0.607 | 0.127 | 0.125 |

@@ -88,7 +88,12 @@ SORT_BY = ("player_key", "horizon", "fixture_key")
 
 @dataclass(frozen=True)
 class MinutesParams:
-    """Tuned on develop (dev/minutes_eval.py)."""
+    """Tuned on develop walk-forward (dev/minutes_eval.py, 2017/18–2022/23): `GbmParams()`
+    (200 rounds, 15 leaves, 200 rows per leaf) tied with 300 rounds at learning rate 0.03
+    and feature fraction 0.8, and beat 100 rounds × 7 leaves and 400 × 31; season decay 0.7
+    ≈ 0.9 > 0.5; horizon decay 0.85 > 0.9 > 0.75 > 1 (no decay); the normalization bounds
+    and the long-run prior barely matter (normalization on vs off: log loss 0.532 vs
+    0.533)."""
 
     start: GbmParams = field(default_factory=GbmParams)
     sixty: GbmParams = field(default_factory=GbmParams)

@@ -76,7 +76,9 @@ __all__ = (
     "HORIZON",
     "LAG_FEATURES",
     "PREDICTION_COLUMNS",
+    "PREDICTION_KEYS",
     "TARGETS",
+    "TRAINING_KEYS",
     "infer_starts",
     "prediction_frame",
     "training_frame",
@@ -310,7 +312,7 @@ def _lags(rows: pd.DataFrame) -> pd.DataFrame:
     out["_club_starts"] = (club_starts - block_starts).to_numpy(dtype="float64")
 
     # Last season (any club): starts / SEASON_FIXTURES, NaN without a row.
-    last = rows[["player_key", "season"]].assign(start=start, one=1.0)
+    last = rows[["player_key", "season"]].assign(start=start)
     per_season = last.groupby(["player_key", "season"]).agg(starts=("start", "sum"))
     per_season = per_season.reset_index().assign(season=lambda d: d["season"] + 1)
     shifted = rows[["player_key", "season"]].merge(
@@ -511,7 +513,6 @@ def prediction_frame(view: AsOfView) -> pd.DataFrame:
         share = frame["_club_starts"] / club_fixtures
     frame["start_share_season"] = share.where(club_fixtures > 0)
     frame = _competition(frame, ["team_key"])
-    frame = frame.drop(columns=["rest_days"], errors="ignore")
     horizon = _horizon_fixtures(view, season)
     out = frame.merge(
         horizon[

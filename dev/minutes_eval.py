@@ -14,8 +14,10 @@ Subcommands:
   ("raw"), with flags ("flags") and the last-5 reference (smoothed class frequencies over
   the player's last 5 rows before the deadline's GW, α = 1 pseudo-row at the previous
   seasons' class frequencies). Also fit time per cutoff and predict time per deadline.
-  Variants: a JSON list of `MinutesParams` overrides (`--grid`), each × `--horizon-decays`
-  (predict-only, no refit).
+  Variants: a JSON list of `MinutesParams` overrides (`--grid`), each × the predict-time
+  overrides (no refit): `--horizon-decays`, or `--predict-grid` (a JSON list of
+  `MinutesParams` overrides of `horizon_decay`, `long_run_prior`, `max_shift`,
+  `max_scale`).
 
 The store is in memory (`DataStore(tables=...)`) with only the tables the model reads,
 restricted to seasons ≤ the last requested season, so no validate or holdout row is even
@@ -23,7 +25,8 @@ loaded for `walk`.
 
     uv run python dev/minutes_eval.py --data-dir <data> inference
     uv run python dev/minutes_eval.py --data-dir <data> walk --seasons 2017-2022 \
-        [--grid grid.json] [--horizon-decays 1,0.85] [--jobs 6] [--out results/minutes-x]
+        [--grid grid.json] [--horizon-decays 1,0.85 | --predict-grid p.json] [--jobs 6]
+        [--out results/minutes-x]
 """
 
 from __future__ import annotations
@@ -237,7 +240,7 @@ def row_scores(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def walk_season(job: tuple) -> dict:
-    data_dir, season, variants, horizon_decays, flags_from = job
+    data_dir, season, variants, predict_variants, flags_from = job
     tables = load_tables(Path(data_dir), season)
     store = DataStore(tables=tables)
     result = outcomes(tables)
@@ -270,9 +273,10 @@ def walk_season(job: tuple) -> dict:
                     }
                 )
             fit, afit = fits[cutoff]
-            for decay in horizon_decays:
+            for overrides in predict_variants:
+                label = ",".join(f"{k}={v}" for k, v in overrides.items())
                 variant_fit = dataclasses.replace(
-                    fit, params=dataclasses.replace(fit.params, horizon_decay=decay)
+                    fit, params=dataclasses.replace(fit.params, **overrides)
                 )
                 t0 = time.perf_counter()
                 raw = predict_minutes(view, variant_fit)
@@ -282,7 +286,7 @@ def walk_season(job: tuple) -> dict:
                 t2 = time.perf_counter()
                 timings.append(
                     {
-                        "variant": f"{name}|hd={decay}",
+                        "variant": f"{name}|{label}",
                         "season": season,
                         "deadline_gw_index": int(gw.gw_index),
                         "predict_s": t1 - t0,
@@ -307,7 +311,7 @@ def walk_season(job: tuple) -> dict:
                 frame = frame.merge(result, on=["player_key", "fixture_key"], how="inner")
                 ref = reference(counts, frame, season, int(gw.gw_index))
                 frame = frame.merge(ref, on="player_key", how="left")
-                frame = frame.assign(deadline_index=int(gw.gw_index), variant=f"{name}|hd={decay}")
+                frame = frame.assign(deadline_index=int(gw.gw_index), variant=f"{name}|{label}")
                 rows.append(row_scores(frame))
         print(f"season {season} variant {name} done", file=sys.stderr, flush=True)
     return {
@@ -385,6 +389,7 @@ def main() -> None:
     walk.add_argument("--seasons", default="2017-2022")
     walk.add_argument("--grid")
     walk.add_argument("--horizon-decays", default="0.85")
+    walk.add_argument("--predict-grid")
     walk.add_argument("--jobs", type=int, default=6)
     walk.add_argument("--out")
     args = parser.parse_args()
@@ -396,9 +401,12 @@ def main() -> None:
     if any(s not in DEVELOP for s in seasons):
         sys.exit("walk is develop-only (2016-2022)")
     variants = variants_from(args.grid)
-    decays = [float(x) for x in args.horizon_decays.split(",")]
+    if args.predict_grid:
+        predict_variants = json.loads(Path(args.predict_grid).read_text())
+    else:
+        predict_variants = [{"horizon_decay": float(x)} for x in args.horizon_decays.split(",")]
     flags_from = (2021, 1)
-    jobs = [(str(data_dir), s, variants, decays, flags_from) for s in seasons]
+    jobs = [(str(data_dir), s, variants, predict_variants, flags_from) for s in seasons]
     start = time.perf_counter()
     with ProcessPoolExecutor(max_workers=min(args.jobs, len(jobs))) as pool:
         results = list(pool.map(walk_season, jobs))
