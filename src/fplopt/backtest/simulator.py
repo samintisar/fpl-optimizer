@@ -150,6 +150,8 @@ GW_COLUMNS = (
     ("autosubs", "str"),
     ("pred_gain", "Float64"),
     ("real_gain", "Float64"),
+    ("solver_status", "str"),
+    ("mip_gap", "Float64"),
 )
 GAIN_WINDOW = 4  # GWs over which transfer gains are measured (PLAN §5's per-decision k)
 
@@ -403,6 +405,8 @@ def play_step(
         "squad_value": squad_value(gw_state, rules.sell_on_fee),
         "transfers": json.dumps([[t.out_key, t.in_key] for t in decision.transfers]),
         "autosubs": json.dumps([list(pair) for pair in score.autosubs]),
+        "solver_status": decision.solver_status,
+        "mip_gap": decision.mip_gap,
     }
     return gw_state, record, row
 
@@ -465,7 +469,8 @@ class SeasonRun:
     """One simulated season. `gws`: one row per GW (`GW_COLUMNS`; `points` include the
     captain, `net_points = points − hit_points`, `bank`/`squad_value` after the decision,
     `free_transfers` before it, `xi_regret` null in chip GWs, `xg_points` null where not
-    computable). `states[i]` is the refreshed state the policy saw at GW i, `decisions[i]` its
+    computable, `solver_status`/`mip_gap` how an optimizer policy's solve finished, null for
+    other policies). `states[i]` is the refreshed state the policy saw at GW i, `decisions[i]` its
     decision; `final_state` the state after the last GW (FH reverted). `total` = Σ
     net_points. If the run stopped at a GW without outcomes, `pending_state` /
     `pending_decision` are that GW's refreshed state and decision (not scored)."""

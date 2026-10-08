@@ -39,7 +39,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -117,11 +117,17 @@ class Transfer:
 @dataclass(frozen=True)
 class Decision:
     """One GW's decision: transfers (executed together), the lineup for the post-transfer
-    squad, and an optional chip name (`wildcard`, `freehit`, `bboost`, `3xc`)."""
+    squad, and an optional chip name (`wildcard`, `freehit`, `bboost`, `3xc`).
+
+    `solver_status` / `mip_gap`: how the solver that produced it finished (optimizer
+    policies; None for others), recorded in the simulator's GW rows. Diagnostics only: they
+    take no part in equality, so the same moves compare equal whoever made them."""
 
     transfers: tuple[Transfer, ...]
     lineup: Lineup
     chip: str | None = None
+    solver_status: str | None = field(default=None, compare=False)
+    mip_gap: float | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

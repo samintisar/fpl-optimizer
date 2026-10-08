@@ -23,7 +23,8 @@ PlanSet`:
    k solves per scenario, and the alternatives a manager wants are other moves now, not
    other chip timings, which `scenario_objectives` already shows.) Fewer than k plans come
    back if the cuts leave no feasible plan. Objectives are non-increasing up to the MIP gap.
-3. **Roll plan:** no first-GW transfers (`fix_first_gw` with empty sets), the rest of the
+3. **Roll plan** (None if a solver limit stopped its solve before any plan was found, with a
+   warning): no first-GW transfers (`fix_first_gw` with empty sets), the rest of the
    horizon optimized, in plan #1's scenario, except that a Wildcard or Free Hit plan #1
    plays in the first GW is dropped (a transfer chip with no transfers is a wasted chip;
    the dropped chip is then valued as unused). If plan #1 already makes no first-GW
@@ -34,6 +35,7 @@ PlanSet`:
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Mapping
@@ -49,6 +51,8 @@ from fplopt.optimize.problem import PlanInput
 
 if TYPE_CHECKING:
     from fplopt.optimize.search import SearchStats
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -122,9 +126,11 @@ class Plan:
     terminal value; `terminal_value` is the scenario's value of chips left unused
     (`chips.terminal_value`) and `total_objective` their sum, which plans are ranked by.
     `status` is HiGHS's model status as PuLP reports it (`Optimal` also when stopped at
-    `mip_gap`, `TimeLimit` when the safety net stopped it with a solution); `mip_gap` the
-    final relative gap; `build_seconds` the PuLP model build and `solve_seconds` the HiGHS
-    call (including PuLP's hand-over); `n_candidates` the players in the model.
+    `mip_gap`; `NodeLimit`/`SolutionLimit`/`TimeLimit` when a limit stopped it with a
+    solution, see `OptimizerParams`: then the plan is not within `mip_gap`); `mip_gap` the
+    final relative gap; `n_nodes` the branch-and-bound nodes explored; `build_seconds` the
+    PuLP model build and `solve_seconds` the HiGHS call (including PuLP's hand-over);
+    `n_candidates` the players in the model.
     `scenario` is the chip scenario's label (`none` without chips) and `gain_vs_roll`
     the `total_objective` gain over the roll plan (set by `optimize`, else None).
     `bound` is HiGHS's dual bound mapped to `total_objective` terms: no plan of this
@@ -142,6 +148,12 @@ class Plan:
     terminal_value: float = 0.0
     gain_vs_roll: float | None = None
     bound: float = math.inf
+    n_nodes: int = 0
+
+    @property
+    def optimal(self) -> bool:
+        """Solved to `mip_gap` (no limit stopped it)."""
+        return self.status == "Optimal"
 
     @property
     def first(self) -> GwPlan:
@@ -187,6 +199,18 @@ class PlanSet:
     def best(self) -> Plan:
         return self.plans[0]
 
+    @property
+    def solver_status(self) -> str:
+        """`Optimal` when plan #1 and every chip scenario solve of its search reached
+        `mip_gap`; else plan #1's status if a limit stopped it, or `Optimal (n chip
+        scenario solve(s) stopped at a limit)`."""
+        if not self.best.optimal:
+            return self.best.status
+        limited = 0 if self.search is None else len(self.search.not_optimal)
+        if limited:
+            return f"Optimal ({limited} chip scenario solve(s) stopped at a limit)"
+        return self.best.status
+
     def decision(self) -> Decision:
         """Plan #1's first-GW decision."""
         return self.best.decision()
@@ -205,7 +229,11 @@ def optimize(
     plan (see the module docstring). `chips=False` solves the no-chip scenario only.
     `scenario_search` is "bound" (skip scenarios that provably can't win; same result) or
     "all" (solve every scenario), see `search`."""
-    from fplopt.optimize.model import InfeasiblePlan, solve_plan  # model imports this module
+    from fplopt.optimize.model import (  # model imports this module
+        InfeasiblePlan,
+        SolveLimitReached,
+        solve_plan,
+    )
     from fplopt.optimize.search import search
 
     if top_k < 1:
@@ -226,6 +254,11 @@ def optimize(
                     exclude_first_gw=[p.first.transfer_set for p in plans],
                 )
             )
+        except SolveLimitReached as exc:
+            log.warning(
+                "plan #%d: no plan before the solver stopped (%s)", len(plans) + 1, exc.status
+            )
+            break
         except InfeasiblePlan:
             break
 
@@ -237,15 +270,24 @@ def optimize(
         if roll_scenario == scenario1 and plan1.first.n_transfers == 0:
             roll_plan = plan1
         else:
-            roll_plan = solve_plan(
-                problem,
-                params,
-                chips=roll_scenario,
-                fix_first_gw=(frozenset(), frozenset()),
-            )
-        base = roll_plan.total_objective
-        plans = [replace(p, gain_vs_roll=p.total_objective - base) for p in plans]
-        roll_plan = replace(roll_plan, gain_vs_roll=0.0)
+            try:
+                roll_plan = solve_plan(
+                    problem,
+                    params,
+                    chips=roll_scenario,
+                    fix_first_gw=(frozenset(), frozenset()),
+                )
+            except SolveLimitReached as exc:
+                log.warning("roll plan: no plan before the solver stopped (%s)", exc.status)
+        if roll_plan is not None:
+            base = roll_plan.total_objective
+            plans = [replace(p, gain_vs_roll=p.total_objective - base) for p in plans]
+            roll_plan = replace(roll_plan, gain_vs_roll=0.0)
+    # Plan #1's solves are checked (and logged) by the search.
+    others = [(f"plan #{i}", p) for i, p in enumerate(plans[1:], start=2)]
+    for label, plan in [*others, ("roll plan", roll_plan)]:
+        if plan is not None and not plan.optimal:
+            log.warning("%s: solver stopped at a limit (%s)", label, plan.status)
     return PlanSet(
         plans=tuple(plans),
         roll=roll_plan,

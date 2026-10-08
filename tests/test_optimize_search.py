@@ -243,3 +243,42 @@ def test_bound_search_returns_what_all_returns_on_real_data(case) -> None:
     assert fast.plan.total_objective == full.plan.total_objective
     assert fast.plan.gws == full.plan.gws
     assert fast.stats.n_solves < full.stats.n_solves
+
+
+def test_a_scenario_stopped_at_a_limit_is_recorded_not_silent(monkeypatch, caplog) -> None:
+    """A chip scenario whose solve stops at a limit without a plan is skipped (its bound
+    kept), one stopped with a plan counts but is flagged; the no-chip scenario re-raises.
+    `SearchStats.not_optimal` and `PlanSet.solver_status` report them."""
+    import fplopt.optimize.search as search_mod
+    from fplopt.optimize.model import SolveLimitReached
+
+    state, pool, xp = instance(4)
+    params = replace(EXACT, horizon=2, chip_value=CHEAP_CHIPS)
+    problem = problem_for(state, pool, xp, params)
+    candidates = scenarios(problem, params)
+    honest = search_mod.solve_plan
+    stopped, flagged = candidates[1].label, candidates[2].label
+
+    def limited_solve(problem, params, *, chips=None, **kwargs):
+        if chips.label == stopped:
+            raise SolveLimitReached("stopped", "SolutionLimit", 1e9)
+        plan = honest(problem, params, chips=chips, **kwargs)
+        return replace(plan, status="SolutionLimit") if chips.label == flagged else plan
+
+    monkeypatch.setattr(search_mod, "solve_plan", limited_solve)
+    with caplog.at_level("WARNING"):
+        found = search(problem, params, candidates, "all")
+    assert (stopped, "SolutionLimit") in found.stats.not_optimal
+    assert (flagged, "SolutionLimit") in found.stats.not_optimal
+    assert found.bounds[stopped] == 1e9 and stopped not in found.objectives
+    assert "no plan before the solver stopped" in caplog.text
+    assert "stopped at a limit" in caplog.text
+    plans = optimize(problem, params, top_k=1, chips=True, roll=False, scenario_search="all")
+    assert plans.solver_status != "Optimal"
+
+    def no_plan(problem, params, *, chips=None, **kwargs):
+        raise SolveLimitReached("stopped", "TimeLimit", 1e9)
+
+    monkeypatch.setattr(search_mod, "solve_plan", no_plan)
+    with pytest.raises(SolveLimitReached):
+        search(problem, params, candidates, "bound")

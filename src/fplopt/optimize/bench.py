@@ -158,6 +158,7 @@ def bench_case(
         "solve_s": plan.solve_seconds,
         "gap": plan.mip_gap,
         "status": plan.status,
+        "nodes": plan.n_nodes,
         "objective": plan.total_objective,
     }
     top3 = optimize(problem, params, top_k=3, chips=False, roll=True)

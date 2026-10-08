@@ -39,7 +39,7 @@ from fplopt.optimize.model import solve_plan  # noqa: E402
 # 2026-27 rules (used for the backtests too): two sets of every chip, set 1 on gw_index
 # 1/2..19, set 2 on 20..38; ids WC 1/2, FH 3/6, BB 4/7, TC 5/8; FTs `retain` after WC/FH.
 WC1, WC2, FH1, BB1, TC1, FH2, BB2, TC2 = 1, 2, 3, 4, 5, 6, 7, 8
-EXACT = OptimizerParams(mip_gap=0.0, prune_n=None, prune_dominated=False)
+EXACT = OptimizerParams(mip_gap=0.0, prune_n=None, prune_dominated=False, tie_epsilon=0.0)
 EXPENSIVE = {"wildcard": 100.0, "freehit": 100.0, "bboost": 100.0, "3xc": 100.0}
 
 

@@ -24,9 +24,10 @@ Ties are broken by `player_key` everywhere, so decisions are deterministic.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 import numpy as np
@@ -45,6 +46,8 @@ from fplopt.backtest.state import (
 from fplopt.features.store import AsOfView
 from fplopt.models import MODELS
 from fplopt.optimize import OptimizerParams, PlanInput, optimize
+
+log = logging.getLogger(__name__)
 
 __all__ = (
     "DecisionContext",
@@ -353,7 +356,11 @@ def _optimizer_extras(params: OptimizerParams) -> list[str]:
     if params.threads != default.threads:
         parts.append(f"threads={params.threads}")
     if params.time_limit != default.time_limit:
-        parts.append(f"tl={float(params.time_limit)!r}")
+        parts.append(f"tl={params.time_limit!r}")
+    if params.node_limit != default.node_limit:
+        parts.append(f"nodes={params.node_limit}")
+    if params.tie_epsilon != default.tie_epsilon:
+        parts.append(f"eps={params.tie_epsilon!r}")
     return parts
 
 
@@ -363,7 +370,10 @@ class OptimizerPolicy:
     (refreshed) state, pool and xP frame, then `optimize(top_k=1, roll=False,
     chips=chips)`; the decision is plan #1's first GW. `chips=False` plans without chips
     (the no-chip scenario only). Deterministic for a given context (HiGHS with fixed
-    threads and gap-based stopping; the time limit is a safety net only).
+    threads, gap-based stopping and a deterministic node limit; no wall-clock limit unless
+    `params.time_limit` is set). The decision carries `PlanSet.solver_status` and plan #1's
+    `mip_gap`; a solve stopped at a limit is logged as a warning and recorded (the
+    simulator's `solver_status` column), never silent.
 
     `name`: `optimizer(<xp>,mh=<max_hits|inf>,m=<hit_margin>[,...][,chips])`; the hit
     safeguards are always listed (their defaults are being tuned), other parameters only
@@ -391,4 +401,15 @@ class OptimizerPolicy:
     def decide(self, ctx: DecisionContext) -> Decision:
         problem = PlanInput.from_context(ctx.state, ctx.pool, ctx.xp, ctx.rules, self.params)
         plans = optimize(problem, self.params, top_k=1, chips=self.chips, roll=False)
-        return plans.decision()
+        status = plans.solver_status
+        if status != "Optimal":
+            log.warning(
+                "%s at %s gw_index %d: solver stopped at a limit (%s, gap %.2f%%); "
+                "executing the best plan found",
+                self.name,
+                ctx.view.deadline,
+                ctx.state.gw_index,
+                status,
+                100 * plans.best.mip_gap,
+            )
+        return replace(plans.decision(), solver_status=status, mip_gap=plans.best.mip_gap)

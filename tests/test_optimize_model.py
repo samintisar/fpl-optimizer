@@ -37,7 +37,9 @@ from fplopt.optimize import OptimizerParams, PlanInput, optimize  # noqa: E402
 from fplopt.optimize.model import solve_plan  # noqa: E402
 
 # Hits allowed (the default max_hits=0 never takes one): the brute force searches them too.
-EXACT = OptimizerParams(mip_gap=0.0, prune_n=None, prune_dominated=False, max_hits=None)
+EXACT = OptimizerParams(
+    mip_gap=0.0, prune_n=None, prune_dominated=False, max_hits=None, tie_epsilon=0.0
+)
 
 
 def plan_for(state, pool, xp, params=EXACT, rules=RULES, **kwargs):
@@ -356,8 +358,8 @@ def test_max_hits_caps_the_hits_per_gw(max_hits, n_transfers: int, hits: int) ->
 @pytest.mark.parametrize("seed", [0, 1])
 def test_max_hits_holds_in_every_horizon_gw(seed: int) -> None:
     state, pool, xp = medium_instance(seed, ft=1, n_gws=3)
-    churny = xp.assign(xp=xp["xp"] * (1 + 2 * (xp["player_key"] * (xp["horizon"] + 1) % 3)))
-    free = OptimizerParams(horizon=3, hit_margin=-3.5, max_hits=None)  # nearly free hits
+    churny = xp.assign(xp=xp["xp"] * (1 + 8 * (xp["player_key"] * (xp["horizon"] + 1) % 3)))
+    free = OptimizerParams(horizon=3, max_hits=None)  # form swings big enough to pay for hits
     _, unlimited = plan_for(state, pool, churny, free)
     assert max(g.hits for g in unlimited.gws) > 1
     for cap in (0, 1):
@@ -392,6 +394,89 @@ def test_max_hits_validation_and_pickling() -> None:
     assert (OptimizerParams().max_hits, OptimizerParams().itb_value) == (0, 0.0)  # Task 5
     for params in (OptimizerParams(), every, OptimizerParams(prune_n=None, max_hits=None)):
         assert pickle.loads(pickle.dumps(params)) == params
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("itb_value", -0.1),
+        ("hit_margin", -1.0),
+        ("tie_epsilon", -1e-4),
+        ("max_hits", -1),
+        ("decay", 0.0),
+        ("decay", 1.5),
+        ("horizon", 0),
+        ("node_limit", 0),
+        ("time_limit", 0.0),
+        ("itb_value", float("nan")),
+    ],
+)
+def test_params_reject_values_the_model_cannot_honour(field, value) -> None:
+    """Dominance pruning assumes a cheaper player with >= xP is never worse (a negative
+    itb_value breaks that); negative hit margins/epsilons and empty horizons are errors."""
+    with pytest.raises(ValueError, match=field):
+        OptimizerParams(**{field: value})
+
+
+def test_default_solver_limits_are_deterministic() -> None:
+    """Backtests never depend on wall-clock time: no time limit by default, a node limit
+    as the safety net (PLAN §7, Phase 4 review)."""
+    from fplopt.optimize.model import solver_options
+
+    default = OptimizerParams()
+    assert default.time_limit is None and default.node_limit >= 10_000
+    options = solver_options(default)
+    assert "timeLimit" not in options and options["mip_max_nodes"] == default.node_limit
+    assert solver_options(replace(default, time_limit=60.0))["timeLimit"] == 60.0
+    assert "mip_max_nodes" not in solver_options(replace(default, node_limit=None))
+
+
+def test_a_node_limit_stop_is_reported_not_silent() -> None:
+    """A solve stopped by the node limit keeps its plan but is not `Optimal`; without any
+    plan it raises SolveLimitReached (an InfeasiblePlan) with a bound."""
+    from fplopt.optimize.model import InfeasiblePlan, SolveLimitReached
+
+    state, pool, xp = medium_instance(3, ft=2, n_gws=3)
+    params = replace(EXACT, horizon=3, mip_gap=0.0, node_limit=1)
+    problem = PlanInput.from_context(state, pool, xp, RULES, params)
+    try:
+        plan = solve_plan(problem, params)
+    except SolveLimitReached as exc:
+        assert isinstance(exc, InfeasiblePlan) and exc.status != "Optimal"
+    else:
+        exact = solve_plan(problem, replace(params, node_limit=None))
+        assert exact.optimal and exact.n_nodes > 1, "instance too easy to hit the limit"
+        assert not plan.optimal and plan.status != "Optimal"
+        assert plan.objective <= exact.objective + 1e-6
+
+
+def test_tie_epsilon_prefers_fewer_transfers_when_xp_ties() -> None:
+    """All-zero xP at GW1 (2016/17 under `rolling`): without the tie-break any squad is
+    optimal; with it the planner keeps the squad it has."""
+    pool = grid_pool(range(1, 9), {1: 2, 2: 5, 3: 5, 4: 3})
+    owned = first_valid_squad(pool)
+    xp = xp_frame({int(k): [0.0, 0.0] for k in pool["player_key"]}, gw_index=1)
+    state = make_state(pool, owned, gw_index=1, ft=1)
+    params = OptimizerParams(horizon=2, prune_n=None, prune_dominated=False)
+    _, plan = plan_for(state, pool, xp, params)
+    assert all(g.n_transfers == 0 for g in plan.gws)
+    assert plan.objective == pytest.approx(0.85 * params.ft_state_value(1))
+    # The epsilon is part of the objective: one forced transfer costs exactly epsilon.
+    rows = pool.set_index("player_key")
+    clubs = Counter(rows.loc[k, "team_key"] for k in owned)
+    out = owned[-1]
+    buy = next(
+        k
+        for k in rows.index
+        if k not in owned
+        and rows.loc[k, "element_type"] == rows.loc[out, "element_type"]
+        and clubs[rows.loc[k, "team_key"]] - (rows.loc[k, "team_key"] == rows.loc[out, "team_key"])
+        < RULES.team_limit
+        and rows.loc[k, "price"] <= state.bank + rows.loc[out, "price"]
+    )
+    swap = (frozenset({out}), frozenset({int(buy)}))
+    _, forced = plan_for(state, pool, xp, params, fix_first_gw=swap)
+    assert plan.objective - forced.objective == pytest.approx(params.tie_epsilon, rel=1e-6)
 
 
 def test_high_ft_value_rolls_zero_ft_value_transfers() -> None:

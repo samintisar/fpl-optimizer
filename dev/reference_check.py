@@ -216,6 +216,8 @@ def build_instances(data_dir: Path, specs, mip_gap: float, time_limit: float) ->
             prune_dominated=spec.prune,
             mip_gap=mip_gap,
             time_limit=time_limit,
+            node_limit=None,  # the time limit is the reference check's budget
+            tie_epsilon=0.0,  # open-fpl-solver has no tie-break term
         )
         problem = o["PlanInput"].from_context(state, pool, xp, rules, params)
         out.append(Instance(spec, problem, params, unmappable(problem)))

@@ -401,9 +401,7 @@ SMALL = OptimizerParams(horizon=3, prune_n={1: 4, 2: 10, 3: 10, 4: 6})
     [
         (OptimizerPolicy("ep_next_fade", replace(SMALL, max_hits=0)), ((1, 1, 4), (16, 7, 21))),
         (  # chip scenarios: a slower solve per GW
-            OptimizerPolicy(
-                "rolling", replace(SMALL, horizon=2, max_hits=1, hit_margin=-2.0), chips=True
-            ),
+            OptimizerPolicy("rolling", replace(SMALL, horizon=2, max_hits=1), chips=True),
             ((16, 7, 19),),
         ),
     ],
@@ -425,6 +423,7 @@ def test_optimizer_decisions_pass_apply_decision(league, policy, runs):
             decision = policy.decide(context)
             assert decision == policy.decide(context)
             gw_state, record = apply_decision(state, decision, pool, rules)
+            assert decision.solver_status == "Optimal" and decision.mip_gap is not None
             assert record.hits <= policy.params.max_hits
             hits, transfers = hits + record.hits, transfers + record.n_transfers
             chips += [decision.chip] if decision.chip else []
@@ -433,6 +432,31 @@ def test_optimizer_decisions_pass_apply_decision(league, policy, runs):
     assert policy.chips or not chips
     if policy.params.max_hits == 0:
         assert hits == 0
+
+
+def test_optimizer_policy_records_a_limited_solve(league, monkeypatch, caplog):
+    """A solve a limit stopped is executed (the best plan found) but never silently: the
+    decision carries the status and gap, and a warning is logged."""
+    pytest.importorskip("highspy")
+    import fplopt.backtest.policies as policies_mod
+
+    honest = policies_mod.optimize
+
+    def limited(problem, params, **kwargs):
+        plans = honest(problem, params, **kwargs)
+        best = replace(plans.best, status="SolutionLimit", mip_gap=0.2)
+        return replace(plans, plans=(best, *plans.plans[1:]))
+
+    monkeypatch.setattr(policies_mod, "optimize", limited)
+    rules = backtest_rules(2023)
+    view, pool, xp = league[16]
+    state = refresh(random_state(view, rules, 3), pool)
+    policy = OptimizerPolicy("rolling", replace(SMALL, horizon=2))
+    with caplog.at_level("WARNING"):
+        decision = policy.decide(DecisionContext(view, state, rules, pool, xp["rolling"]))
+    assert decision.solver_status == "SolutionLimit" and decision.mip_gap == 0.2
+    assert "solver stopped at a limit (SolutionLimit" in caplog.text
+    apply_decision(state, decision, pool, rules)
 
 
 def test_optimizer_policy_is_frozen_named_and_picklable():

@@ -36,12 +36,19 @@ scenario's plan is within `mip_gap` of that scenario's optimum, and each skipped
 optimum is below the returned plan. Bounds carry a small relative margin
 (`model.BOUND_MARGIN`) for HiGHS's feasibility tolerances.
 
+The guarantee assumes every solve reaches `mip_gap`. A solve stopped by a limit
+(`OptimizerParams.node_limit`/`time_limit`) is never silent: its (label, status) goes into
+`SearchStats.not_optimal` and a warning is logged. A scenario stopped before HiGHS found any
+plan (`model.SolveLimitReached`) is skipped with its dual bound kept (the search continues;
+only the no-chip scenario, whose plan the search needs, re-raises).
+
 Only the scenarios that are solved get an objective in `PlanSet.scenario_objectives`; every
 scenario's final bound is in `PlanSet.scenario_bounds`.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Sequence
@@ -49,19 +56,22 @@ from dataclasses import dataclass
 
 from fplopt.backtest.state import GOALKEEPER, TRANSFER_CHIPS, InvalidDecision
 from fplopt.optimize.chips import NO_CHIP, ChipScenario, make_scenario, terminal_value
-from fplopt.optimize.model import BOUND_MARGIN, relaxation_bound, solve_plan
+from fplopt.optimize.model import BOUND_MARGIN, SolveLimitReached, relaxation_bound, solve_plan
 from fplopt.optimize.params import OptimizerParams
 from fplopt.optimize.plans import Plan
 from fplopt.optimize.problem import PlanInput
 
 SEARCHES = ("bound", "all")
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class SearchStats:
     """How a scenario search went: `search` ("bound"/"all"), `n_scenarios` enumerated,
     `n_relaxations` LP bounds computed, `n_solves` scenario MILPs solved, and the seconds
-    spent on each (`relax_seconds`, `solve_seconds`, wall time incl. model builds)."""
+    spent on each (`relax_seconds`, `solve_seconds`, wall time incl. model builds).
+    `not_optimal`: (scenario label, solver status) of every scenario solve a limit stopped
+    (with or without a plan); empty when every solve reached `mip_gap`."""
 
     search: str
     n_scenarios: int
@@ -69,6 +79,7 @@ class SearchStats:
     n_solves: int = 0
     relax_seconds: float = 0.0
     solve_seconds: float = 0.0
+    not_optimal: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,36 +127,66 @@ def search(
         raise ValueError("candidates must start with the no-chip scenario")
     n = len(candidates)
     plans: dict[int, Plan] = {}
+    limited: dict[int, SolveLimitReached] = {}  # stopped at a limit without a plan
     lp: dict[int, float] = {}
     clock = {"relax": 0.0, "solve": 0.0}
 
     def solve(i: int) -> None:
         start = time.perf_counter()
-        plans[i] = solve_plan(problem, params, chips=candidates[i])
+        try:
+            plans[i] = solve_plan(problem, params, chips=candidates[i])
+        except SolveLimitReached as exc:
+            if i == 0:
+                raise
+            log.warning(
+                "chip scenario %s: no plan before the solver stopped (%s); skipped",
+                candidates[i].label,
+                exc.status,
+            )
+            limited[i] = exc
+        else:
+            if not plans[i].optimal:
+                log.warning(
+                    "chip scenario %s: solver stopped at a limit (%s, gap %.2f%%)",
+                    candidates[i].label,
+                    plans[i].status,
+                    100 * plans[i].mip_gap,
+                )
         clock["solve"] += time.perf_counter() - start
 
     if how == "all":
         for i in range(n):
             solve(i)
-        bounds = {s.label: plans[i].bound for i, s in enumerate(candidates)}
+        bounds = {
+            s.label: plans[i].bound if i in plans else limited[i].bound
+            for i, s in enumerate(candidates)
+        }
     else:
-        bounds = _bound_search(problem, params, candidates, plans, lp, clock, solve)
+        bounds = _bound_search(problem, params, candidates, plans, limited, lp, clock, solve)
+    not_optimal = [
+        (s.label, plans[i].status if i in plans else limited[i].status)
+        for i, s in enumerate(candidates)
+        if i in limited or (i in plans and not plans[i].optimal)
+    ]
     stats = SearchStats(
         search=how,
         n_scenarios=n,
         n_relaxations=len(lp),
-        n_solves=len(plans),
+        n_solves=len(plans) + len(limited),
         relax_seconds=clock["relax"],
         solve_seconds=clock["solve"],
+        not_optimal=tuple(not_optimal),
     )
     best = max(plans, key=lambda i: (plans[i].total_objective, -i))
     objectives = {candidates[i].label: plans[i].total_objective for i in sorted(plans)}
     return SearchResult(plans[best], candidates[best], objectives, bounds, stats)
 
 
-def _bound_search(problem, params, candidates, plans, lp, clock, solve) -> dict[str, float]:
-    """Best-first search with bounds (module docstring); fills `plans` and `lp` and
-    returns every scenario's final bound by label."""
+def _bound_search(
+    problem, params, candidates, plans, limited, lp, clock, solve
+) -> dict[str, float]:
+    """Best-first search with bounds (module docstring); fills `plans`, `limited` and `lp`
+    and returns every scenario's final bound by label."""
     n = len(candidates)
     index = {s: i for i, s in enumerate(candidates)}
     terminal = [terminal_value(problem, params, s) for s in candidates]
@@ -171,8 +212,8 @@ def _bound_search(problem, params, candidates, plans, lp, clock, solve) -> dict[
     def own(i: int) -> float:
         """The tightest bound of scenario i itself (LP or MILP), inf if none yet."""
         value = lp.get(i, math.inf)
-        if i in plans:
-            bound = plans[i].bound
+        if i in plans or i in limited:
+            bound = plans[i].bound if i in plans else limited[i].bound
             value = min(value, bound + BOUND_MARGIN * max(1.0, abs(bound)))
         return value
 
@@ -188,7 +229,7 @@ def _bound_search(problem, params, candidates, plans, lp, clock, solve) -> dict[
 
     solve(0)
     while True:
-        open_ = [i for i in range(n) if i not in plans]
+        open_ = [i for i in range(n) if i not in plans and i not in limited]
         if not open_:
             break
         i = max(open_, key=lambda j: (upper(j), -j))
@@ -198,10 +239,13 @@ def _bound_search(problem, params, candidates, plans, lp, clock, solve) -> dict[
         if u < z or (u <= z and i > incumbent):
             break  # no open scenario can beat (or tie earlier than) the incumbent
         b = base[i]
-        if b is not None and b != i and b not in lp and b not in plans:
+        if b is not None and b != i and b not in lp and b not in plans and b not in limited:
             relax(b)
         elif i not in lp:
             relax(i)
         else:
             solve(i)
-    return {s.label: (plans[i].bound if i in plans else upper(i)) for i, s in enumerate(candidates)}
+    return {
+        s.label: plans[i].bound if i in plans else limited[i].bound if i in limited else upper(i)
+        for i, s in enumerate(candidates)
+    }

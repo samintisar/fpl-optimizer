@@ -52,13 +52,16 @@ Chips (one fixed `ChipScenario` per solve, `chips.py`):
 Objective (maximised), with h_t the GW's horizon offset:
   Σ_t decay**h_t · [ Σ_i xp·lineup + (m_t − 1) Σ_i xp·captain + Σ_k w_tk Σ_i xp·bench_k
                      + V(ft[t]) − V(ft[t−1]) + itb_value · bank[t] / 10
-                     − (hit_cost + hit_margin) · hits[t] ]
+                     − (hit_cost + hit_margin) · hits[t] − ε · Σ_i buy[i,t] ]
   + terminal_value(scenario)
 with m_t the captain multiplier (2, 3 under TC), w_tk the bench weights (1 under BB),
-V(s) = Σ_{n ≤ s} ft_value[n] and V(ft[−1]) = 0 (`params`). `bank[t]` is the persistent
-bank, so a Free Hit GW credits the money carried past it, not the FH squad's leftover.
-The terminal value of unused chips (`chips.terminal_value`) is a constant per scenario,
-undecayed; `Plan.objective` excludes it and `Plan.terminal_value` holds it. This follows
+V(s) = Σ_{n ≤ s} ft_value[n] and V(ft[−1]) = 0 (`params`), ε = `params.tie_epsilon` (a
+tie-break per player bought, FH squad buys included: equal-xP plans prefer fewer moves).
+`bank[t]` is the persistent bank, so a Free Hit GW credits the money carried past it, not
+the FH squad's leftover. The terminal value of unused chips (`chips.terminal_value`) is a
+constant per scenario, undecayed; `Plan.objective` excludes it and `Plan.terminal_value`
+holds it. There is no terminal value of the squad or of banked FTs at the horizon's end
+(a known limitation: a short horizon undervalues moves that pay off later). This follows
 open-fpl-solver (solioanalytics/open-fpl-solver, `dev/solver.py`, Apache-2.0) for the FT
 value (its `gw_ft_gain`: the gain in FT-state value, inside the decay), money in the bank
 (`itb_value · in_the_bank[w]`, after transfers), hits (`hit_cost · penalized_transfers`,
@@ -101,6 +104,33 @@ BOUND_MARGIN = 1e-6
 
 class InfeasiblePlan(RuntimeError):
     """The solver found no feasible plan (e.g. contradictory fixed transfers)."""
+
+
+class SolveLimitReached(InfeasiblePlan):
+    """HiGHS stopped at a limit (`params.node_limit` or `time_limit`) before finding any
+    plan. `status` is the solver status, `bound` an upper bound on the scenario's best
+    `total_objective` (inf if unknown)."""
+
+    def __init__(self, message: str, status: str, bound: float) -> None:
+        super().__init__(message)
+        self.status = status
+        self.bound = bound
+
+
+def solver_options(params: OptimizerParams) -> dict[str, Any]:
+    """HiGHS options for `params`: gap, threads, a fixed seed, the deterministic node limit
+    and, only when set, the wall-clock limit."""
+    options: dict[str, Any] = {
+        "msg": False,
+        "gapRel": params.mip_gap,
+        "threads": params.threads,
+        "random_seed": 0,
+    }
+    if params.time_limit is not None:
+        options["timeLimit"] = params.time_limit
+    if params.node_limit is not None:
+        options["mip_max_nodes"] = params.node_limit
+    return options
 
 
 def _sum(terms: Iterable[tuple[Any, float]]) -> pulp.LpAffineExpression:
@@ -519,6 +549,9 @@ class _Model:
                     terms += [(v, sign * d * c) for v, c in expr]
             if not isinstance(self.hits[t], int):
                 terms.append((self.hits[t], -d * hit_cost))
+            if params.tie_epsilon:
+                buys = self.fh_buy if t in self.fh else self.buy
+                terms += [(v, -d * params.tie_epsilon) for (_, tt), v in buys.items() if tt == t]
         return _sum(terms) + constant
 
 
@@ -538,7 +571,9 @@ def solve_plan(
     scenario: a `ChipScenario`, or a mapping position in the horizon → chip name (validated
     with `chips.make_scenario`; InvalidDecision if the rules don't allow it); `None`/empty
     = no chip. The plan's `terminal_value` is the scenario's (`chips.terminal_value`).
-    Raises InfeasiblePlan if HiGHS returns no solution."""
+    Raises InfeasiblePlan if HiGHS returns no solution: `SolveLimitReached` if it stopped
+    at a limit before finding one. A plan found before a limit stopped the solve has a
+    `status` other than `Optimal` (`Plan.optimal` is False; callers must check it)."""
     if isinstance(chips, ChipScenario):
         scenario = chips
     else:
@@ -553,19 +588,21 @@ def solve_plan(
     model.lp.setObjective(model.objective() + terminal)
     build_seconds = time.perf_counter() - start
 
-    solver = _BulkHiGHS(
-        msg=False,
-        gapRel=params.mip_gap,
-        threads=params.threads,
-        timeLimit=params.time_limit,
-        random_seed=0,
-    )
+    solver = _BulkHiGHS(**solver_options(params))
     start = time.perf_counter()
     stats = model.lp.solve(solver)
     solve_seconds = time.perf_counter() - start
-    if not stats.has_solution:
-        raise InfeasiblePlan(f"no feasible plan (HiGHS status {stats.status_str})")
     info = model.lp.solverModel.getInfo()
+    status = str(stats.status_str)
+    if not stats.has_solution:
+        if stats.status == pulp.LpSolveStatus.Infeasible:
+            raise InfeasiblePlan(f"no feasible plan (HiGHS status {status})")
+        bound = float(model.lp.objective.constant) - float(info.mip_dual_bound)
+        raise SolveLimitReached(
+            f"no plan found before the solver stopped (status {status})",
+            status,
+            bound if math.isfinite(bound) else math.inf,
+        )
     gws = _read_plan(model)
     objective = sum(g.objective for g in gws)
     # HiGHS minimises −(objective − constant) (PuLP flips the sense and keeps the constant),
@@ -576,8 +613,9 @@ def solve_plan(
     return Plan(
         gws=gws,
         objective=objective,
-        status=str(stats.status_str),
+        status=status,
         mip_gap=float(info.mip_gap),
+        n_nodes=int(info.mip_node_count),
         build_seconds=build_seconds,
         solve_seconds=solve_seconds,
         n_candidates=len(problem.players),
@@ -597,7 +635,10 @@ def relaxation_bound(
     tolerances. `math.inf` when HiGHS doesn't report the LP optimal (no bound)."""
     model = _Model(problem, params, scenario)
     model.lp.setObjective(model.objective() + terminal_value(problem, params, scenario))
-    solver = _BulkHiGHS(mip=False, msg=False, threads=params.threads, timeLimit=params.time_limit)
+    options = solver_options(params)
+    del options["gapRel"]
+    options.pop("mip_max_nodes", None)
+    solver = _BulkHiGHS(mip=False, **options)
     # Only the optimum is needed: run HiGHS without PuLP reading the solution back.
     solver.createAndConfigureSolver(model.lp)
     solver.buildSolverModel(model.lp)
@@ -655,6 +696,7 @@ def _read_plan(model: _Model) -> tuple[GwPlan, ...]:
             - previous_ft_value
             + params.itb_value * kept_bank / 10
             - hit_cost * hits
+            - params.tie_epsilon * len(ins)
         )
         previous_ft_value = ft_value
         out.append(

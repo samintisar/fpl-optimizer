@@ -29,10 +29,34 @@ reference check (Phase 4 Task 4) compares like with like:
   was -0.9 pts/GW, max_hits 1 with hit_margin 2 -1.4 (28 hits a season) and unlimited
   -4.0 (81 hits a season); realized transfer gains are ~1/4-1/2 of the predicted ones, so
   a hit (4 points) rarely pays. `hit_margin` only matters with `max_hits` > 0.
+- `tie_epsilon`: a tie-break cost per player bought (each `buy`, including a Free Hit
+  squad's), inside the decay like everything else, so among plans with equal xP the one
+  with fewer transfers wins (an all-zero xP GW, e.g. 2016/17 GW1 under `rolling`, made 5
+  arbitrary transfers with predicted gain 0). Default 1e-4 points per buy: far below any
+  xP difference that matters (xP has 2-3 significant decimals) and below the default
+  `mip_gap` on any real objective, so it only breaks ties. It is part of `Plan.objective`
+  (the solver's objective), which therefore differs from open-fpl-solver's by
+  1e-4 × decayed buys; `dev/reference_check.py` sets it to 0.
+
+Solver limits (Phase 4 review): backtests must not depend on wall-clock time, so by default
+there is no `time_limit` and the safety net is deterministic: `node_limit` (HiGHS
+`mip_max_nodes`; with one thread and a fixed seed the node sequence is reproducible, so
+a solve stopped by it stops at the same plan on any machine and under any load). The
+default (`DEFAULT_NODE_LIMIT`, 20,000) is far above what real instances need: over 78 real
+no-chip cases (the 10 benchmark deadlines and GW1/GW2 of 2016/17-2024/25, template and
+random squads, ep_next and rolling) HiGHS explored at most 11 nodes at the default gap and
+255 at gap 1e-4 (most work is at the root), so it only stops pathological branching. The
+same cases took up to 306 s per solve on a loaded machine, where the old 60 s wall-clock
+safety net would have stopped them at different plans. `time_limit` (seconds) is a
+wall-clock cap for interactive use only
+(`fplopt optimize plan`, the benchmark): results then depend on machine speed. A solve
+stopped by either limit is not `Optimal`; `Plan.status` says so and the callers record it
+(`search`, `OptimizerPolicy`, the simulator's `solver_status` column).
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -55,6 +79,8 @@ DEFAULT_CHIP_VALUE = MappingProxyType({"wildcard": 6.0, "freehit": 4.0, "bboost"
 # unpruned pool this loses 0 points in the median and at most 0.21 (10/30/30/15: max 1.0,
 # at GW1 squad builds), with ~130 candidates and a median solve of ~1.4 s at that gap.
 DEFAULT_PRUNE_N = MappingProxyType({1: 20, 2: 60, 3: 60, 4: 30})
+DEFAULT_NODE_LIMIT = 20_000  # HiGHS mip_max_nodes: a deterministic safety net
+DEFAULT_TIE_EPSILON = 1e-4  # points per player bought (tie-break, module docstring)
 
 
 @dataclass(frozen=True)
@@ -63,8 +89,15 @@ class OptimizerParams:
 
     `prune_n=None` disables top-N pruning and `prune_dominated=False` dominance pruning
     (both off = every pool player is a candidate). `mip_gap` is HiGHS's `mip_rel_gap`,
-    `threads` its thread count (1 for reproducibility), `time_limit` (seconds) a safety net
-    only."""
+    `threads` its thread count (1 for reproducibility), `node_limit` its `mip_max_nodes`
+    (deterministic safety net; None = none) and `time_limit` a wall-clock cap in seconds
+    (None = none, the default; interactive use only, see the module docstring).
+    `tie_epsilon` is the tie-break cost per player bought.
+
+    Validation: `horizon` ≥ 1, `decay` in (0, 1], `itb_value`, `hit_margin` and
+    `tie_epsilon` ≥ 0, `max_hits` ≥ 0 or None (dominance pruning assumes a cheaper player
+    with ≥ xP is never worse, which a negative `itb_value` would break; a negative hit
+    margin would make hits cheaper than the rules' cost)."""
 
     horizon: int = 6
     decay: float = 0.85
@@ -78,7 +111,9 @@ class OptimizerParams:
     prune_dominated: bool = True
     mip_gap: float = 0.005
     threads: int = 1
-    time_limit: float = 60.0
+    time_limit: float | None = None
+    node_limit: int | None = DEFAULT_NODE_LIMIT
+    tie_epsilon: float = DEFAULT_TIE_EPSILON
 
     def __post_init__(self) -> None:
         if self.horizon < 1:
@@ -89,6 +124,16 @@ class OptimizerParams:
             object.__setattr__(self, "max_hits", int(self.max_hits))
         if not 0 < self.decay <= 1:
             raise ValueError(f"decay must be in (0, 1], got {self.decay}")
+        nonnegative = {
+            "itb_value": self.itb_value,
+            "hit_margin": self.hit_margin,
+            "tie_epsilon": self.tie_epsilon,
+        }
+        for name, raw in nonnegative.items():
+            value = float(raw)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be a finite number >= 0, got {raw}")
+            object.__setattr__(self, name, value)
         ft_value = {int(k): float(v) for k, v in self.ft_value.items()}
         if any(k < 1 for k in ft_value) or any(v < 0 for v in ft_value.values()):
             # Negative values would make the solver prefer fewer FTs than the rules give,
@@ -110,8 +155,12 @@ class OptimizerParams:
             raise ValueError(f"mip_gap must be in [0, 1), got {self.mip_gap}")
         if self.threads < 1:
             raise ValueError(f"threads must be >= 1, got {self.threads}")
-        if self.time_limit <= 0:
-            raise ValueError(f"time_limit must be > 0, got {self.time_limit}")
+        if self.time_limit is not None and not self.time_limit > 0:
+            raise ValueError(f"time_limit must be > 0 or None, got {self.time_limit}")
+        if self.node_limit is not None:
+            if self.node_limit < 1:
+                raise ValueError(f"node_limit must be >= 1 or None, got {self.node_limit}")
+            object.__setattr__(self, "node_limit", int(self.node_limit))
 
     def __reduce__(self) -> tuple:
         """Pickle by the constructor's arguments (the read-only mappings can't be pickled
@@ -132,6 +181,8 @@ class OptimizerParams:
                 self.mip_gap,
                 self.threads,
                 self.time_limit,
+                self.node_limit,
+                self.tie_epsilon,
             ),
         )
 
