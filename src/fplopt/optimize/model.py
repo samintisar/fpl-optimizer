@@ -11,8 +11,8 @@ Variables (binary unless noted):
   Free Hit GW;
 - `lineup[i,t]`, `captain[i,t]`, `bench[i,t,k]` (k = 0 for goalkeepers, 1..3 outfield);
 - `bank[t]` ≥ 0 (continuous); per GW after the first, `fts[t,s]` for s = 1..cap (one
-  binary per FT state, `ft[t] = Σ s · fts[t,s]`); per normal GW `hits[t]` ≥ 0 (integer)
-  and `take_hits[t]`; per transition `ft_capped[t]`;
+  binary per FT state, `ft[t] = Σ s · fts[t,s]`); per normal GW `hits[t]` ≥ 0 (integer,
+  ≤ `params.max_hits` when set) and `take_hits[t]`; per transition `ft_capped[t]`;
 - Free Hit GW t only: `fh_squad[i,t]`, `fh_buy[i,t]`, `fh_sell_first[i,t]`,
   `fh_sell_later[i,t]` and `fh_bank[t]` ≥ 0, the one-GW squad (see *Chips*).
 
@@ -427,7 +427,9 @@ class _Model:
                 self.hits[t] = 0
             else:
                 n = self.n_transfers(t)
-                hits = self.lp.add_variable(f"hits_{t}", lowBound=0, cat=pulp.LpInteger)
+                hits = self.lp.add_variable(
+                    f"hits_{t}", lowBound=0, upBound=self.params.max_hits, cat=pulp.LpInteger
+                )
                 take = self._bin(f"take_hits_{t}")
                 lp += hits >= n - self.ft[t]
                 lp += hits <= n - self.ft[t] + m * (1 - take)

@@ -334,6 +334,64 @@ def test_hit_margin(margin: float, n_transfers: int, hits: int) -> None:
     replay(state, plan, pool)
 
 
+@pytest.mark.parametrize(
+    ("max_hits", "n_transfers", "hits"), [(None, 3, 2), (2, 3, 2), (1, 2, 1), (0, 1, 0)]
+)
+def test_max_hits_caps_the_hits_per_gw(max_hits, n_transfers: int, hits: int) -> None:
+    """Three upgrades worth 6/5/5 against a 4-point hit: unlimited takes two hits; max_hits
+    caps them (0 = only the free transfer)."""
+    state, pool, xp, ups = upgrade_instance(gains=(6.0, 5.0))
+    third = key(7, 3, 0)
+    values = xp.set_index("player_key")["xp"]
+    assert values[third] == 0.0 and third not in state.player_keys
+    xp.loc[xp["player_key"] == third, "xp"] = 7.0
+    params = replace(EXACT, horizon=1, max_hits=max_hits)
+    _, plan = plan_for(state, pool, xp, params)
+    assert (plan.first.n_transfers, plan.first.hits) == (n_transfers, hits)
+    assert ups[0] in plan.first.transfers_in  # the best upgrade always goes first
+    replay(state, plan, pool)
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_max_hits_holds_in_every_horizon_gw(seed: int) -> None:
+    state, pool, xp = medium_instance(seed, ft=1, n_gws=3)
+    churny = xp.assign(xp=xp["xp"] * (1 + 2 * (xp["player_key"] * (xp["horizon"] + 1) % 3)))
+    free = OptimizerParams(horizon=3, hit_margin=-3.5)  # hits nearly free: take many
+    _, unlimited = plan_for(state, pool, churny, free)
+    assert max(g.hits for g in unlimited.gws) > 1
+    for cap in (0, 1):
+        _, plan = plan_for(state, pool, churny, replace(free, max_hits=cap))
+        assert all(g.hits <= cap for g in plan.gws), [g.hits for g in plan.gws]
+        assert plan.objective <= unlimited.objective * (1 + free.mip_gap) + 1e-6
+        replay(state, plan, pool)
+
+
+def test_max_hits_validation_and_pickling() -> None:
+    import pickle
+    from dataclasses import fields
+
+    with pytest.raises(ValueError, match="max_hits"):
+        OptimizerParams(max_hits=-1)
+    every = OptimizerParams(
+        horizon=3,
+        decay=0.9,
+        ft_value={2: 1.0},
+        itb_value=0.1,
+        hit_margin=2.0,
+        max_hits=1,
+        bench_weights=(0.1, 0.2, 0.3, 0.4),
+        chip_value={"wildcard": 1.0},
+        prune_n={1: 5, 2: 6, 3: 7, 4: 8},
+        prune_dominated=False,
+        mip_gap=0.01,
+        threads=2,
+        time_limit=5.0,
+    )
+    assert len(every.__reduce__()[1]) == len(fields(OptimizerParams))
+    for params in (OptimizerParams(), every, OptimizerParams(prune_n=None)):
+        assert pickle.loads(pickle.dumps(params)) == params
+
+
 def test_high_ft_value_rolls_zero_ft_value_transfers() -> None:
     state, pool, xp, ups = upgrade_instance(n_gws=2, gains=(1.0, 0.5))
     _, rolled = plan_for(state, pool, xp, replace(EXACT, horizon=2, ft_value={2: 10.0}))

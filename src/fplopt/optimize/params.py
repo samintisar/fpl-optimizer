@@ -18,6 +18,8 @@ reference check (Phase 4 Task 4) compares like with like:
   open-fpl-solver's `decay_base ** (w − next_gw)`.
 - Hits cost `rules.hit_cost + hit_margin` each, inside the decay (open-fpl-solver's
   `hit_cost × penalized_transfers` sits inside its decayed GW total too).
+- `max_hits`: at most this many hits in every horizon GW (`None` = unlimited, `0` = never
+  take a hit); a safeguard against inflated xP chasing form with hits (Phase 4 Task 5).
 """
 
 from __future__ import annotations
@@ -60,6 +62,7 @@ class OptimizerParams:
     ft_value: Mapping[int, float] = field(default_factory=lambda: DEFAULT_FT_VALUE)
     itb_value: float = 0.08
     hit_margin: float = 0.0
+    max_hits: int | None = None
     bench_weights: tuple[float, float, float, float] = DEFAULT_BENCH_WEIGHTS
     chip_value: Mapping[str, float] = field(default_factory=lambda: DEFAULT_CHIP_VALUE)
     prune_n: Mapping[int, int] | None = field(default_factory=lambda: DEFAULT_PRUNE_N)
@@ -71,6 +74,10 @@ class OptimizerParams:
     def __post_init__(self) -> None:
         if self.horizon < 1:
             raise ValueError(f"horizon must be >= 1, got {self.horizon}")
+        if self.max_hits is not None:
+            if self.max_hits < 0:
+                raise ValueError(f"max_hits must be >= 0 or None, got {self.max_hits}")
+            object.__setattr__(self, "max_hits", int(self.max_hits))
         if not 0 < self.decay <= 1:
             raise ValueError(f"decay must be in (0, 1], got {self.decay}")
         ft_value = {int(k): float(v) for k, v in self.ft_value.items()}
@@ -96,6 +103,28 @@ class OptimizerParams:
             raise ValueError(f"threads must be >= 1, got {self.threads}")
         if self.time_limit <= 0:
             raise ValueError(f"time_limit must be > 0, got {self.time_limit}")
+
+    def __reduce__(self) -> tuple:
+        """Pickle by the constructor's arguments (the read-only mappings can't be pickled
+        as they are), so params travel to backtest worker processes."""
+        return (
+            OptimizerParams,
+            (
+                self.horizon,
+                self.decay,
+                dict(self.ft_value),
+                self.itb_value,
+                self.hit_margin,
+                self.max_hits,
+                self.bench_weights,
+                dict(self.chip_value),
+                None if self.prune_n is None else dict(self.prune_n),
+                self.prune_dominated,
+                self.mip_gap,
+                self.threads,
+                self.time_limit,
+            ),
+        )
 
     def ft_state_value(self, s: int) -> float:
         """V(s) = Σ_{n ≤ s} ft_value[n]: the value of having s free transfers."""
