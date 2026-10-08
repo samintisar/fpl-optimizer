@@ -120,6 +120,16 @@ def test_table_keeps_rows_strictly_before_the_deadline(store):
     ].tolist() == [10, 20]
 
 
+def test_earlier_is_the_same_store_at_an_earlier_cutoff(store):
+    view = store.as_of(DEADLINE + pd.Timedelta(minutes=30))
+    earlier = view.earlier(DEADLINE)
+    assert earlier.deadline == DEADLINE
+    assert earlier.table("player_match")["fixture_key"].tolist() == [10]
+    assert view.earlier(view.deadline).table("player_match")["fixture_key"].tolist() == [10, 20]
+    with pytest.raises(ValueError, match="after the view's deadline"):
+        earlier.earlier(DEADLINE + pd.Timedelta(microseconds=1))
+
+
 def test_table_filters_on_available_at_not_event_time():
     df = player_match().assign(event_time=ts("2000-01-01"))
     view = DataStore(tables={"player_match": df}).as_of(DEADLINE)

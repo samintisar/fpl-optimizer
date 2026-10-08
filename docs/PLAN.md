@@ -249,6 +249,19 @@ Philosophy: **market where it is strong, structure elsewhere.** Betting markets 
 
 Blending rule everywhere: equal weights or a single fixed weight — never weights estimated per fold (they overfit).
 
+**Phase 5 decisions** (plan `docs/superpowers/plans/2026-10-08-phase-5-models.md`):
+- Each component model is split into `fit(view)` and `predict(view, fitted)`. The fit for deadline d uses `view.earlier(cutoff)`, where the cutoff is the deadline of the season's latest refit GW ≤ d (`gw_index` 1, 5, 9, …). The registered model is still one callable on the view, so the leakage check covers the fit. The backtester's `Caches` memoizes fits by cutoff; model modules keep no state.
+- LightGBM runs only through `fplopt.models.gbm`: fixed `seed`, `num_threads=1`, `deterministic=True`, `force_row_wise=True`.
+- `starts` is null before 2022/23 GW16. Before then, a team's 11 players with the most minutes in a fixture count as its starters; Task 3 measures the accuracy (§6.3).
+- Minutes features with no source are dropped: European/cup matches, manager tenure, age.
+- Phase 5 criterion 1 ("beat both baselines on component metrics") is tested on xP and decision metrics, because the baselines have no components. On validate, `v1` vs `rolling` and vs `ep_next` must have:
+  - lower MSE per player-GW (one-sided Diebold-Mariano clustered by GW, p < 0.10);
+  - lower candidate-weighted MSE;
+  - no worse MSE in any predicted-xP band or over horizons 1–5;
+  - no worse captain or XI regret.
+
+  Component metrics (minutes, goals, assists, P(CS)) are reported against simple references for diagnosis.
+
 ### 6.1 Team model — market primary
 **Market-implied λ (primary for GWs with odds, typically GW+1, sometimes +2):**
 - Remove the bookmaker margin with the power method (Shin as an alternative; both beat proportional scaling when there is a clear favourite).
@@ -495,7 +508,7 @@ Horizon, decay and FT value are confounded — tune them jointly.
 | 2 | `as_of` layer + leakage tests | Corrupt-the-future test passes |
 | 3 | Backtester + baselines (rolling avg, `ep_next`) + greedy policy + paired evaluation | Simulated seasons from arbitrary states; baselines scored per §5 |
 | 4 | Optimizer (transfers, captain, bench, chip scenarios, top-3) | Backtest runs end-to-end; ~~beats greedy~~ (deferred to Phase 5, §12); matches open-fpl-solver on no-chip cases; solve times acceptable — **done 2026-10-08** |
-| 5 | Real models (market-implied team model, shares, minutes, components, calibration) | Beat both baselines on component metrics in validation; **and the optimizer beats greedy with Phase 5 xP** (paired, same xP: chosen on develop, confirmed on validate, deflated for the variants tried; full run and the per-decision design fixed in §11) |
+| 5 | Real models (market-implied team model, shares, minutes, components, calibration) | Beat both baselines on component metrics in validation (tested on xP and decision metrics, §6 *Phase 5 decisions*); **and the optimizer beats greedy with Phase 5 xP** (paired, same xP: chosen on develop, confirmed on validate, deflated for the variants tried; full run and the per-decision design fixed in §11) |
 | 6 | Holdout evaluation | Single pre-registered run on 2025/26; result recorded |
 | 7 | Telegram bot + go live | `/register`, `/plan`, alerts working for my team |
 | 8 | Distributions, sensitivity analysis, uncertain fixtures, polish | Each adopted only if it beats the current policy in paired validation |
@@ -572,5 +585,6 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-07 | Optimizer: PuLP on in-process HiGHS (1 thread, gap stop), chips by fixed scenarios, hits decayed, open-fpl-solver objective conventions, parallel backtests by (season, start). | PLAN §2/§7; deterministic decisions for the leakage check; like-for-like reference check; hundreds of solves per backtest. |
 | 2026-10-08 | Optimizer defaults `max_hits = 0` (conservative: unlimited hits clearly lose, max 1 with margin 2 undetermined) and `itb_value = 0`; `ep_next_fade` xP; parallel backtests (`--jobs`). Phase 4 full-run gains vs greedy (rolling +0.90/GW, ep_next +1.92/GW) are in-sample only (see the next row); chips +4.3/GW is chips used vs wasted. | Cash in the bank was hoarded (2016/17 GW1 sell-off); realized transfer gains are ~⅕–⅓ of predicted (§7 Phase 4 results). |
 | 2026-10-08 | Merge Phase 4 without its "optimizer beats greedy" criterion; the criterion moves to Phase 5 (with the real xP models: develop-selected, validate-confirmed, deflated). | Out of sample the full-run edge vanishes (validate: rolling −0.03, ep_next −0.13 per GW; 2021/22 carries ~⅔ of it; season-level p 0.14 / 0.11; deflated ≈ +0.08 / +0.44) the split pattern flips with the start set; per decision the optimizer doesn't beat greedy (negative with the roll continuation; with each arm's own continuation positive but reference-dependent, season-level p ≥ 0.22) (§7 *Phase 4 results*). The planner itself is done and correct (reference check, solve times, leakage checks); its edge depends on xP quality. |
+| 2026-10-08 | Phase 5 models fit walk-forward: refit every 4 GWs via `AsOfView.earlier`, with fits memoized by the caller; LightGBM only through `fplopt.models.gbm` (deterministic). Criterion 1 is tested on xP MSE and decision metrics against `rolling` and `ep_next` on validate. Phase 5 ships as two PRs (5a models, 5b decisions). | ~10 fits per season instead of one per deadline, still leak-checked end to end; the baselines have no components to compare; one review per PR stays manageable. |
 | 2026-10-08 | Backtests use a deterministic node limit, no wall-clock limit (60 s only for `optimize plan`/`bench`); solver status recorded per GW; tie-break ε 1e-4 per buy; parallel units on a pipe-per-worker pool. | Results must not depend on machine load (solves took up to 306 s on a loaded machine); equal-xP GWs made arbitrary transfers; ProcessPoolExecutor's queue semaphores broke under load on Windows (Phase 4 review). |
 | 2026-10-07 | Chip scenarios searched best-first by LP/derived upper bounds (same plan as solving all); bulk PuLP→highspy hand-over; club-aware dominance pruning; top-N 20/60/60/30. | #10 benchmark: 107–750 s → median 14 s per deadline; old dominance lost up to 6.6 pts, 10/30/30/15 up to 1.0. |

@@ -70,6 +70,7 @@ from fplopt.backtest.xg_points import team_xg_table, xg_score_matches
 from fplopt.features.baseline import player_pool
 from fplopt.features.store import AsOfView, DataStore
 from fplopt.models import MODELS
+from fplopt.models.fitted import FittedModel
 from fplopt.seasons import HOLDOUT_SEASONS, season_label
 
 log = logging.getLogger(__name__)
@@ -175,16 +176,19 @@ class GwOutcomes:
 
 
 class Caches:
-    """xP frames per (model, deadline), pools per deadline and outcomes per (season, gw,
-    rules.label), for one `DataStore` (using them with another raises). Share one instance
-    across policies and start states; the cached frames must not be modified."""
+    """xP frames per (model, deadline), walk-forward fits per (model, cutoff) (`FittedModel`:
+    the frame is `predict(view, fit)` with the memoized fit, the same as calling the model),
+    pools per deadline and outcomes per (season, gw, rules.label), for one `DataStore`
+    (using them with another raises). Share one instance across policies and start states;
+    the cached frames and fits must not be modified."""
 
     def __init__(self) -> None:
         self._store: DataStore | None = None
         self._xp: dict[tuple[str, pd.Timestamp], pd.DataFrame] = {}
+        self._fits: dict[tuple[str, pd.Timestamp], Any] = {}
         self._pool: dict[pd.Timestamp, pd.DataFrame] = {}
         self._outcomes: dict[tuple[int, int, str], GwOutcomes] = {}
-        self.timings: dict[str, float] = {"xp": 0.0, "pool": 0.0, "outcomes": 0.0}
+        self.timings: dict[str, float] = {"xp": 0.0, "fit": 0.0, "pool": 0.0, "outcomes": 0.0}
 
     def _check(self, store: DataStore) -> None:
         if self._store is None:
@@ -208,10 +212,31 @@ class Caches:
             raise ValueError(f"unknown xp_model {model!r} (MODELS: {sorted(MODELS)})")
         key = (model, view.deadline)
         if key not in self._xp:
-            start = time.perf_counter()
-            self._xp[key] = MODELS[model](view)
+            builder = MODELS[model]
+            if isinstance(builder, FittedModel):
+                fitted = self.fit(store, model, view)
+                start = time.perf_counter()
+                self._xp[key] = builder.predict(view, fitted)
+            else:
+                start = time.perf_counter()
+                self._xp[key] = builder(view)
             self.timings["xp"] += time.perf_counter() - start
         return self._xp[key]
+
+    def fit(self, store: DataStore, model: str, view: AsOfView) -> Any:
+        """The `FittedModel` `model`'s fit for `view`'s deadline: `fit(view.earlier(cutoff))`,
+        memoized by cutoff; `view` must come from `store`."""
+        self._check(store)
+        builder = MODELS[model]
+        if not isinstance(builder, FittedModel):
+            raise ValueError(f"xp_model {model!r} is not fitted walk-forward")
+        cutoff = builder.cutoff(view)
+        key = (model, cutoff)
+        if key not in self._fits:
+            start = time.perf_counter()
+            self._fits[key] = builder.fit(view.earlier(cutoff))
+            self.timings["fit"] += time.perf_counter() - start
+        return self._fits[key]
 
     def outcomes(
         self, store: DataStore, rules: Rules, season: int, gw: int, lockdown: pd.Timestamp
