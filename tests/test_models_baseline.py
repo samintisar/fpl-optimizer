@@ -252,10 +252,14 @@ def test_every_feature_and_model_runs_on_the_synthetic_league(kwargs):
 
 
 def test_registry():
+    from fplopt.models.assemble import fit_v1, predict_v1
+    from fplopt.models.fitted import FittedModel
+
     assert MODELS == {
         "rolling": xp_rolling,
         "ep_next": xp_ep_next,
         "ep_next_fade": xp_ep_next_fade,
+        "v1": FittedModel(fit_v1, predict_v1),
     }
 
 

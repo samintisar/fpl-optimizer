@@ -166,6 +166,32 @@ def test_suspensions_zero_the_banned_fixtures(league, fitted, cards, banned):
     np.testing.assert_allclose(sums, 11.0, atol=1e-6)
 
 
+def test_ban_residual_uses_the_banned_rows_start_rate(league, fitted):
+    from fplopt.features.history import training_frame
+
+    assert fitted.ban_start == 0.0 and fitted.ban_sub == 0.0  # off by default
+    v = view(league)
+    rows = training_frame(v)
+    banned = rows[rows["banned"] != 0]
+    assert len(banned) > 0
+    weight = 0.7 ** (2023 - banned["season"]).to_numpy(dtype="float64")
+    residual = fit_minutes(v, dataclasses.replace(PARAMS, ban_residual=True))
+    expected = float((banned["start"] * weight).sum() / weight.sum())
+    assert residual.ban_start == pytest.approx(expected)
+    assert residual.start.booster.model_to_string() == fitted.start.booster.model_to_string()
+
+    tables = {name: df.copy() for name, df in league.items()}
+    key = regular_starter(tables)
+    pm = tables["player_match"]
+    at = (pm["player_key"] == key) & (pm["season"] == 2023) & (pm["gw"] == 4)
+    pm.loc[at, "red_cards"] = 1
+    planted = dataclasses.replace(residual, ban_start=0.2, ban_sub=0.5)
+    out = predict_minutes(view(tables), planted)
+    first = out[out["player_key"] == key].sort_values("horizon").iloc[0]
+    assert first["p_start"] == pytest.approx(0.2)  # held fixed through the normalization
+    assert first["p_sub"] == pytest.approx(0.8 * 0.5)
+
+
 def test_fits_are_deterministic(league, fitted):
     again = fit_minutes(view(league), PARAMS)
     assert again.start.booster.model_to_string() == fitted.start.booster.model_to_string()

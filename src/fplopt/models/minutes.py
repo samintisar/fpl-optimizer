@@ -33,8 +33,11 @@ probabilities are unconditional: `p_60` = P(minutes ≥ 60) = p_start · P(60+ |
    over his last 38 rows shrunk toward p_model with `long_run_prior` pseudo-rows.
 2. Suspensions (`fplopt.features.history.BAN_RULES`, `RED_BAN`): the first `ban_remaining`
    fixtures of his club in the horizon get p_start = p_sub = 0 (so every probability and
-   e_minutes are 0). Rules: 5 yellow cards reached by gw_index 19 → 1 match, 10 by gw_index
-   32 → 2, 15 → 3, any red card → 1; served by his next league fixtures. Simplified: cups and
+   e_minutes are 0); with `ban_residual`, p_start and P(sub | no start) are instead the
+   weighted rates of the rule-banned training rows (`MinutesFit.ban_start` / `ban_sub`:
+   the rules are approximate, and such rows still start ~10% of the time), held fixed.
+   Rules: 5 yellow cards reached by gw_index 19 → 1 match, 10 by gw_index 32 → 2, 15 → 3,
+   any red card → 1; served by his next league fixtures. Simplified: cups and
    Europe ignored, gw_index stands in for the club's 19th / 32nd match, red-card types are
    not distinguished (straight reds are 3 matches in reality; the model sees `reds_l3`).
 3. Team normalization per (fixture, team) over the pool players of that club: a logit shift
@@ -103,6 +106,9 @@ class MinutesParams:
     long_run_prior: float = 5.0  # pseudo-rows of the model's p_start in the long-run rate
     max_shift: float = 1.0  # |logit shift| bound of the team normalization
     max_scale: float = 1.25  # bound of the team minutes scaling
+    # Banned fixtures: P(start) = 0 (False) or the walk-forward residual start rate of
+    # rule-banned training rows (True; the ban rules are approximate). Task 5 tests it.
+    ban_residual: bool = False
 
 
 @dataclass(frozen=True)
@@ -127,6 +133,8 @@ class MinutesFit:
     minutes_sub: float  # E[minutes | sub appearance]
     params: MinutesParams
     n_rows: int
+    ban_start: float = 0.0  # P(start) in a banned fixture (`ban_residual`; else 0)
+    ban_sub: float = 0.0  # P(sub appearance | no start) in a banned fixture
 
 
 def _weighted_mean(values: pd.Series, weights: pd.Series, default: float) -> float:
@@ -145,9 +153,15 @@ def fit_minutes(view: AsOfView, params: MinutesParams | None = None) -> MinutesF
     params = MinutesParams() if params is None else params
     season, _ = view.gameweek_for_deadline()
     rows = training_frame(view)
-    rows = rows[rows["banned"] == 0].reset_index(drop=True)
     age = (season - rows["season"]).clip(lower=0).astype("float64")
     rows["weight"] = np.power(params.season_decay, age)
+    banned = rows[rows["banned"] != 0]
+    rows = rows[rows["banned"] == 0].reset_index(drop=True)
+    ban_start = ban_sub = 0.0
+    if params.ban_residual:
+        ban_start = _weighted_mean(banned["start"], banned["weight"], 0.0)
+        benched_banned = banned[banned["start"] == 0]
+        ban_sub = _weighted_mean(benched_banned["sub"], benched_banned["weight"], 0.0)
     started = rows[rows["start"] == 1].reset_index(drop=True)
     benched = rows[rows["start"] == 0].reset_index(drop=True)
     sixty = started["sixty"] == 1
@@ -165,6 +179,8 @@ def fit_minutes(view: AsOfView, params: MinutesParams | None = None) -> MinutesF
         minutes_sub=_weighted_mean(subbed["minutes"], subbed["weight"], 18.0),
         params=params,
         n_rows=len(rows),
+        ban_start=ban_start,
+        ban_sub=ban_sub,
     )
 
 
@@ -271,8 +287,8 @@ def predict_minutes(view: AsOfView, fit: MinutesFit) -> pd.DataFrame:
     p_start = weight * p_model + (1.0 - weight) * long_run
 
     banned = frame["club_fixture_order"].to_numpy() < frame["ban_remaining"].to_numpy()
-    p_start = np.where(banned, 0.0, p_start)
-    csub = np.where(banned, 0.0, csub)
+    p_start = np.where(banned, fit.ban_start, p_start)
+    csub = np.where(banned, fit.ban_sub, csub)
     m_start = c60 * fit.minutes_sixty + (1.0 - c60) * fit.minutes_short
     parts = frame[list(KEYS)].assign(
         p_start=p_start, c60=c60, csub=csub, m_start=m_start, fixed=banned

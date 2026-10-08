@@ -7,8 +7,10 @@ of a package):
 - `fplopt/features/`: every module (subpackages included) except `store.py` (the reader) and
   `leakcheck.py` (the harness, which loads and corrupts whole tables); registry `FEATURES`;
 - `fplopt/models/`: every module except `gbm.py`; may also import the scanned feature
-  modules (and the `fplopt.features` package), `gbm`, and, name by name (`module_attrs`),
-  `scipy.optimize` / `scipy.stats` / `scipy.special`; registry `MODELS`;
+  modules (and the `fplopt.features` package), `gbm`, the pure backtest module `rules` (the
+  scoring rules for xP points: it reads `config/scoring`, never `data/`), and, name by
+  name (`module_attrs`), `scipy.optimize` / `scipy.stats` / `scipy.special`; registry
+  `MODELS`;
 - `fplopt/models/gbm.py`: the only LightGBM entry point; `lightgbm` only through the names
   it lists (`module_attrs`), no booster file methods (`save_model`, `model_file=`);
 - `fplopt/optimize/`: every module except `bench.py` (the benchmark, an orchestrator that
@@ -223,6 +225,9 @@ MODELS_TARGET = ScanTarget(
     package="fplopt.models",
     exempt=frozenset({"gbm.py"}),  # scanned as GBM_TARGET
     trusted=(FEATURES_TARGET, GBM_TARGET),
+    # The game rules for xP points (`backtest_rules(season)`): a pure module that reads the
+    # checked-in config/scoring files, never data/; the same rules score the backtest.
+    extra_modules=frozenset({"fplopt.backtest.rules"}),
     restricted={"fplopt.features.store": STORE_NAMES},
     registries={"__init__.py": frozenset({"MODELS"})},
     module_attrs=SCIPY_NAMES,
@@ -967,12 +972,27 @@ def fit(x):
 
 
 def test_model_builders_take_exactly_the_view():
-    assert list(MODELS) == ["rolling", "ep_next", "ep_next_fade"]
+    from fplopt.models.fitted import FittedModel
+
+    assert list(MODELS) == ["rolling", "ep_next", "ep_next_fade", "v1"]
     for name, model in MODELS.items():
         parameters = list(inspect.signature(model).parameters.values())
         assert len(parameters) == 1, name
         assert parameters[0].annotation in ("AsOfView", fplopt.features.AsOfView), name
         assert model.__module__.startswith("fplopt.models."), name
+        if isinstance(model, FittedModel):
+            # Module-level functions (pickled into backtest workers): fit(view),
+            # predict(view, fitted).
+            for function, arity in ((model.fit, 1), (model.predict, 2)):
+                assert function.__module__.startswith("fplopt.models."), name
+                assert "<" not in function.__qualname__, name
+                required = [
+                    p
+                    for p in inspect.signature(function).parameters.values()
+                    if p.default is inspect.Parameter.empty
+                ]
+                assert len(required) == arity, name
+                assert required[0].annotation in ("AsOfView", fplopt.features.AsOfView), name
 
 
 def test_a_target_of_listed_files_trusting_features_and_models(tmp_path):
