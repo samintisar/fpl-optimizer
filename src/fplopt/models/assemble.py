@@ -55,8 +55,8 @@ xP = their sum.
 (`upcoming_fixtures`): xP and `GW_COMPONENTS` summed over his fixtures (a double sums two,
 a blank is 0). Probabilities are per player-GW only for one fixture: P(start), P(plays),
 P(60+), the 3 minutes classes, P(clean sheet) (= p_60 · team P(CS): the player's FPL clean
-sheet), P(goal ≥ 1); NaN in a double, 0 in a blank. Expected minutes, goals and assists are
-sums. The frame keeps the standard xP columns and dtypes first (`XP_DTYPES`); the extra
+sheet), P(goal ≥ 1); NaN in a double, 0 in a blank (P(0 minutes) 1). Expected minutes,
+goals and assists are sums. The frame keeps the standard xP columns and dtypes first (`XP_DTYPES`); the extra
 columns are the ones `fplopt.evaluate.metrics.COMPONENTS` scores. The backtester, policies
 and optimizer read only player_key, gw, gw_index, horizon and xp.
 
@@ -455,7 +455,7 @@ def gw_frame(view: AsOfView, fixtures: pd.DataFrame) -> pd.DataFrame:
     blank = out["n"].isna().to_numpy()
     for column in ("xp", *GW_COMPONENTS):
         values = out[column].to_numpy(dtype="float64")
-        out[column] = np.where(blank, 0.0, values)
+        out[column] = np.where(blank, 1.0 if column == "p_min_0" else 0.0, values)
     base = [name for name, _ in XP_DTYPES]
     out = out[[*base, *GW_COMPONENTS]].astype(
         {**dict(XP_DTYPES), **{c: "float64" for c in GW_COMPONENTS}}

@@ -326,7 +326,9 @@ def test_v1_frame_schema_doubles_and_blanks(league):
     club = pool.loc[pool["team_key"] == 1, "player_key"]
     mine = out[out["player_key"].isin(club)]
     blank = mine[mine["gw"] == 5]
-    assert (blank["xp"] == 0).all() and (blank[list(GW_COMPONENTS)] == 0).all().all()
+    assert (blank["xp"] == 0).all() and (blank["p_min_0"] == 1).all()
+    others = [c for c in GW_COMPONENTS if c != "p_min_0"]
+    assert (blank[others] == 0).all().all()
     double = mine[mine["gw"] == 7]
     in_double = fixtures[(fixtures["gw"] == 7) & fixtures["player_key"].isin(club)]
     assert (in_double.groupby("player_key").size() == 2).all()
