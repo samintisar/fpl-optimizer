@@ -18,6 +18,15 @@
    if any counted player's are (NaN propagates through the sum);
 7. record the GW; `next_state` accrues FTs, records the chip, reverts a Free Hit.
 
+After the run, every recorded GW with transfers gets its **predicted and realized transfer
+gain** (PLAN §7 *Optimizer's curse*; `transfer_gains`): over the GW and the next
+`GAIN_WINDOW − 1` recorded GWs (just the GW under a Free Hit, whose squad reverts),
+`pred_gain` = Σ xP of the players bought − Σ xP of the players sold, from the decision-time
+xP frame (`horizon` = gw_index offset), and `real_gain` = the same with their realized
+points from the outcome views (players outside the squad included). Both are gross of
+hits (`hit_points` is in the row): a slope of real on predicted below 1 means the planner
+overrates its moves.
+
 Policies only ever see the deadline view, and state transitions never use outcomes, so
 reading outcomes cannot leak into decisions. The season's GW list comes from the `gameweek`
 rows visible at the start deadline (schedule rows are available from 1 June).
@@ -79,6 +88,7 @@ __all__ = (
     "run_gameweeks",
     "season_schedule",
     "simulate",
+    "transfer_gains",
 )
 
 OUTCOME_DELAY = pd.Timedelta(microseconds=1)
@@ -138,7 +148,10 @@ GW_COLUMNS = (
     ("squad_value", "int64"),
     ("transfers", "str"),
     ("autosubs", "str"),
+    ("pred_gain", "Float64"),
+    ("real_gain", "Float64"),
 )
+GAIN_WINDOW = 4  # GWs over which transfer gains are measured (PLAN §5's per-decision k)
 
 
 class HoldoutError(ValueError):
@@ -394,6 +407,49 @@ def play_step(
     return gw_state, record, row
 
 
+def transfer_gains(
+    store: DataStore,
+    rules: Rules,
+    xp_model: str,
+    decisions: Sequence[Decision],
+    schedule: pd.DataFrame,
+    caches: Caches,
+    window: int = GAIN_WINDOW,
+) -> list[tuple[float | None, float | None]]:
+    """Per decision i (decided at `schedule` row i; the decisions of recorded GWs, in
+    order): (predicted, realized) gain of its transfers over schedule rows i..i+window−1
+    that were recorded (a Free Hit: row i only), or (None, None) without transfers. See
+    the module docstring. xP comes from `caches.xp` at the decision's deadline (the frame
+    the policy saw), points from `caches.outcomes`."""
+    gameweeks = list(
+        schedule[["gw", "gw_index", "deadline_time", "lockdown_time"]].itertuples(index=False)
+    )[: len(decisions)]
+    season = int(schedule["season"].iloc[0]) if len(schedule) else 0
+    out: list[tuple[float | None, float | None]] = []
+    for i, decision in enumerate(decisions):
+        if not decision.transfers:
+            out.append((None, None))
+            continue
+        span = 1 if decision.chip == "freehit" else window
+        gws = gameweeks[i : i + span]
+        ins = [t.in_key for t in decision.transfers]
+        outs = [t.out_key for t in decision.transfers]
+        xp = caches.xp(store, xp_model, store.as_of(gws[0].deadline_time))
+        offsets = [int(g.gw_index) - int(gws[0].gw_index) for g in gws]
+        rows = xp[xp["horizon"].isin(offsets)]
+        by_key = rows.groupby("player_key")["xp"].sum()
+        predicted = float(by_key.reindex(ins).fillna(0.0).sum())
+        predicted -= float(by_key.reindex(outs).fillna(0.0).sum())
+        realized = 0
+        for g in gws:
+            outcomes = caches.outcomes(store, rules, season, int(g.gw), g.lockdown_time)
+            points = outcomes.realized
+            realized += sum(points.get(k, (0, 0))[0] for k in ins)
+            realized -= sum(points.get(k, (0, 0))[0] for k in outs)
+        out.append((predicted, float(realized)))
+    return out
+
+
 def gw_frame(rows: Sequence[dict[str, Any]]) -> pd.DataFrame:
     """GW rows as a frame with `GW_COLUMNS` dtypes."""
     columns = [name for name, _ in GW_COLUMNS]
@@ -510,6 +566,9 @@ def simulate(
     rows, decisions, states, final, pending = run_gameweeks(
         store, rules, lambda _: policy, start, schedule, caches
     )
+    gains = transfer_gains(store, rules, policy.xp_model, decisions, schedule, caches)
+    for row, (predicted, realized) in zip(rows, gains, strict=True):
+        row["pred_gain"], row["real_gain"] = predicted, realized
     gws = gw_frame(rows)
     total = int(gws["net_points"].sum())
     elapsed = time.perf_counter() - began

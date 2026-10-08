@@ -451,6 +451,69 @@ def test_summarize(league, grid):
     json.dumps(summary.to_dict())
 
 
+def test_summarize_reports_transfer_gains(grid):
+    """Predicted vs realized transfer gain per policy over GWs after GW1 with transfers:
+    means, hits and the least-squares slope of realized on predicted."""
+    summary = summarize(grid)
+    gains = summary.transfer_gains.set_index("policy")
+    assert list(summary.transfer_gains.columns) == list(evaluate.GAIN_COLUMNS)
+    rows = grid[(grid["policy"] == GREEDY.name) & (grid["n_transfers"] > 0)]
+    rows = rows[rows["gw_index"] > 1]
+    pred, real = rows["pred_gain"].astype(float), rows["real_gain"].astype(float)
+    greedy = gains.loc[GREEDY.name]
+    assert greedy["n_decisions"] == len(rows) > 20
+    assert greedy["pred"] == pytest.approx(pred.mean())
+    assert greedy["real"] == pytest.approx(real.mean())
+    assert greedy["hit_points"] == 0 and greedy["real_net"] == pytest.approx(real.mean())
+    slope, intercept = np.polyfit(pred, real, 1)
+    assert greedy["slope"] == pytest.approx(slope)
+    assert greedy["intercept"] == pytest.approx(intercept)
+    assert gains.loc[ROLL.name, "n_decisions"] == 0
+    assert np.isnan(gains.loc[ROLL.name, "slope"])
+    assert "transfer_gains" in json.loads(json.dumps(summary.to_dict()))
+    # Hand-made: real = 0.5 * pred - 1 exactly; hits are subtracted in the net means.
+    frame = pd.DataFrame(
+        {
+            "policy": "p",
+            "gw_index": [1, 2, 3, 4, 5],
+            "n_transfers": [15, 1, 2, 0, 1],
+            "hit_points": [0, 0, 4, 0, 0],
+            "pred_gain": [50.0, 2.0, 6.0, None, 10.0],
+            "real_gain": [9.0, 0.0, 2.0, None, 4.0],
+        }
+    ).astype({"pred_gain": "Float64", "real_gain": "Float64"})
+    (row,) = evaluate.transfer_gain_summary(frame).to_dict("records")
+    assert row["n_decisions"] == 3 and row["transfers"] == pytest.approx(4 / 3)
+    assert (row["slope"], row["intercept"]) == (pytest.approx(0.5), pytest.approx(-1.0))
+    assert row["pred"] == pytest.approx(6.0) and row["real"] == pytest.approx(2.0)
+    assert row["pred_net"] == pytest.approx(6.0 - 4 / 3)
+    assert row["real_net"] == pytest.approx(2.0 - 4 / 3)
+
+
+# --- parallel runs ----------------------------------------------------------------------------
+
+
+def test_parallel_grid_and_per_decision_equal_serial(league, grid):
+    """jobs=2 (spawned workers, each with its own store over a copy of the tables and its
+    own caches) gives exactly the serial results, in the same order."""
+    tables, store, caches = league
+    parallel = run_grid(store, [SEASON], STARTS, [ROLL, GREEDY], jobs=2)
+    pd.testing.assert_frame_equal(parallel, grid)
+    serial = per_decision(store, [SEASON], "random:2@25", GREEDY, ROLL, ROLL, caches=caches)
+    two = per_decision(store, [SEASON], "random:2@25", GREEDY, ROLL, ROLL, jobs=2)
+    pd.testing.assert_frame_equal(two, serial)
+    assert len(serial) > 0
+
+
+def test_store_spec_and_jobs_validation(league, tmp_path):
+    tables, store, caches = league
+    spec = evaluate.store_spec(store)
+    assert set(spec) == set(tables) and spec["gameweek"] is tables["gameweek"]
+    assert evaluate.store_spec(DataStore(tmp_path)) == tmp_path
+    with pytest.raises(ValueError, match="jobs"):
+        run_grid(store, [SEASON], "random@30", [ROLL], jobs=0)
+
+
 def test_default_ci_is_80_percent():
     """Two-sided 80% = the one-sided α = 0.10 bound of the go-live gate."""
     rng = np.random.default_rng(6)

@@ -21,11 +21,22 @@ Season totals are too noisy to compare policies directly, so every comparison is
   gw_index), then resample circular moving blocks of those cells within each season, all
   seasons together; mean, percentile CI (default 80% two-sided, i.e. one-sided α = 0.10,
   the go-live gate's level) and one-sided p (share of bootstrap means ≤ 0; H1: A > B).
+- `transfer_gain_summary`: per policy, predicted vs realized gain of the executed
+  transfers (`simulator.transfer_gains`; PLAN §7 *Optimizer's curse*): means and the slope
+  of realized on predicted.
 - `summarize`: season totals per policy (mean over starts) and the paired differences with
   CIs: realized, realized on the xG metric's sample (`realized@xg`) and xG-scored. Block
   lengths are in GWs: a per-decision cell spans `stride` GWs, so its blocks are
   ceil(block_length / stride) cells (4 GWs = one k = 4 window). `log_experiment` appends a
   run to `results/experiments.csv`.
+
+Parallel runs: `run_grid` and `per_decision` take `jobs`. The work splits into units, one
+per (season, start state), built in this process; with `jobs > 1` a process pool (spawn,
+so it works the same on Windows) runs them, each worker opening its own `DataStore` (same
+`data_dir`, or a copy of the in-memory tables) and its own `Caches`, and the results are
+concatenated in unit order. Every piece is deterministic, so the output equals `jobs=1`'s.
+Policies and the rules function must be picklable (module-level; `OptimizerParams` pickles
+by its arguments); rules are rebuilt in the worker by `rules_fn(season)`.
 
 Start specs: `template@1` (the template squad at gw_index 1), `random:5@1` (random squads
 with seeds 0-4 at gw_index 1), `random:3@20`. A refused start state is skipped with a
@@ -39,10 +50,12 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import multiprocessing
 import re
 import subprocess
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -83,6 +96,7 @@ __all__ = (
     "run_grid",
     "season_points",
     "summarize",
+    "transfer_gain_summary",
 )
 
 RulesFn = Callable[[int], Rules]
@@ -183,6 +197,93 @@ def build_start_states(
     return list(out.items())
 
 
+# --- parallel units -----------------------------------------------------------------------------
+
+StoreSpec = Path | dict[str, pd.DataFrame]
+# A unit of work: (season, start_id, start state). Its function gets (store, caches, rules,
+# unit, payload) and returns a picklable result.
+Unit = tuple[int, str, SquadState]
+UnitFn = Callable[[DataStore, Caches, Rules, Unit, Any], Any]
+_WORKER: dict[str, Any] = {}  # per worker process: its store, caches and rules by season
+
+
+def store_spec(store: DataStore) -> StoreSpec:
+    """What a worker process needs to open an equivalent store: the data directory, or a
+    copy of the in-memory tables."""
+    if store.data_dir is not None:
+        return store.data_dir
+    tables = store.provided_tables
+    if tables is None:
+        raise ValueError("store has neither a data_dir nor tables")
+    return dict(tables)
+
+
+def _init_worker(spec: StoreSpec, log_level: int) -> None:
+    logging.basicConfig(
+        level=log_level, format="%(asctime)s %(levelname)s %(name)s[worker]: %(message)s"
+    )
+    _WORKER["store"] = DataStore(spec) if isinstance(spec, Path) else DataStore(tables=spec)
+    _WORKER["caches"] = Caches()
+    _WORKER["rules"] = {}
+
+
+def _run_unit(task: tuple[UnitFn, RulesFn, Unit, Any]) -> Any:
+    """A unit in a worker process, on the worker's store and caches."""
+    fn, rules_fn, unit, payload = task
+    rules = _WORKER["rules"]
+    if unit[0] not in rules:
+        rules[unit[0]] = rules_fn(unit[0])
+    return fn(_WORKER["store"], _WORKER["caches"], rules[unit[0]], unit, payload)
+
+
+def _units(
+    store: DataStore, seasons: Sequence[int], specs: Sequence[StartSpec], rules_fn: RulesFn
+) -> list[Unit]:
+    return [
+        (season, start_id, state)
+        for season in seasons
+        for start_id, state in build_start_states(store, season, specs, rules_fn(season))
+    ]
+
+
+def run_units(
+    store: DataStore,
+    caches: Caches,
+    rules_fn: RulesFn,
+    fn: UnitFn,
+    units: Sequence[Unit],
+    payload: Any,
+    jobs: int = 1,
+) -> list[Any]:
+    """`fn` on every unit, results in unit order: in this process (`jobs == 1`, on `store`
+    and `caches`) or in a pool of `jobs` spawned worker processes (module docstring)."""
+    if jobs < 1:
+        raise ValueError(f"jobs must be >= 1, got {jobs}")
+    if jobs == 1 or len(units) <= 1:
+        rules: dict[int, Rules] = {}
+        out = []
+        for unit in units:
+            if unit[0] not in rules:
+                rules[unit[0]] = rules_fn(unit[0])
+            out.append(fn(store, caches, rules[unit[0]], unit, payload))
+        return out
+    workers = min(jobs, len(units))
+    log.info("running %d unit(s) on %d worker process(es)", len(units), workers)
+    tasks = [(fn, rules_fn, unit, payload) for unit in units]
+    out = []
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_init_worker,
+        initargs=(store_spec(store), logging.getLogger().getEffectiveLevel()),
+    ) as pool:
+        for i, result in enumerate(pool.map(_run_unit, tasks)):
+            season, start_id, _ = units[i]
+            log.info("unit %d/%d done: %s %s", i + 1, len(units), season_label(season), start_id)
+            out.append(result)
+    return out
+
+
 # --- full runs --------------------------------------------------------------------------------
 
 
@@ -204,6 +305,19 @@ def _unique_names(policies: Sequence[Policy]) -> None:
 GRID_COLUMNS = ("season", "start_id", "policy", *(n for n, _ in GW_COLUMNS if n != "season"))
 
 
+def _grid_unit(
+    store: DataStore, caches: Caches, rules: Rules, unit: Unit, policies: Sequence[Policy]
+) -> list[pd.DataFrame]:
+    """Every policy from one start state: one `SeasonRun.gws` frame each, labelled."""
+    _, start_id, state = unit
+    return [
+        simulate(store, rules, policy, state, caches=caches).gws.assign(
+            start_id=start_id, policy=policy.name
+        )
+        for policy in policies
+    ]
+
+
 def run_grid(
     store: DataStore,
     seasons: Iterable[int],
@@ -212,24 +326,22 @@ def run_grid(
     rules_fn: RulesFn = backtest_rules,
     *,
     caches: Caches | None = None,
+    jobs: int = 1,
 ) -> pd.DataFrame:
     """Every policy from every start state of every season (one `simulate` each), as one
     frame: `season, start_id, policy` + the `SeasonRun.gws` columns (net_points, points,
-    hit_points, xg_points, xg_net_points, n_transfers, captain_regret, xi_regret, ...).
-    One `Caches` is shared by all runs. Holdout seasons raise (`HoldoutError`) before
-    anything runs."""
+    hit_points, xg_points, xg_net_points, n_transfers, captain_regret, xi_regret,
+    pred_gain, real_gain, ...). With `jobs == 1` one `Caches` is shared by all runs;
+    `jobs > 1` runs the (season, start) units in worker processes (module docstring), same
+    result. Holdout seasons raise (`HoldoutError`) before anything runs."""
     seasons = list(seasons)
     _refuse_holdout(seasons)
     _unique_names(policies)
     specs = _specs(start_specs)
     caches = Caches() if caches is None else caches
-    frames = []
-    for season in seasons:
-        rules = rules_fn(season)
-        for start_id, state in build_start_states(store, season, specs, rules):
-            for policy in policies:
-                run = simulate(store, rules, policy, state, caches=caches)
-                frames.append(run.gws.assign(start_id=start_id, policy=policy.name))
+    units = _units(store, seasons, specs, rules_fn)
+    results = run_units(store, caches, rules_fn, _grid_unit, units, tuple(policies), jobs)
+    frames = [frame for unit_frames in results for frame in unit_frames]
     if not frames:
         empty = pd.DataFrame({name: pd.Series(dtype=dtype) for name, dtype in GW_COLUMNS})
         frames = [empty.assign(start_id=pd.Series(dtype="str"), policy=pd.Series(dtype="str"))]
@@ -295,6 +407,87 @@ def _window_scores(rows: Sequence[dict[str, Any]]) -> tuple[int, float | None]:
     return points, (None if any(v is None for v in xg) else float(sum(xg)))
 
 
+@dataclass(frozen=True)
+class _PerDecisionJob:
+    policy_a: Policy
+    policy_b: Policy
+    continuation: Policy
+    k: int
+    stride: int
+    reference: str
+
+
+def _per_decision_unit(
+    store: DataStore, caches: Caches, rules: Rules, unit: Unit, job: _PerDecisionJob
+) -> list[dict[str, Any]]:
+    """The per-decision rows of one start state (see `per_decision`)."""
+    season, start_id, start = unit
+    policy_a, policy_b, continuation, k = job.policy_a, job.policy_b, job.continuation, job.k
+    ref_policy = policy_a if job.reference == "a" else policy_b
+    rows: list[dict[str, Any]] = []
+    ref = simulate(store, rules, ref_policy, start, caches=caches)
+    schedule = season_schedule(store, season, start.gw_index).iloc[: len(ref.gws)]
+    for i, gw_index in enumerate(schedule["gw_index"]):
+        if (gw_index - 1) % job.stride:
+            continue  # not on the season's decision grid
+        state = ref.states[i]
+        window = schedule.iloc[i : i + k]
+        deadline = window["deadline_time"].iloc[0]
+        arms = {}
+        for side, policy in (("a", policy_a), ("b", policy_b)):
+            arms[side] = decide_step(store, rules, policy, state, deadline, caches)
+        same = arms["a"].decision == arms["b"].decision
+        scores = {}
+        for side, policy in (("a", policy_a), ("b", policy_b)):
+            if side == "b" and same:
+                scores["b"] = scores["a"]
+                continue
+            arm_rows, *_ = run_gameweeks(
+                store,
+                rules,
+                lambda j, first=policy: first if j == 0 else continuation,
+                state,
+                window,
+                caches,
+            )
+            if len(arm_rows) != len(window):
+                raise RuntimeError(f"{season_label(season)}: arm stopped early")
+            scores[side] = (_window_scores(arm_rows), arm_rows[0]["n_transfers"])
+        (points_a, xg_a), n_a = scores["a"]
+        (points_b, xg_b), n_b = scores["b"]
+        rows.append(
+            {
+                "season": season,
+                "start_id": start_id,
+                "policy_a": policy_a.name,
+                "policy_b": policy_b.name,
+                "gw": int(window["gw"].iloc[0]),
+                "gw_index": int(window["gw_index"].iloc[0]),
+                "k": len(window),
+                "stride": job.stride,
+                "same_decision": same,
+                "transfers_a": n_a,
+                "transfers_b": n_b,
+                "points_a": points_a,
+                "points_b": points_b,
+                "diff": points_a - points_b,
+                "xg_a": xg_a,
+                "xg_b": xg_b,
+                "diff_xg": None if xg_a is None or xg_b is None else xg_a - xg_b,
+            }
+        )
+    log.info(
+        "%s %s per-decision %s vs %s: %d decisions, %d differ",
+        season_label(season),
+        start_id,
+        policy_a.name,
+        policy_b.name,
+        len(rows),
+        sum(1 for r in rows if not r["same_decision"]),
+    )
+    return rows
+
+
 def per_decision(
     store: DataStore,
     seasons: Iterable[int],
@@ -308,6 +501,7 @@ def per_decision(
     reference: str = "b",
     caches: Caches | None = None,
     rules_fn: RulesFn = backtest_rules,
+    jobs: int = 1,
 ) -> pd.DataFrame:
     """Per-decision paired differences (module docstring), one row per decision GW of the
     reference trajectory with gw_index ≡ 1 (mod `stride`), `stride` defaulting to `k`
@@ -315,8 +509,9 @@ def per_decision(
     Columns: `k` = the window length actually scored (shorter at the season's end),
     `stride`, `same_decision` (A and B decided the same at t, so the arms are identical and
     diff = 0), each arm's transfers at t, its net points and xG net points over the window,
-    and the differences A − B. Holdout seasons raise (`HoldoutError`) before anything
-    runs."""
+    and the differences A − B. `jobs > 1` runs the (season, start) units in worker
+    processes (module docstring), same result. Holdout seasons raise (`HoldoutError`)
+    before anything runs."""
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
     stride = k if stride is None else stride
@@ -328,72 +523,10 @@ def per_decision(
     _refuse_holdout(seasons)
     specs = _specs(start_specs)
     caches = Caches() if caches is None else caches
-    ref_policy = policy_a if reference == "a" else policy_b
-    rows: list[dict[str, Any]] = []
-    for season in seasons:
-        rules = rules_fn(season)
-        for start_id, start in build_start_states(store, season, specs, rules):
-            ref = simulate(store, rules, ref_policy, start, caches=caches)
-            schedule = season_schedule(store, season, start.gw_index).iloc[: len(ref.gws)]
-            first_row = len(rows)
-            for i, gw_index in enumerate(schedule["gw_index"]):
-                if (gw_index - 1) % stride:
-                    continue  # not on the season's decision grid
-                state = ref.states[i]
-                window = schedule.iloc[i : i + k]
-                deadline = window["deadline_time"].iloc[0]
-                arms = {}
-                for side, policy in (("a", policy_a), ("b", policy_b)):
-                    arms[side] = decide_step(store, rules, policy, state, deadline, caches)
-                same = arms["a"].decision == arms["b"].decision
-                scores = {}
-                for side, policy in (("a", policy_a), ("b", policy_b)):
-                    if side == "b" and same:
-                        scores["b"] = scores["a"]
-                        continue
-                    arm_rows, *_ = run_gameweeks(
-                        store,
-                        rules,
-                        lambda j, first=policy: first if j == 0 else continuation,
-                        state,
-                        window,
-                        caches,
-                    )
-                    if len(arm_rows) != len(window):
-                        raise RuntimeError(f"{season_label(season)}: arm stopped early")
-                    scores[side] = (_window_scores(arm_rows), arm_rows[0]["n_transfers"])
-                (points_a, xg_a), n_a = scores["a"]
-                (points_b, xg_b), n_b = scores["b"]
-                rows.append(
-                    {
-                        "season": season,
-                        "start_id": start_id,
-                        "policy_a": policy_a.name,
-                        "policy_b": policy_b.name,
-                        "gw": int(window["gw"].iloc[0]),
-                        "gw_index": int(window["gw_index"].iloc[0]),
-                        "k": len(window),
-                        "stride": stride,
-                        "same_decision": same,
-                        "transfers_a": n_a,
-                        "transfers_b": n_b,
-                        "points_a": points_a,
-                        "points_b": points_b,
-                        "diff": points_a - points_b,
-                        "xg_a": xg_a,
-                        "xg_b": xg_b,
-                        "diff_xg": None if xg_a is None or xg_b is None else xg_a - xg_b,
-                    }
-                )
-            log.info(
-                "%s %s per-decision %s vs %s: %d decisions, %d differ",
-                season_label(season),
-                start_id,
-                policy_a.name,
-                policy_b.name,
-                len(rows) - first_row,
-                sum(1 for r in rows[first_row:] if not r["same_decision"]),
-            )
+    job = _PerDecisionJob(policy_a, policy_b, continuation, k, stride, reference)
+    units = _units(store, seasons, specs, rules_fn)
+    results = run_units(store, caches, rules_fn, _per_decision_unit, units, job, jobs)
+    rows = [row for unit_rows in results for row in unit_rows]
     columns = [name for name, _ in PER_DECISION_COLUMNS]
     return pd.DataFrame(rows, columns=columns).astype(dict(PER_DECISION_COLUMNS))
 
@@ -493,11 +626,13 @@ class Summary:
     cells of the start-averaged difference, mean over seasons; windows that overlap,
     stride < k, are weighted stride/k so each GW counts about once). Metrics: `realized`,
     `realized@xg` (realized on the rows whose xG difference is non-null, i.e. the xG
-    metric's sample, for the same-sign check) and `xg`."""
+    metric's sample, for the same-sign check) and `xg`. `transfer_gains`:
+    `transfer_gain_summary`."""
 
     season_totals: pd.DataFrame
     policies: pd.DataFrame
     comparisons: pd.DataFrame
+    transfer_gains: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     def to_dict(self) -> dict[str, Any]:
         def records(frame: pd.DataFrame) -> list[dict[str, Any]]:
@@ -507,6 +642,7 @@ class Summary:
             "season_totals": records(self.season_totals),
             "policies": records(self.policies),
             "comparisons": records(self.comparisons),
+            "transfer_gains": records(self.transfer_gains),
         }
 
 
@@ -596,6 +732,67 @@ def _comparison(
     return rows
 
 
+GAIN_COLUMNS = (
+    "policy",
+    "n_decisions",
+    "transfers",
+    "hit_points",
+    "pred",
+    "real",
+    "pred_net",
+    "real_net",
+    "slope",
+    "intercept",
+)
+
+
+def transfer_gain_summary(results: pd.DataFrame) -> pd.DataFrame:
+    """Per policy: the GWs after gw_index 1 with transfers (GW1 squad builds are not
+    transfer decisions) and their predicted vs realized transfer gain
+    (`simulator.transfer_gains`, gross of hits): count, mean transfers and hit points per
+    such GW, mean predicted and realized gain (`pred`, `real`), the same net of the GW's hit
+    points (`pred_net`, `real_net`), and the least-squares line real = intercept + slope ·
+    pred over those GWs (PLAN §7: a slope below 1 means the predicted gains are inflated).
+    Null where undefined (no such GW, or predictions without spread)."""
+    nan = float("nan")
+    rows = []
+    for policy in sorted(results["policy"].unique()):
+        part = results[results["policy"] == policy]
+        if "pred_gain" in part.columns:
+            keep = (part["n_transfers"] > 0) & (part["gw_index"] > 1)
+            keep &= part["pred_gain"].notna() & part["real_gain"].notna()
+            part = part[keep]
+        else:
+            part = part.iloc[0:0].assign(pred_gain=0.0, real_gain=0.0)
+        pred = part["pred_gain"].to_numpy(dtype="float64", na_value=nan)
+        real = part["real_gain"].to_numpy(dtype="float64", na_value=nan)
+        hits = part["hit_points"].to_numpy(dtype="float64")
+        transfers = part["n_transfers"].to_numpy(dtype="float64")
+        slope = intercept = nan
+        if len(pred) >= 2 and np.var(pred) > 0:
+            slope = float(np.cov(pred, real, bias=True)[0, 1] / np.var(pred))
+            intercept = float(real.mean() - slope * pred.mean())
+
+        def mean(values: np.ndarray) -> float:
+            return float(values.mean()) if len(values) else nan
+
+        rows.append(
+            {
+                "policy": policy,
+                "n_decisions": len(part),
+                "transfers": mean(transfers),
+                "hit_points": mean(hits),
+                "pred": mean(pred),
+                "real": mean(real),
+                "pred_net": mean(pred - hits),
+                "real_net": mean(real - hits),
+                "slope": slope,
+                "intercept": intercept,
+            }
+        )
+    return pd.DataFrame(rows, columns=list(GAIN_COLUMNS))
+
+
 def summarize(
     results: pd.DataFrame,
     pairs: Sequence[tuple[Policy | str, Policy | str]] = (),
@@ -640,7 +837,12 @@ def summarize(
                 comparisons += _comparison(part, a, b, "per_decision", **bootstrap)
     columns = ["a", "b", "method", "metric", "mean", "ci_low", "ci_high", "p_one_sided"]
     columns += ["n_seasons", "n_gws", "season_diff"]
-    return Summary(season_totals, policies, pd.DataFrame(comparisons, columns=columns))
+    return Summary(
+        season_totals,
+        policies,
+        pd.DataFrame(comparisons, columns=columns),
+        transfer_gain_summary(results),
+    )
 
 
 # --- experiment log ---------------------------------------------------------------------------

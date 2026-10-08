@@ -148,7 +148,12 @@ def test_end_gw_index_stops_early_and_matches_the_full_run(league, runs):
     _, store, caches, start = league
     run = simulate(store, RULES, GREEDY, start, end_gw_index=10, caches=caches)
     full = runs[GREEDY.name]
-    pd.testing.assert_frame_equal(run.gws, full.gws.iloc[:10])
+    gains = ["pred_gain", "real_gain"]
+    pd.testing.assert_frame_equal(
+        run.gws.drop(columns=gains), full.gws.iloc[:10].drop(columns=gains)
+    )
+    # Transfer gains are measured over the recorded GWs only: windows past GW10 are cut.
+    pd.testing.assert_frame_equal(run.gws[gains].iloc[:7], full.gws[gains].iloc[:7])
     assert run.decisions == full.decisions[:10]
     assert run.final_state.gw_index == 11
     assert refresh(run.final_state, player_pool(run_view(league, 11))) == full.states[10]
@@ -250,6 +255,39 @@ def test_every_gw_scores_like_an_independent_recomputation(league, runs, policy)
         score = recomputed_points(tables, run.decisions[i], row.gw)
         assert (row.points, row.bench_points) == (score.points, score.bench_points)
         assert json.loads(row.autosubs) == [list(pair) for pair in score.autosubs]
+
+
+def test_transfer_gains_recomputed_independently(league, runs):
+    """pred_gain / real_gain of every GW with transfers: Σ (in − out) over the GW and the
+    next 3 of the decision-time rolling xP and of player_match points (any player, not
+    just the squad's); null without transfers."""
+    from fplopt.models import MODELS
+
+    tables, store, _, _ = league
+    run = runs[GREEDY.name]
+    gws = run.gws
+    assert gws["pred_gain"].isna().equals(gws["n_transfers"] == 0)
+    assert gws["real_gain"].isna().equals(gws["n_transfers"] == 0)
+    checked = 0
+    for i, row in enumerate(gws.itertuples()):
+        if row.n_transfers == 0:
+            continue
+        transfers = run.decisions[i].transfers
+        window = gws["gw"].iloc[i : i + 4].tolist()
+        xp = MODELS["rolling"](store.as_of(row.deadline))
+        xp = xp[xp["horizon"] < len(window)].groupby("player_key")["xp"].sum()
+        predicted = sum(xp.get(t.in_key, 0.0) - xp.get(t.out_key, 0.0) for t in transfers)
+        realized = 0
+        for gw in window:
+            points = expected_outcomes(tables, SEASON, gw)
+            realized += sum(
+                points.get(t.in_key, (0, 0))[0] - points.get(t.out_key, (0, 0))[0]
+                for t in transfers
+            )
+        assert row.pred_gain == pytest.approx(predicted)
+        assert row.real_gain == realized
+        checked += 1
+    assert checked > 10
 
 
 def test_blank_and_double_gameweeks_in_a_run(league):
@@ -415,13 +453,17 @@ def assert_no_lookahead(tables, start, policy, t, variant, clean=None):
 
 def assert_same_decisions(run, clean, n):
     """`run` decided exactly `clean`'s first n GWs (states and decisions) and scored the
-    first n − 1 the same."""
+    first n − 1 the same. The transfer gains are left out: they are an evaluation over the
+    following GWs' outcomes by design (`transfer_gains`), never a decision input."""
     clean_states, clean_decisions = (seq[:n] for seq in decided(clean))
     assert len(clean_decisions) == n
     states, decisions = decided(run)
     assert decisions == clean_decisions
     assert states == clean_states
-    pd.testing.assert_frame_equal(run.gws.iloc[: n - 1], clean.gws.iloc[: n - 1])
+    gains = ["pred_gain", "real_gain"]
+    pd.testing.assert_frame_equal(
+        run.gws.iloc[: n - 1].drop(columns=gains), clean.gws.iloc[: n - 1].drop(columns=gains)
+    )
 
 
 @pytest.fixture(scope="module")
