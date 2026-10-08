@@ -647,26 +647,64 @@ def test_backtest_compare_end_to_end(backtest, tmp_path, capsys):
     assert summary["policy_a"] == "greedy(ep_next,t=1.0)"
     assert summary["continuation"] == "roll(rolling)"
     comparisons = summary["summary"]["comparisons"]
-    methods = {(c["method"], c["metric"]) for c in comparisons}
+    methods = {(c["method"], c["split"], c["metric"]) for c in comparisons}
     assert methods == {
-        (m, x) for m in ("full_run", "per_decision") for x in ("realized", "realized@xg", "xg")
+        (m, split, x)
+        for m in ("full_run", "per_decision")
+        for split in ("all", "develop", "validate")  # 2022-23 develop, 2023-24 validate
+        for x in ("realized", "realized@xg", "xg")
     }
-    (full,) = [c for c in comparisons if (c["method"], c["metric"]) == ("full_run", "realized")]
+    (full,) = [
+        c
+        for c in comparisons
+        if (c["method"], c["split"], c["metric"]) == ("full_run", "all", "realized")
+    ]
     cells = paired.groupby(["season", "gw_index"])["diff"].mean()
     assert full["mean"] == pytest.approx(cells.mean())
+    assert full["deflated_mean"] == full["mean"]  # the family's first variant
+    assert 0 <= full["p_season_t"] <= 1  # two seasons
     printed = capsys.readouterr().out
     for text in ("Paired differences A - B", "per-decision (k=2, stride=2)", "full run"):
         assert text in printed
     for text in ("Per season", "80% CI", "realized@xg", "per-decision total (k=2)"):
         assert text in printed
+    for text in ("season-t p", "deflated", "develop", "validate", "reference greedy(rolling"):
+        assert text in printed
     assert "2022-23" in printed and "2023-24" in printed
     (logged,) = _experiments(log)
-    assert logged["n_variants"] == "2"
+    assert logged["n_variants"] == "1" and logged["family"] == "greedy:rolling 2022-2023"
     config = json.loads(logged["config"])
     assert config["policies"] == ["greedy:ep_next", "greedy:rolling"]
     assert config["continuation"] == "roll:rolling" and config["k"] == 2
-    assert config["stride"] == 2 and config["ci"] == 0.8
-    assert len(json.loads(logged["metrics"])["comparisons"]) == 6
+    assert config["stride"] == 2 and config["ci"] == 0.8 and config["reference"] == "b"
+    assert len(json.loads(logged["metrics"])["comparisons"]) == 18
+
+
+def test_backtest_compare_own_continuation_reference_and_family(backtest, tmp_path, capsys):
+    """--continuation own --reference a: each arm continues with its own policy from A's
+    states; the experiment family accumulates variants and deflates the mean."""
+    import pandas as pd
+
+    out, log = tmp_path / "out", tmp_path / "experiments.csv"
+    argv = ["compare", "--seasons", "2023", "--a", "greedy:rolling:threshold=0.5", "--b"]
+    argv += ["roll:rolling", "--starts", "random@13", "--k", "3", "--n-boot", "20"]
+    argv += ["--continuation", "own", "--reference", "a", "--jobs", "1"]
+    assert backtest(*argv, "--out", str(out), "--experiments", str(log))[0] == 0
+    decisions = pd.read_parquet(out / "per_decision.parquet")
+    assert (decisions["continuation"] == "own").all() and (decisions["reference"] == "a").all()
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["continuation"] == "own" and summary["reference"] == "a"
+    assert "continuation own, reference greedy(rolling,t=0.5)" in capsys.readouterr().out
+    # Two more variants against the same B on the same seasons: N = 2, 3, deflated means.
+    argv[4] = "greedy:rolling:threshold=1.5"
+    assert backtest(*argv, "--out", str(out), "--experiments", str(log))[0] == 0
+    argv[4] = "greedy:rolling:threshold=2.5"
+    assert backtest(*argv, "--out", str(out), "--experiments", str(log), "--family", "mine")[0] == 0
+    rows = _experiments(log)
+    assert [r["family"] for r in rows] == ["roll:rolling 2023", "roll:rolling 2023", "mine"]
+    assert [r["n_variants"] for r in rows] == ["1", "2", "1"]
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["n_variants"] == 1 and summary["family"] == "mine"
 
 
 def test_backtest_compare_stride_one_evaluates_every_gw(backtest, tmp_path):

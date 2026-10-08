@@ -7,10 +7,13 @@ Season totals are too noisy to compare policies directly, so every comparison is
   one `Caches` (xP per (model, deadline), outcomes per (season, gw, rules)).
 - `paired_full_run`: per (season, start, GW) the difference of two policies' net points
   (realized and xG-scored).
-- `per_decision`: states come from a reference policy's own trajectory. At a decision GW t
-  both arms start from that state; arm A plays A's decision at t, arm B plays B's, and both
-  then follow the same continuation policy (same xP) for k − 1 GWs (truncated at the
-  season's end). Each arm's score is its net points over t..t+k−1 (hits at t included).
+- `per_decision`: states come from a reference policy's own trajectory (B's by default,
+  `reference="a"` for A's). At a decision GW t both arms start from that state; arm A plays
+  A's decision at t, arm B plays B's, and both then follow the same continuation policy
+  (same xP) for k − 1 GWs (truncated at the season's end), or, with `continuation="own"`,
+  each arm continues with its own policy (and its own xP model), so a plan's follow-up
+  moves are credited to the decision that started it. Each arm's score is its net points
+  over t..t+k−1 (hits at t included).
   Decision GWs are the reference run's GWs on the season's grid gw_index ≡ 1 (mod
   `stride`), default stride = k, so the windows don't overlap and tile the season: windows
   sharing outcomes would make neighbouring differences dependent and the bootstrap too
@@ -27,12 +30,16 @@ Season totals are too noisy to compare policies directly, so every comparison is
 - `summarize`: season totals per policy (mean over starts) and the paired differences with
   CIs: realized, realized on the xG metric's sample (`realized@xg`) and xG-scored. Block
   lengths are in GWs: a per-decision cell spans `stride` GWs, so its blocks are
-  ceil(block_length / stride) cells (4 GWs = one k = 4 window). `log_experiment` appends a
-  run to `results/experiments.csv`.
+  ceil(block_length / stride) cells (4 GWs = one k = 4 window). Each comparison is also
+  split into develop (2016/17-2022/23) and validate (2023/24-2024/25) seasons, with a
+  season-level t-test and the mean deflated for the variants tried (PLAN §5 *Multiple
+  testing*). `log_experiment` appends a run to `results/experiments.csv`; `family_variants`
+  counts the runs already logged in a comparison family, so `n_variants` is cumulative.
 
 Parallel runs: `run_grid` and `per_decision` take `jobs`. The work splits into units, one
-per (season, start state), built in this process; with `jobs > 1` a process pool (spawn,
-so it works the same on Windows) runs them, each worker opening its own `DataStore` (same
+per (season, start state), built in this process; with `jobs > 1` spawned worker processes
+(`_run_pool`: one pipe per worker, no shared queue semaphores; a dead worker's unit is
+re-run elsewhere, see `run_units`) run them, each worker opening its own `DataStore` (same
 `data_dir`, or a copy of the in-memory tables) and its own `Caches`, and the results are
 concatenated in unit order. Every piece is deterministic, so the output equals `jobs=1`'s.
 Policies and the rules function must be picklable (module-level; `OptimizerParams` pickles
@@ -50,14 +57,16 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import math
 import multiprocessing
+import multiprocessing.connection
 import re
 import subprocess
 from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from statistics import NormalDist
 from typing import Any
 
 import numpy as np
@@ -77,23 +86,28 @@ from fplopt.backtest.simulator import (
 from fplopt.backtest.start_states import StartStateError, random_state, template_state
 from fplopt.backtest.state import SquadState
 from fplopt.features.store import DataStore
-from fplopt.seasons import HOLDOUT_SEASONS, season_label
+from fplopt.seasons import DEVELOP_SEASONS, HOLDOUT_SEASONS, VALIDATE_SEASONS, season_label
 
 log = logging.getLogger(__name__)
 
 __all__ = (
     "EXPERIMENT_COLUMNS",
+    "OWN",
     "BootstrapResult",
     "StartSpec",
     "Summary",
     "block_bootstrap",
     "build_start_states",
+    "deflated_mean",
+    "family_variants",
     "json_safe",
     "log_experiment",
     "paired_full_run",
     "parse_start_specs",
     "per_decision",
+    "read_experiments",
     "run_grid",
+    "season_t_test",
     "season_points",
     "summarize",
     "transfer_gain_summary",
@@ -101,7 +115,15 @@ __all__ = (
 
 RulesFn = Callable[[int], Rules]
 _SPEC = re.compile(r"(template|random(?::(\d+))?)@(\d+)")
-EXPERIMENT_COLUMNS = ("timestamp", "git_sha", "command", "config", "metrics", "n_variants")
+EXPERIMENT_COLUMNS = (
+    "timestamp",
+    "git_sha",
+    "command",
+    "config",
+    "metrics",
+    "n_variants",
+    "family",
+)
 
 
 # --- start states ---------------------------------------------------------------------------
@@ -246,6 +268,164 @@ def _units(
     ]
 
 
+POOL_ATTEMPTS = 2  # worker pools tried before the remaining units run in this process
+_JOIN_SECONDS = 10  # wait for a worker to exit after its stop message, then terminate it
+
+
+class PoolBroken(RuntimeError):
+    """Every worker of a pool died before its units were done."""
+
+
+def _worker_main(conn: Any, spec: StoreSpec, log_level: int) -> None:
+    """A worker process: open the store, then run the units sent over `conn` one at a time
+    until `None` (or the parent's end of the pipe closes). Results go back as ("ok", i,
+    result); a unit's exception as ("error", i, (exception or None, traceback text))."""
+    import pickle
+    import traceback
+
+    _init_worker(spec, log_level)
+    while True:
+        try:
+            message = conn.recv()
+        except (EOFError, OSError):
+            return
+        if message is None:
+            return
+        i, task = message
+        try:
+            reply: tuple[str, int, Any] = ("ok", i, _run_unit(task))
+        except Exception as exc:  # sent back and re-raised in the parent
+            text = traceback.format_exc()
+            try:
+                pickle.dumps(exc)
+            except Exception:  # an unpicklable exception: its traceback is enough
+                exc = None
+            reply = ("error", i, (exc, text))
+        conn.send(reply)
+
+
+def _run_serial(
+    store: DataStore,
+    caches: Caches,
+    rules_fn: RulesFn,
+    fn: UnitFn,
+    units: Sequence[Unit],
+    payload: Any,
+) -> list[Any]:
+    rules: dict[int, Rules] = {}
+    out = []
+    for unit in units:
+        if unit[0] not in rules:
+            rules[unit[0]] = rules_fn(unit[0])
+        out.append(fn(store, caches, rules[unit[0]], unit, payload))
+    return out
+
+
+def _run_pool(
+    store: DataStore,
+    rules_fn: RulesFn,
+    fn: UnitFn,
+    units: Sequence[Unit],
+    payload: Any,
+    todo: Sequence[int],
+    workers: int,
+    done: dict[int, Any],
+) -> None:
+    """Units `todo` (indices into `units`) on `workers` spawned processes; each result goes
+    into `done` as it arrives. Each worker has its own duplex pipe and gets one unit at a
+    time. A worker that dies has its unit re-queued for the others (with a warning); if all
+    die, PoolBroken (the units finished stay in `done`). A unit's own exception is re-raised
+    here (with the worker's traceback as a note). Workers are stopped and joined on exit.
+
+    Why not ProcessPoolExecutor: its queues share semaphores whose handles the parent
+    duplicates into each worker while the worker is still starting. On Windows under heavy
+    CPU load a starting worker was seen to lose such a handle (closed during its start-up:
+    `OSError: [WinError 6] The handle is invalid` in `call_queue.get`), which broke the pool
+    or, when it happened to a late worker during shutdown, leaked the queue semaphore and
+    left `shutdown()` spinning forever (Phase 4 review). Pipe ends are handed over
+    differently: the worker takes ("steals") its end from the parent while unpickling, after
+    its start-up, so no handle is in flight while the worker starts."""
+    ctx = multiprocessing.get_context("spawn")
+    spec = store_spec(store)
+    level = logging.getLogger().getEffectiveLevel()
+    procs: dict[Any, Any] = {}  # connection -> process
+    try:
+        for _ in range(workers):
+            parent_end, child_end = ctx.Pipe(duplex=True)
+            proc = ctx.Process(target=_worker_main, args=(child_end, spec, level), daemon=True)
+            proc.start()
+            child_end.close()
+            procs[parent_end] = proc
+        pending = list(todo)
+        idle = list(procs)
+        busy: dict[Any, int] = {}  # connection -> unit index
+        while pending or busy:
+            while pending and idle:
+                conn = idle.pop(0)
+                i = pending.pop(0)
+                try:
+                    conn.send((i, (fn, rules_fn, units[i], payload)))
+                except OSError:  # the worker is gone; its death is handled below
+                    pending.insert(0, i)
+                    continue
+                busy[conn] = i
+            if not procs:
+                raise PoolBroken("every worker process died")
+            sentinels = {proc.sentinel: conn for conn, proc in procs.items()}
+            ready = multiprocessing.connection.wait([*busy, *sentinels])
+            for item in ready:
+                if item in busy:
+                    try:
+                        kind, i, value = item.recv()
+                    except (EOFError, OSError):
+                        continue  # died mid-unit: its sentinel reports it
+                    del busy[item]
+                    idle.append(item)
+                    if kind == "error":
+                        exc, text = value
+                        if exc is None:
+                            raise RuntimeError(f"unit {units[i][:2]} failed in a worker:\n{text}")
+                        exc.add_note(f"in a worker process:\n{text}")
+                        raise exc
+                    done[i] = value
+                    season, start_id, _ = units[i]
+                    log.info(
+                        "unit %d/%d done: %s %s",
+                        len(done),
+                        len(units),
+                        season_label(season),
+                        start_id,
+                    )
+            for sentinel, conn in sentinels.items():
+                if sentinel in ready and conn in procs and not procs[conn].is_alive():
+                    proc = procs.pop(conn)
+                    lost = busy.pop(conn, None)
+                    if conn in idle:
+                        idle.remove(conn)
+                    if lost is not None:
+                        pending.insert(0, lost)
+                    log.warning(
+                        "worker process %d died (exit code %s)%s; %d worker(s) left",
+                        proc.pid,
+                        proc.exitcode,
+                        "" if lost is None else f", unit {units[lost][:2]} re-queued",
+                        len(procs),
+                    )
+                    conn.close()
+    finally:
+        for conn in procs:
+            try:
+                conn.send(None)
+            except OSError:
+                pass
+        for conn, proc in procs.items():
+            proc.join(_JOIN_SECONDS)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join()
+            conn.close()
+
+
 def run_units(
     store: DataStore,
     caches: Caches,
@@ -256,32 +436,39 @@ def run_units(
     jobs: int = 1,
 ) -> list[Any]:
     """`fn` on every unit, results in unit order: in this process (`jobs == 1`, on `store`
-    and `caches`) or in a pool of `jobs` spawned worker processes (module docstring)."""
+    and `caches`) or on `jobs` spawned worker processes (module docstring; `_run_pool`).
+
+    A worker that dies is not fatal: its unit goes to the other workers; if a whole pool
+    dies the units left are retried in a fresh pool, and after `POOL_ATTEMPTS` dead pools
+    run in this process, each step with a warning. Every unit is deterministic, so the
+    results are the same. A unit's own exception propagates."""
     if jobs < 1:
         raise ValueError(f"jobs must be >= 1, got {jobs}")
     if jobs == 1 or len(units) <= 1:
-        rules: dict[int, Rules] = {}
-        out = []
-        for unit in units:
-            if unit[0] not in rules:
-                rules[unit[0]] = rules_fn(unit[0])
-            out.append(fn(store, caches, rules[unit[0]], unit, payload))
-        return out
-    workers = min(jobs, len(units))
-    log.info("running %d unit(s) on %d worker process(es)", len(units), workers)
-    tasks = [(fn, rules_fn, unit, payload) for unit in units]
-    out = []
-    with ProcessPoolExecutor(
-        max_workers=workers,
-        mp_context=multiprocessing.get_context("spawn"),
-        initializer=_init_worker,
-        initargs=(store_spec(store), logging.getLogger().getEffectiveLevel()),
-    ) as pool:
-        for i, result in enumerate(pool.map(_run_unit, tasks)):
-            season, start_id, _ = units[i]
-            log.info("unit %d/%d done: %s %s", i + 1, len(units), season_label(season), start_id)
-            out.append(result)
-    return out
+        return _run_serial(store, caches, rules_fn, fn, units, payload)
+    done: dict[int, Any] = {}
+    for attempt in range(1, POOL_ATTEMPTS + 1):
+        todo = [i for i in range(len(units)) if i not in done]
+        if not todo:
+            break
+        workers = min(jobs, len(todo))
+        log.info("running %d unit(s) on %d worker process(es)", len(todo), workers)
+        try:
+            _run_pool(store, rules_fn, fn, units, payload, todo, workers, done)
+        except PoolBroken as exc:
+            log.warning(
+                "worker pool broke (attempt %d/%d: %s); %d unit(s) left to run",
+                attempt,
+                POOL_ATTEMPTS,
+                exc,
+                len(units) - len(done),
+            )
+    todo = [i for i in range(len(units)) if i not in done]
+    if todo:
+        log.warning("running the %d remaining unit(s) in this process", len(todo))
+        rest = _run_serial(store, caches, rules_fn, fn, [units[i] for i in todo], payload)
+        done.update(zip(todo, rest, strict=True))
+    return [done[i] for i in range(len(units))]
 
 
 # --- full runs --------------------------------------------------------------------------------
@@ -384,6 +571,8 @@ PER_DECISION_COLUMNS = (
     ("start_id", "str"),
     ("policy_a", "str"),
     ("policy_b", "str"),
+    ("reference", "str"),
+    ("continuation", "str"),
     ("gw", "int64"),
     ("gw_index", "int64"),
     ("k", "int64"),
@@ -407,14 +596,21 @@ def _window_scores(rows: Sequence[dict[str, Any]]) -> tuple[int, float | None]:
     return points, (None if any(v is None for v in xg) else float(sum(xg)))
 
 
+OWN = "own"  # per_decision continuation: each arm continues with its own policy
+
+
 @dataclass(frozen=True)
 class _PerDecisionJob:
     policy_a: Policy
     policy_b: Policy
-    continuation: Policy
+    continuation: Policy | None  # None: each arm's own policy
     k: int
     stride: int
     reference: str
+
+    @property
+    def continuation_name(self) -> str:
+        return OWN if self.continuation is None else self.continuation.name
 
 
 def _per_decision_unit(
@@ -439,13 +635,14 @@ def _per_decision_unit(
         same = arms["a"].decision == arms["b"].decision
         scores = {}
         for side, policy in (("a", policy_a), ("b", policy_b)):
-            if side == "b" and same:
-                scores["b"] = scores["a"]
+            if side == "b" and same and continuation is not None:
+                scores["b"] = scores["a"]  # same decision, same continuation: same window
                 continue
+            then = policy if continuation is None else continuation
             arm_rows, *_ = run_gameweeks(
                 store,
                 rules,
-                lambda j, first=policy: first if j == 0 else continuation,
+                lambda j, first=policy, then=then: first if j == 0 else then,
                 state,
                 window,
                 caches,
@@ -461,6 +658,8 @@ def _per_decision_unit(
                 "start_id": start_id,
                 "policy_a": policy_a.name,
                 "policy_b": policy_b.name,
+                "reference": job.reference,
+                "continuation": job.continuation_name,
                 "gw": int(window["gw"].iloc[0]),
                 "gw_index": int(window["gw_index"].iloc[0]),
                 "k": len(window),
@@ -494,7 +693,7 @@ def per_decision(
     start_specs: str | Sequence[StartSpec],
     policy_a: Policy,
     policy_b: Policy,
-    continuation: Policy,
+    continuation: Policy | str,
     k: int = 4,
     *,
     stride: int | None = None,
@@ -506,7 +705,10 @@ def per_decision(
     """Per-decision paired differences (module docstring), one row per decision GW of the
     reference trajectory with gw_index ≡ 1 (mod `stride`), `stride` defaulting to `k`
     (non-overlapping windows on one grid per season, whatever the start; 1 = every GW).
-    Columns: `k` = the window length actually scored (shorter at the season's end),
+    `reference` ("a"/"b") is the policy whose trajectory gives the states; `continuation`
+    a policy both arms follow after t, or "own" (`OWN`): each arm follows its own policy.
+    Columns: `reference`, `continuation` (its name or "own"), `k` = the window length
+    actually scored (shorter at the season's end),
     `stride`, `same_decision` (A and B decided the same at t, so the arms are identical and
     diff = 0), each arm's transfers at t, its net points and xG net points over the window,
     and the differences A − B. `jobs > 1` runs the (season, start) units in worker
@@ -519,6 +721,10 @@ def per_decision(
         raise ValueError(f"stride must be >= 1, got {stride}")
     if reference not in ("a", "b"):
         raise ValueError(f"reference must be 'a' or 'b', got {reference!r}")
+    if isinstance(continuation, str):
+        if continuation != OWN:
+            raise ValueError(f"continuation must be a policy or {OWN!r}, got {continuation!r}")
+        continuation = None
     seasons = list(seasons)
     _refuse_holdout(seasons)
     specs = _specs(start_specs)
@@ -620,11 +826,15 @@ class Summary:
     GWs played, transfers and hit points, and the mean captain/XI regret per GW.
     `policies`: the same averaged over seasons (`n_seasons`), except `xg_total`, averaged
     over the `xg_seasons` seasons where every policy's `xg_total` is non-null, so policies
-    are compared on the same seasons. `comparisons`: per (a, b, method, metric) the
+    are compared on the same seasons. `comparisons`: per (a, b, method, split, metric) the
     bootstrap result (`block_bootstrap`; mean per GW for `full_run`, per decision window for
     `per_decision`) plus `season_diff`, the difference in season points (Σ over the season's
     cells of the start-averaged difference, mean over seasons; windows that overlap,
-    stride < k, are weighted stride/k so each GW counts about once). Metrics: `realized`,
+    stride < k, are weighted stride/k so each GW counts about once), `p_season_t` (the
+    one-sided season-level t-test, `season_t_test`) and `deflated_mean` (`deflated_mean`,
+    for the `n_variants` given to `summarize`). Splits (PLAN §5): `all` seasons, `develop`
+    (2016/17-2022/23), `validate` (2023/24-2024/25); one without data is left out.
+    Metrics: `realized`,
     `realized@xg` (realized on the rows whose xG difference is non-null, i.e. the xG
     metric's sample, for the same-sign check) and `xg`. `transfer_gains`:
     `transfer_gain_summary`."""
@@ -703,6 +913,81 @@ def season_points(diffs: pd.DataFrame, column: str = "diff") -> pd.Series:
     return cells.groupby(level=0).sum().rename_axis("season")
 
 
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction of the regularized incomplete beta function (modified Lentz)."""
+    tiny, qab, qap, qam = 1e-300, a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 500):
+        m2 = 2 * m
+        even = m * (b - m) * x / ((qam + m2) * (a + m2))
+        odd = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        for aa in (even, odd):
+            d = 1.0 + aa * d
+            d = 1.0 / (d if abs(d) > tiny else tiny)
+            c = 1.0 + aa / c
+            c = c if abs(c) > tiny else tiny
+            h *= d * c
+        if abs(d * c - 1.0) < 1e-15:
+            break
+    return h
+
+
+def _betainc(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta function I_x(a, b)."""
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+    log_front = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+    front = math.exp(log_front + a * math.log(x) + b * math.log1p(-x))
+    if x < (a + 1) / (a + b + 2):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def t_sf(t: float, df: int) -> float:
+    """P(T > t) for Student's t with `df` degrees of freedom."""
+    tail = 0.5 * _betainc(df / 2, 0.5, df / (df + t * t))
+    return tail if t >= 0 else 1.0 - tail
+
+
+def season_t_test(diffs: pd.DataFrame, column: str = "diff") -> tuple[float, int]:
+    """One-sided t-test (H1: A > B) on the per-season mean differences: per season the mean
+    over its (season, gw_index) cells of the start-averaged `column` (nulls dropped), then
+    t = mean / (sd / sqrt(n)) with n − 1 degrees of freedom over the n seasons. Seasons are
+    the independent units (start states and GWs of a season share outcomes), so this is a
+    conservative companion to the block bootstrap. Returns (p, n); p is NaN with fewer than
+    2 seasons or no spread."""
+    valid = diffs[diffs[column].notna()]
+    if valid.empty:
+        return float("nan"), 0
+    values = pd.to_numeric(valid[column]).astype("float64")
+    cells = values.groupby([valid["season"], valid["gw_index"]]).mean()
+    means = cells.groupby(level=0).mean().to_numpy(dtype="float64")
+    n = len(means)
+    sd = float(np.std(means, ddof=1)) if n >= 2 else 0.0
+    if n < 2 or sd == 0:
+        return float("nan"), n
+    return t_sf(float(means.mean()) / (sd / math.sqrt(n)), n - 1), n
+
+
+def deflated_mean(mean: float, ci_low: float, ci_high: float, n_variants: int, ci: float) -> float:
+    """The best-of-N haircut (PLAN §5 *Multiple testing*): mean − SE·sqrt(2 ln N), with SE
+    from the two-sided `ci` percentile interval (its width / (2 z), z the standard normal
+    quantile at (1 + ci) / 2). N ≤ 1: no haircut."""
+    if n_variants <= 1:
+        return mean
+    z = NormalDist().inv_cdf((1 + ci) / 2)
+    se = (ci_high - ci_low) / (2 * z)
+    return mean - se * math.sqrt(2 * math.log(n_variants))
+
+
+# PLAN §5 *Splits*; `all` = every season in the frame.
+SPLITS = (("all", None), ("develop", DEVELOP_SEASONS), ("validate", VALIDATE_SEASONS))
+
+
 def _comparison(
     diffs: pd.DataFrame,
     a: str,
@@ -710,25 +995,36 @@ def _comparison(
     method: str,
     *,
     block_length: int,
+    n_variants: int = 1,
     **bootstrap: Any,
 ) -> list[dict[str, Any]]:
+    """Rows per split (all, develop, validate; a split without data is left out) and metric
+    (`Summary`)."""
     stride = _stride(diffs)
     cell_block = -(-block_length // stride)  # block_length is in GWs
     rows = []
-    on_xg = diffs[diffs["diff_xg"].notna()]
-    for metric, frame, column in (
-        ("realized", diffs, "diff"),
-        ("realized@xg", on_xg, "diff"),
-        ("xg", diffs, "diff_xg"),
-    ):
-        result = block_bootstrap(frame, value=column, block_length=cell_block, **bootstrap)
-        per_season = season_points(frame, column)
-        season_diff = float(per_season.mean()) if len(per_season) else float("nan")
-        rows.append(
-            {"a": a, "b": b, "method": method, "metric": metric}
-            | result.to_dict()
-            | {"season_diff": season_diff}
-        )
+    for split, seasons in SPLITS:
+        part = diffs if seasons is None else diffs[diffs["season"].isin(seasons)]
+        if part.empty:
+            continue
+        on_xg = part[part["diff_xg"].notna()]
+        for metric, frame, column in (
+            ("realized", part, "diff"),
+            ("realized@xg", on_xg, "diff"),
+            ("xg", part, "diff_xg"),
+        ):
+            result = block_bootstrap(frame, value=column, block_length=cell_block, **bootstrap)
+            per_season = season_points(frame, column) if len(frame) else pd.Series(dtype=float)
+            season_diff = float(per_season.mean()) if len(per_season) else float("nan")
+            p_t, _ = season_t_test(frame, column)
+            deflated = deflated_mean(
+                result.mean, result.ci_low, result.ci_high, n_variants, bootstrap.get("ci", 0.8)
+            )
+            rows.append(
+                {"a": a, "b": b, "method": method, "split": split, "metric": metric}
+                | result.to_dict()
+                | {"season_diff": season_diff, "p_season_t": p_t, "deflated_mean": deflated}
+            )
     return rows
 
 
@@ -802,12 +1098,21 @@ def summarize(
     n_boot: int = 2000,
     seed: int = 0,
     ci: float = 0.8,
+    n_variants: int = 1,
 ) -> Summary:
     """Season totals per policy (mean over starts) from `run_grid` results, and for each
     (a, b) in `pairs` the full-run paired difference, plus each `per_decision` frame's:
     realized, realized on the xG sample and xG-scored, with block-bootstrap CIs
-    (`block_bootstrap` parameters, `block_length` in GWs; `Summary` describes the columns)."""
-    bootstrap = {"block_length": block_length, "n_boot": n_boot, "seed": seed, "ci": ci}
+    (`block_bootstrap` parameters, `block_length` in GWs; `Summary` describes the columns),
+    per split, with the season-level t-test and the mean deflated for `n_variants` (the
+    variants tried in this comparison family, `family_variants`)."""
+    bootstrap = {
+        "block_length": block_length,
+        "n_boot": n_boot,
+        "seed": seed,
+        "ci": ci,
+        "n_variants": n_variants,
+    }
     season_totals = _season_totals(results)
     policies = (
         season_totals.drop(columns=["season", "n_starts"])
@@ -835,8 +1140,9 @@ def summarize(
                 continue
             for (a, b), part in frame.groupby(["policy_a", "policy_b"], sort=True):
                 comparisons += _comparison(part, a, b, "per_decision", **bootstrap)
-    columns = ["a", "b", "method", "metric", "mean", "ci_low", "ci_high", "p_one_sided"]
-    columns += ["n_seasons", "n_gws", "season_diff"]
+    columns = ["a", "b", "method", "split", "metric", "mean", "ci_low", "ci_high"]
+    columns += ["p_one_sided", "n_seasons", "n_gws", "season_diff", "p_season_t"]
+    columns += ["deflated_mean"]
     return Summary(
         season_totals,
         policies,
@@ -882,19 +1188,49 @@ def _dumps(value: Any) -> str:
     return json.dumps(json_safe(value), sort_keys=True, default=str, allow_nan=False)
 
 
+def read_experiments(path: Path | str) -> list[dict[str, str]]:
+    """The experiment log's rows (empty if the file is missing or empty); columns missing
+    from an older log (e.g. `family`) read as ''."""
+    path = Path(path)
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        return [{c: row.get(c) or "" for c in EXPERIMENT_COLUMNS} for row in csv.DictReader(handle)]
+
+
+def family_variants(path: Path | str, family: str) -> int:
+    """How many runs of comparison family `family` the log at `path` already holds. A run
+    adds one variant to its family (its A arm against the family's fixed B), so a new run's
+    `n_variants` is this + 1: cumulative per family, as the best-of-N deflation needs."""
+    return sum(1 for row in read_experiments(path) if row["family"] == family)
+
+
 def log_experiment(
     path: Path | str,
     command: str,
     config: dict[str, Any],
     metrics: dict[str, Any],
     n_variants: int,
+    family: str = "",
 ) -> None:
     """Append one row (`EXPERIMENT_COLUMNS`: UTC timestamp, git sha, command, config and
-    metrics as strict JSON (NaN as null, numpy scalars as numbers), n_variants) to the CSV
-    at `path` with LF line endings, writing the header if the file is new or empty."""
+    metrics as strict JSON (NaN as null, numpy scalars as numbers), n_variants — the
+    variants tried in the family so far, this run included —, family) to the CSV at
+    `path` with LF line endings, writing the header if the file is new or empty. A log with
+    an older header is rewritten with the current columns first (missing values empty)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     new = not path.exists() or path.stat().st_size == 0
+    columns = list(EXPERIMENT_COLUMNS)
+    if not new:
+        with path.open(newline="", encoding="utf-8") as handle:
+            header = next(csv.reader(handle), [])
+        if header != columns:
+            old = read_experiments(path)
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=columns, lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(old)
     row = {
         "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
         "git_sha": git_sha(),
@@ -902,9 +1238,10 @@ def log_experiment(
         "config": _dumps(config),
         "metrics": _dumps(metrics),
         "n_variants": int(n_variants),
+        "family": family,
     }
     with path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(EXPERIMENT_COLUMNS), lineterminator="\n")
+        writer = csv.DictWriter(handle, fieldnames=columns, lineterminator="\n")
         if new:
             writer.writeheader()
         writer.writerow(row)

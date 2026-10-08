@@ -168,6 +168,9 @@ POLICY_PARAMS: dict[str, dict[str, Callable[[str], Any]]] = {
     },
 }
 DEFAULT_STARTS = "template@1,random:5@1,random:3@20"
+# Wall-clock cap per HiGHS solve for interactive commands (`optimize plan`, `optimize
+# bench`) only; backtests use the deterministic node limit alone (OptimizerParams).
+INTERACTIVE_TIME_LIMIT = 60.0
 DEFAULT_EXPERIMENTS = Path("results/experiments.csv")
 # Two-sided bootstrap CI level: its lower bound is the one-sided α = 0.10 bound of the
 # go-live gate (PLAN §9).
@@ -316,6 +319,29 @@ def parse_policy_spec(text: str) -> PolicySpec:
     return make_policy_spec(parts[0], parts[1], params)
 
 
+OWN_CONTINUATION = "own"  # per-decision: each arm continues with its own policy
+
+
+def parse_continuation(text: str) -> PolicySpec | str:
+    """`own` (each arm continues with its own policy) or a policy spec."""
+    if text.strip().lower() == OWN_CONTINUATION:
+        return OWN_CONTINUATION
+    return parse_policy_spec(text)
+
+
+parse_continuation.__name__ = "own or policy spec"
+
+
+def default_family(args: argparse.Namespace) -> str:
+    """The experiment-log comparison family when --family is not given: compare = the B
+    policy and the seasons (`greedy:rolling 2016-2024`: every A tried against the same
+    baseline on the same seasons is one more variant of it); run = `run <policy> <seasons>`."""
+    seasons = format_seasons(args.seasons)
+    if args.command == "compare":
+        return f"{args.b} {seasons}"
+    return f"run {args.policy_specs[0]} {seasons}"
+
+
 def open_data_store(data_dir: Path) -> DataStore:
     """The backtests' store over data/ (tests replace this factory with in-memory tables)."""
     from fplopt.features.store import DataStore
@@ -395,8 +421,10 @@ def validate_backtest(
     except ValueError as exc:
         parser.error(f"--starts: {exc}")
     specs = list(args.policy_specs)
-    if args.command == "compare" and args.per_decision:
+    if args.command == "compare" and args.per_decision and args.continuation != OWN_CONTINUATION:
         specs.append(args.continuation)
+    if args.family is None:
+        args.family = default_family(args)
     early = [season for season in args.seasons if season < EP_NEXT_FIRST_SEASON]
     for spec in specs:
         _refuse_early_ep_next(parser, spec.xp, str(spec), early)
@@ -428,11 +456,13 @@ def _backtest_config(args: argparse.Namespace, out: Path) -> dict[str, Any]:
         "policies": [str(spec) for spec in args.policy_specs],
         "out": str(out),
         "jobs": args.jobs,
+        "family": args.family,
     }
     if args.command == "compare":
         config |= {
             "per_decision": args.per_decision,
             "continuation": str(args.continuation) if args.per_decision else None,
+            "reference": args.reference if args.per_decision else None,
             "k": args.k,
             "stride": args.stride,
             "block_length": args.block_length,
@@ -594,11 +624,13 @@ def overall_table(totals: pd.DataFrame) -> str:
 
 
 def comparison_table(summary: Summary, k: int, stride: int, ci: float = CI_LEVEL) -> str:
-    """The paired comparisons of `summarize`: mean difference (per GW for the full run, per
-    k-GW decision window for per-decision), `ci` CI, one-sided p, sample (seasons and cells:
-    GWs or decision windows), difference in season points."""
-    headers = ["method", "metric", "mean diff", f"{ci:.0%} CI", "p", "seasons", "cells"]
-    headers += ["per season"]
+    """The paired comparisons of `summarize`, per split (all seasons, develop, validate):
+    mean difference (per GW for the full run, per k-GW decision window for per-decision),
+    the mean deflated for the family's variants, `ci` CI, one-sided bootstrap p, one-sided
+    season-level t-test p, sample (seasons and cells: GWs or decision windows), difference
+    in season points."""
+    headers = ["method", "split", "metric", "mean diff", "deflated", f"{ci:.0%} CI", "p"]
+    headers += ["season-t p", "seasons", "cells", "per season"]
     rows = []
     for r in summary.comparisons.itertuples(index=False):
         method = "full run"
@@ -607,16 +639,19 @@ def comparison_table(summary: Summary, k: int, stride: int, ci: float = CI_LEVEL
         rows.append(
             [
                 method,
+                str(r.split),
                 str(r.metric),
                 _num(r.mean, 3, True),
+                _num(r.deflated_mean, 3, True),
                 f"[{_num(r.ci_low, 3, True)}, {_num(r.ci_high, 3, True)}]",
                 _num(r.p_one_sided, 3),
+                _num(r.p_season_t, 3),
                 str(int(r.n_seasons)),
                 str(int(r.n_gws)),
                 _num(r.season_diff, 1, True),
             ]
         )
-    return text_table(headers, rows, left=2)
+    return text_table(headers, rows, left=3)
 
 
 GAINS_TITLE = (
@@ -723,7 +758,7 @@ def _backtest_run(c: Context) -> object:
     """`fplopt backtest run`: one policy from every start state of every season (`run_grid`);
     writes gws.parquet and summary.json to --out, prints the season table and appends the
     run to the experiment log."""
-    from fplopt.backtest.evaluate import log_experiment, run_grid, summarize
+    from fplopt.backtest.evaluate import family_variants, log_experiment, run_grid, summarize
 
     args = c.args
     store = _backtest_store(c)
@@ -756,17 +791,29 @@ def _backtest_run(c: Context) -> object:
         f"{GAINS_TITLE}\n{transfer_gain_table(summary)}\n\nWritten to {out}",
         flush=True,
     )
-    log_experiment(args.experiments, args.command_line, config, _experiment_metrics(summary), 1)
+    n_variants = family_variants(args.experiments, args.family) + 1
+    log_experiment(
+        args.experiments,
+        args.command_line,
+        config,
+        _experiment_metrics(summary),
+        n_variants,
+        args.family,
+    )
     return summary
 
 
 def _backtest_compare(c: Context) -> object:
     """`fplopt backtest compare`: policies A and B from the same start states (`run_grid`),
     the paired full-run and (unless --no-per-decision) per-decision differences with
-    GW-block bootstrap CIs (`summarize`). Writes gws.parquet, paired.parquet,
+    GW-block bootstrap CIs (`summarize`), per split (all seasons, develop, validate), with
+    the season-level t-test and the mean deflated for the comparison family's variants
+    (`--family`; this run is one more). Writes gws.parquet, paired.parquet,
     per_decision.parquet and summary.json, prints the tables and appends the run to the
-    experiment log (2 variants)."""
+    experiment log."""
     from fplopt.backtest.evaluate import (
+        OWN,
+        family_variants,
         log_experiment,
         paired_full_run,
         per_decision,
@@ -779,7 +826,11 @@ def _backtest_compare(c: Context) -> object:
     store = _backtest_store(c)
     out = _out_dir(args)
     a, b = (spec.build() for spec in args.policy_specs)
-    continuation = args.continuation.build() if args.per_decision else None
+    continuation = None
+    if args.per_decision:
+        own = args.continuation == OWN_CONTINUATION
+        continuation = OWN if own else args.continuation.build()
+    n_variants = family_variants(args.experiments, args.family) + 1
     caches = Caches()
     began = time.perf_counter()
     results = run_grid(store, args.seasons, args.start_specs, [a, b], caches=caches, jobs=args.jobs)
@@ -797,6 +848,7 @@ def _backtest_compare(c: Context) -> object:
             continuation,
             k=args.k,
             stride=args.stride,
+            reference=args.reference,
             caches=caches,
             jobs=args.jobs,
         )
@@ -808,6 +860,7 @@ def _backtest_compare(c: Context) -> object:
         n_boot=args.n_boot,
         seed=args.seed,
         ci=CI_LEVEL,
+        n_variants=n_variants,
     )
     runtime = time.perf_counter() - began
     totals = season_totals_by_start(results, args.start_specs)
@@ -822,14 +875,20 @@ def _backtest_compare(c: Context) -> object:
         "config": config,
         "policy_a": a.name,
         "policy_b": b.name,
-        "continuation": None if continuation is None else continuation.name,
+        "continuation": _continuation_name(continuation),
+        "reference": args.reference if continuation is not None else None,
+        "family": args.family,
+        "n_variants": n_variants,
         "runtime_seconds": round(runtime, 1),
         "starts": _starts_by_season(results),
         "season_totals_by_start": _records(totals),
         "summary": summary.to_dict(),
     }
     _write_json(out / "summary.json", payload)
-    cont = "" if continuation is None else f", continuation {continuation.name}"
+    cont = ""
+    if continuation is not None:
+        reference = (a if args.reference == "a" else b).name
+        cont = f", continuation {_continuation_name(continuation)}, reference {reference}"
     print(
         f"A = {a.name}, B = {b.name}, seasons {format_seasons(args.seasons)}, starts "
         f"{args.starts}{cont} ({runtime:.0f}s)\n\n"
@@ -839,15 +898,33 @@ def _backtest_compare(c: Context) -> object:
         f"decision window, decisions at gw_index 1 + {args.stride}j; {CI_LEVEL:.0%} CI, two-sided "
         f"(lower bound = one-sided alpha {(1 - CI_LEVEL) / 2:.2f}), from a GW-block bootstrap "
         f"by season, blocks of {args.block_length} GWs, {args.n_boot} resamples; p "
-        "one-sided, H1: A > B; realized@xg = realized points on the xG metric's sample; "
+        "one-sided, H1: A > B; season-t p = one-sided t-test on the per-season mean "
+        f"differences; deflated = mean - SE*sqrt(2 ln N), N = {n_variants} variant(s) of "
+        f"family '{args.family}'; splits: develop 2016-17..2022-23, validate 2023-24..2024-25; "
+        "realized@xg = realized points on the xG metric's sample; "
         "cells = GWs or decision windows; per season = difference in season points)\n"
         f"{comparison_table(summary, args.k, args.stride)}\n\nPer season (A - B)\n"
         f"{per_season_diff_table(paired, decisions, args.k)}\n\n"
         f"{GAINS_TITLE}\n{transfer_gain_table(summary)}\n\nWritten to {out}",
         flush=True,
     )
-    log_experiment(args.experiments, args.command_line, config, _experiment_metrics(summary), 2)
+    log_experiment(
+        args.experiments,
+        args.command_line,
+        config,
+        _experiment_metrics(summary),
+        n_variants,
+        args.family,
+    )
     return summary
+
+
+def _continuation_name(continuation: Any) -> str | None:
+    """The per-decision continuation's name: a policy's name, 'own', or None (no
+    per-decision run)."""
+    if continuation is None or isinstance(continuation, str):
+        return continuation
+    return continuation.name
 
 
 # --- optimizer --------------------------------------------------------------------------------
@@ -870,9 +947,11 @@ def _optimize_bench(c: Context) -> object:
         store,
         deadlines=args.deadlines,
         seed=args.seed,
-        params=OptimizerParams(horizon=args.horizon)
+        params=OptimizerParams(horizon=args.horizon, time_limit=INTERACTIVE_TIME_LIMIT)
         if args.prune_n is None
-        else OptimizerParams(horizon=args.horizon, prune_n=args.prune_n),
+        else OptimizerParams(
+            horizon=args.horizon, prune_n=args.prune_n, time_limit=INTERACTIVE_TIME_LIMIT
+        ),
         all_chips=args.all_chips,
         prune_study=args.prune_study,
         progress=lambda line: print(line, flush=True),
@@ -916,7 +995,7 @@ def plan_text(plans: PlanSet, names: dict[int, str]) -> str:
         head = (
             f"{label}: gain vs roll {gain}, objective {plan.total_objective:.2f} "
             f"(chip terminal value {plan.terminal_value:.2f}), scenario {plan.scenario}, "
-            f"{plan.status}, gap {plan.mip_gap:.2%}"
+            f"{plan.status}, gap {plan.mip_gap:.2%}, {plan.n_nodes} nodes"
         )
         rows = []
         for g in plan.gws:
@@ -964,7 +1043,7 @@ def _optimize_plan(c: Context) -> object:
         state = template_state(view, rules)
     else:
         state = random_state(view, rules, int(args.start.split(":", 1)[1]))
-    params = OptimizerParams(horizon=args.horizon)
+    params = OptimizerParams(horizon=args.horizon, time_limit=INTERACTIVE_TIME_LIMIT)
     overrides: dict[str, Any] = {}
     if args.max_hits is not None:
         overrides["max_hits"] = parse_max_hits(args.max_hits)
@@ -1193,6 +1272,13 @@ def _add_backtest_parsers(groups: Any) -> None:
             help="worker processes over (season, start) units (default: CPUs - 1); "
             "results equal --jobs 1",
         )
+        sub.add_argument(
+            "--family",
+            default=None,
+            help="experiment-log comparison family: n_variants counts its runs (default: "
+            "compare = the B policy and seasons, e.g. 'greedy:rolling 2016-2024'; run = "
+            "'run <policy> <seasons>')",
+        )
     spec_help = "policy name:xp[:key=value,...], e.g. greedy:rolling:threshold=2.0"
     run.add_argument(
         "--policy", choices=list(POLICY_PARAMS), default=None, help="policy (default greedy)"
@@ -1212,9 +1298,16 @@ def _add_backtest_parsers(groups: Any) -> None:
     compare.add_argument("--b", type=parse_policy_spec, required=True, help=f"B: {spec_help}")
     compare.add_argument(
         "--continuation",
-        type=parse_policy_spec,
+        type=parse_continuation,
         default="roll:rolling",
-        help="per-decision continuation policy (default roll:rolling)",
+        help="per-decision continuation: a policy spec both arms follow after the decision, "
+        "or 'own' (each arm continues with its own policy and xP; default roll:rolling)",
+    )
+    compare.add_argument(
+        "--reference",
+        choices=["a", "b"],
+        default="b",
+        help="per-decision: whose own run gives the decision states (default b)",
     )
     compare.add_argument("--k", type=int, default=4, help="per-decision window in GWs (4)")
     compare.add_argument(
