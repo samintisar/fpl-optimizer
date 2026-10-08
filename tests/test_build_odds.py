@@ -8,16 +8,20 @@ from synthetic_raw import REPO_CONFIG, TEAM_CODES, World, football_data
 from fplopt.build import build
 from fplopt.build.odds import (
     OddsValidationError,
+    archived_live,
     check_overround,
+    football_data_first_seen,
     football_data_odds,
     odds_api_rows,
     prematch_available_at,
 )
 from fplopt.build.teams import TeamResolver, team_dim_from_config
+from fplopt.features.store import DataStore
 
 CONFIG = pd.read_csv(REPO_CONFIG / "teams.csv")
 ODDS_NAMES = dict(zip(CONFIG["team_key"], CONFIG["odds_api"], strict=True))
 RESOLVER = TeamResolver(team_dim_from_config(REPO_CONFIG / "teams.csv"))
+LATER = datetime(2026, 10, 6, 5, tzinfo=UTC)  # a one-time backfill after the season
 
 
 @pytest.fixture
@@ -326,6 +330,84 @@ def test_build_odds_snapshot_end_to_end(world):
     api = odds[odds["source"] == "odds-api"]
     assert set(api["bookmaker"]) == {"betfair_ex_uk"}
     assert (api["fixture_key"] == 2026000 + upcoming["id"]).all()
+
+
+def test_first_seen_is_the_first_file_carrying_the_price():
+    gw1 = fd_row(2026, AvgH=2.0, AvgD=3.5, AvgA=4.0)
+    gw1_moved = fd_row(2026, AvgH=2.2, AvgD=3.5, AvgA=4.0)  # a revised home price
+    gw2 = fd_row(2026, AvgH=1.5, AvgD=4.0, AvgA=6.0).assign(home_team_key=8, away_team_key=3)
+    files = [
+        (utc("2026-08-03T02:30"), gw1),
+        (utc("2026-08-10T02:30"), pd.concat([gw1_moved, gw2], ignore_index=True)),
+    ]
+    seen = football_data_first_seen(files)
+    first = {(r.home_team_key, r.outcome, r.price): r.first_seen for r in seen.itertuples()}
+    assert first == {
+        (3, "home", 2.0): utc("2026-08-03T02:30"),
+        (3, "draw", 3.5): utc("2026-08-03T02:30"),
+        (3, "away", 4.0): utc("2026-08-03T02:30"),
+        (3, "home", 2.2): utc("2026-08-10T02:30"),
+        (8, "home", 1.5): utc("2026-08-10T02:30"),
+        (8, "draw", 4.0): utc("2026-08-10T02:30"),
+        (8, "away", 6.0): utc("2026-08-10T02:30"),
+    }
+    assert football_data_first_seen([]).empty
+
+
+def test_archived_live_means_first_file_before_the_last_kickoff():
+    kickoffs = pd.Series([utc("2026-08-01T14:00"), utc("2027-05-23T15:00"), pd.NaT])
+    assert archived_live(utc("2026-10-06T03:26"), kickoffs)
+    assert not archived_live(utc("2027-06-01T02:30"), kickoffs)
+    assert archived_live(utc("2026-10-06T03:26"), pd.Series([pd.NaT]))
+
+
+def test_live_season_rows_available_from_first_archived_file(world):
+    """2026/27 is re-fetched daily and E0.csv lists played matches only: each price is
+    available from the first file carrying it, never the assumed Friday collection."""
+    fx23 = world.add_vaastav_season(2023)
+    world.football_data(2023, with_odds(football_data(fx23, 2023), 2023), at=LATER)
+    current = world.add_current_season(fd_rows=0)  # file at RUN, no odds columns
+    played = current[current["event"].isin([1, 2])].astype({"event": "int64"})
+    gw1 = with_odds(football_data(played[played["event"] == 1], 2026), 2026)
+    both = with_odds(football_data(played, 2026), 2026)
+    moved = (both["HomeTeam"] == gw1["HomeTeam"].iloc[0]) & (
+        both["AwayTeam"] == gw1["AwayTeam"].iloc[0]
+    )
+    both.loc[moved, "AvgH"] = 1.9  # revised after the first archive
+    after_gw1 = datetime(2026, 8, 3, 2, 30, tzinfo=UTC)
+    after_gw2 = datetime(2026, 8, 10, 2, 30, tzinfo=UTC)
+    world.football_data(2026, gw1, at=after_gw1)
+    world.football_data(2026, both, at=after_gw2)
+    world.football_data(2026, both, at=datetime(2026, 10, 7, 1, 30, tzinfo=UTC))  # newest
+    build(["fixture", "odds_snapshot"], world.ctx)
+
+    odds = world.ctx.table("odds_snapshot")
+    fixture = world.ctx.table("fixture").set_index("fixture_key")
+    live = odds[(odds["season"] == 2026) & (odds["source"] == "football-data")]
+    assert len(live) == 20 * 8
+    gw = live["fixture_key"].map(fixture["gw"])
+    # the revised home price delays its whole market (h2h avg, pre-match), not the others
+    revised = live["fixture_key"].eq(2026000 + played["id"].iloc[0]) & live["market"].eq("h2h")
+    revised &= ~live["is_closing"]
+    expected = pd.Series(pd.Timestamp(after_gw2).as_unit("us"), index=live.index)
+    expected = expected.where((gw != 1) | revised, pd.Timestamp(after_gw1).as_unit("us"))
+    assert (live["available_at"] == expected).all()
+    assert (live["snapshot_at"] == live["available_at"]).all()
+    assert (live["available_at"] > live["event_time"]).all()  # all after kickoff
+    assert 1.9 in set(live.loc[revised, "price"])
+    # the historical season keeps the assumed collection time and kickoff
+    old = odds[odds["season"] == 2023]
+    assert (old["available_at"] == old["event_time"]).eq(old["is_closing"]).all()
+    pre = old[~old["is_closing"]]
+    assert (pre["available_at"] == prematch_available_at(pre["event_time"])).all()
+    # a GW2 deadline (after the assumed Friday collection) sees no GW2 football-data odds
+    first_gw2 = played.loc[played["event"] == 2, "kickoff_time"].min()
+    view = DataStore(tables={"odds_snapshot": odds}).as_of(
+        pd.Timestamp(first_gw2) - pd.Timedelta(minutes=90)
+    )
+    visible = view.latest("odds_snapshot", by=["fixture_key", "source"], columns=["price"])
+    visible = visible[visible["fixture_key"] // 1000 == 2026]
+    assert set(visible["fixture_key"].map(fixture["gw"])) == {1}
 
 
 def test_build_fails_on_football_data_date_mismatch(world):

@@ -441,31 +441,37 @@ def football_data_frames(
     column for that season, NaN after the concat). Rows without a `Date` are dropped
     (2014/15 has a trailing empty row)."""
     keys = ["season", "fd_date", "home_team_key", "away_team_key"]
-    frames = []
-    for season, path in football_data_files(ctx, first_season):
-        df = read_raw_csv(path, usecols=["Date", "HomeTeam", "AwayTeam", *columns])
-        df = df.dropna(subset=["Date"]).reset_index(drop=True)
-        frames.append(
-            pd.concat(
-                [
-                    pd.DataFrame(
-                        {
-                            "season": season,
-                            "fd_date": [_fd_date(text) for text in df["Date"]],
-                            "home_team_key": [resolver.football_data(n) for n in df["HomeTeam"]],
-                            "away_team_key": [resolver.football_data(n) for n in df["AwayTeam"]],
-                        }
-                    ),
-                    df[[c for c in columns if c in df.columns]],
-                ],
-                axis=1,
-            )
-        )
+    frames = [
+        football_data_frame(path, season, resolver, columns)
+        for season, path in football_data_files(ctx, first_season)
+    ]
     if not frames:
         return pd.DataFrame(columns=keys)
     out = pd.concat(frames, ignore_index=True)
     out["season"] = out["season"].astype("int64")
     return out
+
+
+def football_data_frame(
+    path: Path, season: int, resolver: TeamResolver, columns: list[str] | tuple[str, ...] = ()
+) -> pd.DataFrame:
+    """One football-data file's rows as in `football_data_frames`."""
+    df = read_raw_csv(path, usecols=["Date", "HomeTeam", "AwayTeam", *columns])
+    df = df.dropna(subset=["Date"]).reset_index(drop=True)
+    return pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "season": season,
+                    "fd_date": [_fd_date(text) for text in df["Date"]],
+                    "home_team_key": [resolver.football_data(n) for n in df["HomeTeam"]],
+                    "away_team_key": [resolver.football_data(n) for n in df["AwayTeam"]],
+                }
+            ),
+            df[[c for c in columns if c in df.columns]],
+        ],
+        axis=1,
+    )
 
 
 def football_data_results(

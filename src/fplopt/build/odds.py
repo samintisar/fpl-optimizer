@@ -28,6 +28,15 @@ Fri/Sat/Sun/Mon -> the Friday on or before, 15:00 UK; capped at kickoff − 1h. 
 prices are only known at kickoff: `available_at = kickoff_time`. `event_time` = the fixture's
 `event_time` (its FPL kickoff).
 
+Seasons archived live (the season's first raw file was fetched before its last kickoff; from
+2026/27, re-fetched daily): `available_at = snapshot_at` = max(the time above, the timestamp
+of the first raw file of the season carrying the market's prices — one time per bookmaker,
+market and closing flag, so a revised price never splits a market), so a replay only sees
+what we held. `E0.csv` lists played matches only (no unplayed row in any 2026/27 file), so
+every live-season price is first archived after kickoff: usable as history, never as
+as-of-deadline odds for the match itself (those come from The Odds API). Seasons whose files
+were all fetched after the season (one-time backfills, ≤ 2025/26) keep the assumed times.
+
 The Odds API (`raw/odds/soccer_epl/*.json.gz`, 2026/27 →): events -> fixtures by (season =
 July-cutoff season of `commence_time`, home, away) via `TeamResolver.odds_api`; markets
 `h2h` (outcomes by team name / "Draw") and `totals` with `point == 2.5` (3.5 dropped);
@@ -36,10 +45,11 @@ July-cutoff season of `commence_time`, home, away) via `TeamResolver.odds_api`; 
 that had already kicked off at the snapshot (in-play prices) and events without a fixture.
 
 Validation: unique (fixture_key, source, bookmaker, market, outcome, line, is_closing,
-snapshot_at); prices > 1; market/outcome/line consistent; pre-match rows available before
-kickoff, closing rows at kickoff; h2h overround (Σ 1/price over home/draw/away per fixture,
-source, bookmaker, closing flag and snapshot) within [OVERROUND_MIN, OVERROUND_MAX] — groups
-outside, or missing an outcome, are reported, and more than 1% of them fails the build.
+snapshot_at); prices > 1; market/outcome/line consistent; Odds API rows available before
+kickoff, football-data pre-match rows at or after the collection time, closing rows at or
+after kickoff; h2h overround (Σ 1/price over home/draw/away per fixture, source, bookmaker,
+closing flag and snapshot) within [OVERROUND_MIN, OVERROUND_MAX] — groups outside, or missing
+an outcome, are reported, and more than 1% of them fails the build.
 
 Measured on raw/ 2026-10-06 (101,074 rows: football-data 98,612 for 2016/17 – 2026/27 GW5,
 Odds API 2,462 from 2 snapshots; ~1 s): every football-data match joins its fixture with
@@ -48,7 +58,9 @@ the same date; prices 1.04–42.94; AH lines −3.75…+3.0. h2h overround range
 1.002–1.103 — except one Smarkets (exchange) group at 1.384, the only outlier of 16,120
 groups (reported, not fatal). So [1.0, 1.2] holds with room on both sides; exchanges sit just
 above 1.0. Pre-match collection lead (kickoff − available_at) is 1 h – 3 d 6 h; 15 matches
-(Friday/Tuesday kickoffs before 16:00 UK) are capped at kickoff − 1 h.
+(Friday/Tuesday kickoffs before 16:00 UK) are capped at kickoff − 1 h. 2026/27 (2026-10-08):
+all 1,400 football-data rows (GW1–5) were first archived 2026-10-06, after kickoff; with the
+assumed times their 700 pre-match rows had been visible before kickoff.
 """
 
 from __future__ import annotations
@@ -63,10 +75,10 @@ import pandas as pd
 import pandera.pandas as pa
 
 from fplopt.build.common import UK, UTC_US, BuildContext
-from fplopt.build.fixtures import FIRST_SEASON, football_data_frames
+from fplopt.build.fixtures import FIRST_SEASON, football_data_frame, football_data_frames
 from fplopt.build.teams import TeamResolver
 from fplopt.ingest.raw_store import RawStore
-from fplopt.seasons import season_start_year
+from fplopt.seasons import football_data_code, season_start_year
 
 log = logging.getLogger(__name__)
 
@@ -231,9 +243,68 @@ def prematch_available_at(kickoff: pd.Series) -> pd.Series:
     return collected.where(collected <= cap, cap)
 
 
-def football_data_snapshots(odds: pd.DataFrame, fixture: pd.DataFrame) -> pd.DataFrame:
+# A price's identity across a season's raw files (the date is left out: within a season the
+# teams already pin the match down).
+PRICE_KEY = [
+    "season",
+    "home_team_key",
+    "away_team_key",
+    "bookmaker",
+    "market",
+    "outcome",
+    "line",
+    "is_closing",
+    "price",
+]
+MARKET_KEY = [c for c in PRICE_KEY if c not in ("outcome", "line", "price")]
+
+
+def archived_live(first_file: pd.Timestamp, kickoffs: pd.Series) -> bool:
+    """Was the season's first raw file fetched while the season was in progress (before its
+    last kickoff)? `kickoffs` = the season's fixture kickoffs (nulls ignored)."""
+    last = kickoffs.max()
+    return bool(pd.isna(last) or first_file < last)
+
+
+def football_data_first_seen(files: list[tuple[pd.Timestamp, pd.DataFrame]]) -> pd.DataFrame:
+    """PRICE_KEY + `first_seen`: per price, the timestamp of the first of `files` ((fetched
+    at, `football_data_frame` rows) pairs) carrying it."""
+    frames = [football_data_odds(rows).assign(first_seen=at) for at, rows in files]
+    frames = [f for f in frames if len(f)]
+    if not frames:
+        return pd.DataFrame(columns=[*PRICE_KEY, "first_seen"]).astype({"first_seen": UTC_US})
+    seen = pd.concat(frames, ignore_index=True).astype({"first_seen": UTC_US})
+    return seen.groupby(PRICE_KEY, dropna=False, sort=False, as_index=False)["first_seen"].min()
+
+
+def football_data_live_first_seen(
+    ctx: BuildContext, resolver: TeamResolver, seasons: list[int], fixture: pd.DataFrame
+) -> pd.DataFrame:
+    """`football_data_first_seen` over every raw file of each of `seasons` archived live (see
+    `archived_live`); empty when none is."""
+    out = []
+    for season in seasons:
+        code = football_data_code(season)
+        entries = ctx.store.entries("football-data", f"E0/{code}", suffix=".csv.gz")
+        kickoffs = fixture.loc[fixture["season"] == season, "kickoff_time"]
+        if not entries or not archived_live(_ts(entries[0][0]), kickoffs):
+            continue
+        files = [
+            (_ts(at), football_data_frame(path, season, resolver, ALLOWLIST_COLUMNS))
+            for at, path in entries
+        ]
+        out.append(football_data_first_seen(files))
+        log.info("football-data %s archived live: first seen over %d file(s)", code, len(files))
+    return pd.concat(out, ignore_index=True) if out else football_data_first_seen([])
+
+
+def football_data_snapshots(
+    odds: pd.DataFrame, fixture: pd.DataFrame, first_seen: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Place football-data odds rows on fixtures (by season, home, away; the date must equal
-    `fixture.fd_date`) and set the timing columns."""
+    `fixture.fd_date`) and set the timing columns. Rows of the seasons in `first_seen`
+    (`football_data_first_seen`: archived live) are available from max(assumed time, first
+    seen)."""
     keys = ["season", "home_team_key", "away_team_key"]
     fixtures = fixture[[*keys, "fixture_key", "kickoff_time", "event_time", "fd_date"]].rename(
         columns={"fd_date": "fixture_fd_date"}
@@ -258,6 +329,8 @@ def football_data_snapshots(odds: pd.DataFrame, fixture: pd.DataFrame) -> pd.Dat
         raise OddsValidationError("football-data odds: " + "\n".join(problems))
     closing = df["is_closing"].astype(bool)
     available = prematch_available_at(df["kickoff_time"]).where(~closing, df["kickoff_time"])
+    if first_seen is not None and len(first_seen):
+        available = _not_before_first_seen(df, available, first_seen)
     return df.assign(
         fixture_key=df["fixture_key"].astype("int64"),
         source="football-data",
@@ -265,6 +338,41 @@ def football_data_snapshots(odds: pd.DataFrame, fixture: pd.DataFrame) -> pd.Dat
         snapshot_at=available,
         available_at=available,
     )[COLUMNS]
+
+
+def _not_before_first_seen(
+    df: pd.DataFrame, available: pd.Series, first_seen: pd.DataFrame
+) -> pd.Series:
+    """max(available, first seen) for the rows of the seasons in `first_seen`; each of them
+    must have been seen (the newest file is among the files). A market's prices (MARKET_KEY)
+    share the time the whole set was first held, so a revised price never splits it."""
+    live = df["season"].isin(first_seen["season"].unique())
+    seen = (
+        df[PRICE_KEY]
+        .merge(
+            first_seen.astype({c: df[c].dtype for c in PRICE_KEY}),
+            on=PRICE_KEY,
+            how="left",
+            validate="many_to_one",
+        )["first_seen"]
+        .set_axis(df.index)
+    )
+    missing = live & seen.isna()
+    if missing.any():
+        raise OddsValidationError(
+            f"{missing.sum()} live-season football-data price(s) in no archived file:\n"
+            + df.loc[missing, PRICE_KEY].head(10).to_string()
+        )
+    seen = seen.groupby([df[c] for c in MARKET_KEY], dropna=False).transform("max")
+    later = live & (seen > available)
+    if later.any():
+        log.info(
+            "football-data: %d live-season row(s) archived after the assumed time (%d after "
+            "kickoff)",
+            later.sum(),
+            (later & (seen >= df["kickoff_time"])).sum(),
+        )
+    return available.where(~later, seen).astype(UTC_US)
 
 
 # --- The Odds API ------------------------------------------------------------------------
@@ -385,8 +493,12 @@ def _consistent(df: pd.DataFrame) -> pd.Series:
     h2h, totals, ah = (df["market"] == m for m in ("h2h", "totals", "ah"))
     quarter = (line * 4).round() == line * 4
     line_ok = (h2h & line.isna()) | (totals & (line == TOTALS_LINE)) | (ah & quarter)
-    timing = (df["is_closing"] & (df["available_at"] == df["event_time"])) | (
-        ~df["is_closing"] & (df["available_at"] < df["event_time"])
+    fd = df["source"] == "football-data"
+    available = df["available_at"]
+    timing = (
+        (df["is_closing"] & (available >= df["event_time"]))
+        | (~df["is_closing"] & ~fd & (available < df["event_time"]))
+        | (~df["is_closing"] & fd & (available >= prematch_available_at(df["event_time"])))
     )
     return (
         valid
@@ -427,7 +539,9 @@ def build_odds_snapshot(ctx: BuildContext) -> pd.DataFrame:
     resolver = TeamResolver(ctx.table("team_dim"))
     fixture = ctx.table("fixture")
     fd = football_data_frames(ctx, resolver, ALLOWLIST_COLUMNS)
-    frames = [football_data_snapshots(football_data_odds(fd), fixture)]
+    seasons = sorted(int(s) for s in fd["season"].unique()) if len(fd) else []
+    first_seen = football_data_live_first_seen(ctx, resolver, seasons, fixture)
+    frames = [football_data_snapshots(football_data_odds(fd), fixture, first_seen)]
     skipped: Counter[str] = Counter()
     for taken_at, path in ctx.store.entries("odds", "soccer_epl"):
         rows, skips = odds_api_rows(RawStore.read_json(path), _ts(taken_at), fixture, resolver)
