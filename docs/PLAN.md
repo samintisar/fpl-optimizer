@@ -324,6 +324,14 @@ Blending rule everywhere: equal weights or a single fixed weight — never weigh
   - **Runtime:** fit 1–21 s per cutoff (about 30 s with predict at live 2026/27 cutoffs; the flag fit dominates), predict 0.5–1.5 s. `models eval` over develop with all four models: about 4 min at `--jobs 14`.
   - **Checks:** `fplopt check leakage` passes with `model:v1` (22.6 min; was ~9), and `pytest -m realdata` passes (19.8 min).
   - **Not tuned yet:** the component priors (cards, keeper, bonus seasons).
+- **Review fixes before the validate run** (2026-10-08, `/code-review` of the 5a branch):
+  - **Flag mapping:** the flag mapping is now fit on out-of-fold P(start): the start model refit on the other season parity, `minutes.out_of_fold_start`. It used to be fit on the minutes model's in-sample predictions on its own training rows, which are sharper than its predictions at a new deadline. Real-data slope at 2021/22–2022/23 cutoffs: 0.77–0.78; injured players' offset about −5.
+  - **Faster fit:** the flag fit now uses Newton's method with the exact Hessian (0.2 s, was 3.2 s over 371 L-BFGS steps). News is parsed once per fit, and the history frame is built once per v1 fit. `fit_availability` at a 2022/23 cutoff: 6 s, was 10 s, including the new out-of-fold fits.
+  - **Calibration tied to settings:** the table records the `V1Params` it was fitted with (`CALIBRATION_PARAMS`, `assemble.calibration_fingerprint`); v1 refuses it with other settings, and a test checks that it matches the defaults. Regenerated after the fixes (`dev/calibrate_v1.py walk` + `fit --write`). Again only P(start) at horizons ≥ 1 helps (MSE h1–5 4.687 → 4.684).
+  - **No silent zeros:** a horizon fixture missing a team λ, or a pool player whose club plays but who has no per-fixture rows, now raises instead of passing silently as 0 xP.
+  - **Candidate test:** `models eval` pairwise candidate tests use the pair's own top-N union (`own_candidate`), so they no longer depend on which other models are in the run.
+  - **Variant counts:** the Phase 5 tuning grids are logged in `results/experiments.csv` with their variant counts (team 120, minutes 42, shares 38, v1 calibration 8).
+  - **Develop after the fixes:** v1 MSE h0 4.31 vs rolling 5.33 (2016/17–2022/23) and vs ep_next 5.33 (v1 3.99 on 2021/22–2022/23); XI regret 5.46 vs 6.41; captain regret 4.77 vs 5.50. These are the same as before the fixes to two decimals.
 
 ### 6.1 Team model — market primary
 **Market-implied λ (primary for GWs with odds, typically GW+1, sometimes +2):**

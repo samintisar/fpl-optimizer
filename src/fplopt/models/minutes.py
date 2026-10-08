@@ -148,13 +148,20 @@ def _part(rows: pd.DataFrame, label: str, params: GbmParams) -> Gbm | Constant:
     return train(rows, LAG_FEATURES, label, weight="weight", params=params)
 
 
-def fit_minutes(view: AsOfView, params: MinutesParams | None = None) -> MinutesFit:
-    """Fit the hurdle model on every row visible in `view` (see the module docstring)."""
+def _weighted(rows: pd.DataFrame, season: int, params: MinutesParams) -> pd.DataFrame:
+    """`rows` (a training frame) plus `weight` = season_decay ** (season − row season)."""
+    age = (season - rows["season"]).clip(lower=0).astype("float64")
+    return rows.assign(weight=np.power(params.season_decay, age))
+
+
+def fit_minutes(
+    view: AsOfView, params: MinutesParams | None = None, rows: pd.DataFrame | None = None
+) -> MinutesFit:
+    """Fit the hurdle model on every row visible in `view` (see the module docstring).
+    `rows`: `training_frame(view)` if the caller already built it (not modified)."""
     params = MinutesParams() if params is None else params
     season, _ = view.gameweek_for_deadline()
-    rows = training_frame(view)
-    age = (season - rows["season"]).clip(lower=0).astype("float64")
-    rows["weight"] = np.power(params.season_decay, age)
+    rows = _weighted(training_frame(view) if rows is None else rows, season, params)
     banned = rows[rows["banned"] != 0]
     rows = rows[rows["banned"] == 0].reset_index(drop=True)
     ban_start = ban_sub = 0.0
@@ -182,6 +189,23 @@ def fit_minutes(view: AsOfView, params: MinutesParams | None = None) -> MinutesF
         ban_start=ban_start,
         ban_sub=ban_sub,
     )
+
+
+def out_of_fold_start(rows: pd.DataFrame, season: int, params: MinutesParams) -> np.ndarray:
+    """Per row of `rows` (a training frame) an out-of-fold P(start): the start part fitted
+    (as in `fit_minutes`, non-banned rows, season-decay weights relative to `season`) on the
+    rows of the other season parity. Used where a fit needs P(start) on training rows that
+    behaves like a prediction (the availability layer): in-sample GBM predictions are
+    sharper than out-of-sample ones."""
+    rows = _weighted(rows, season, params)
+    odd = (rows["season"].to_numpy() % 2).astype(bool)
+    out = np.empty(len(rows), dtype="float64")
+    for fold in (False, True):
+        train_rows = rows[(odd != fold) & (rows["banned"].to_numpy() == 0)]
+        part = _part(train_rows.reset_index(drop=True), "start", params.start)
+        target = odd == fold
+        out[target] = part.predict(rows[target])
+    return out
 
 
 # --- post-processing ---------------------------------------------------------------------

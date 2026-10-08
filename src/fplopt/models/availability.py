@@ -28,13 +28,14 @@ deadline d of the visible seasons with a player snapshot before d, before the vi
 deadline. The flags are those of the newest snapshot before d (`view.earlier(d)`, exactly
 what a prediction at d sees). Outcomes are the visible training rows (`training_frame`) of
 the player's club fixtures in GWs gw_index(d) … + 5, minus deterministic bans and players
-with a parsed return date. The base p_start is the minutes fit's P(start) on his GW-d
-training row (lags as of d), horizon-decayed as `predict_minutes` does (normalization not
-applied). The base is in-sample for the minutes fit (it was fitted on those rows), which
-makes it a little sharper than a true out-of-sample prediction; the shared slope absorbs
-part of that. Weighted log loss with a Gaussian prior on the offsets (sd `OFFSET_SD`),
-minimized from slope 1 and offsets 0 (L-BFGS-B, deterministic). Fewer than `MIN_ROWS`
-rows: the identity mapping (return dates still apply). PLAN §4 fixes the fit seasons as
+with a parsed return date. The base p_start is an out-of-fold P(start) on his GW-d training
+row (lags as of d; `minutes.out_of_fold_start`: the start part refitted on the other
+season parity, since the minutes fit's own predictions on its training rows are sharper
+than its predictions at a new deadline and would bias the mapping), horizon-decayed as
+`predict_minutes` does (normalization not applied). Weighted log loss with a Gaussian prior
+on the offsets (sd `OFFSET_SD`), minimized from slope 1 and offsets 0 (Newton,
+`trust-exact` with the exact Hessian; deterministic). Fewer than `MIN_ROWS` rows: the
+identity mapping (return dates still apply). PLAN §4 fixes the fit seasons as
 2021/22–2022/23 with a check on 2023/24–2024/25; walk-forward refits use every snapshot
 season visible at the cutoff instead, which is the same rule applied at each cutoff (no
 validate-season row is ever used for a validate-season prediction it precedes).
@@ -56,6 +57,7 @@ from fplopt.models.minutes import (
     MinutesFit,
     conditionals,
     finish_minutes,
+    out_of_fold_start,
 )
 
 __all__ = (
@@ -133,9 +135,9 @@ def expected_back(news: pd.Series, reference: pd.Series) -> pd.Series:
     return out
 
 
-def _flags(view: AsOfView) -> pd.DataFrame:
-    """Per player of the newest player snapshot of the view's season before its deadline:
-    category and parsed return date (empty without a snapshot)."""
+def _snapshot_flags(view: AsOfView) -> pd.DataFrame:
+    """The newest player snapshot of the view's season before its deadline, one row per
+    player: player_key, category, news and its reference time (empty without one)."""
     season, _ = view.gameweek_for_deadline()
     snaps = view.latest("player_snapshot", by=["player_key"], columns=list(FLAG_COLUMNS))
     snaps = snaps[snaps["season"] == season]
@@ -147,9 +149,23 @@ def _flags(view: AsOfView) -> pd.DataFrame:
             "category": flag_category(
                 snaps["status"], snaps["chance_of_playing_next_round"]
             ).to_numpy(),
-            "back": expected_back(snaps["news"], reference).array,
+            "news": snaps["news"].to_numpy(),
+            "reference": reference.to_numpy(),
         }
     )
+
+
+def _with_return_dates(flags: pd.DataFrame) -> pd.DataFrame:
+    """`_snapshot_flags` rows with the parsed return date `back` instead of news/reference
+    (one parse for any number of concatenated snapshots)."""
+    back = expected_back(flags["news"], flags["reference"])
+    return flags.drop(columns=["news", "reference"]).assign(back=back.array)
+
+
+def _flags(view: AsOfView) -> pd.DataFrame:
+    """Per player of the newest player snapshot of the view's season before its deadline:
+    category and parsed return date (empty without a snapshot)."""
+    return _with_return_dates(_snapshot_flags(view))
 
 
 def _identity(minutes_fit: MinutesFit, n_rows: int = 0) -> AvailabilityFit:
@@ -159,7 +175,9 @@ def _identity(minutes_fit: MinutesFit, n_rows: int = 0) -> AvailabilityFit:
     )
 
 
-def _fit_rows(view: AsOfView, minutes_fit: MinutesFit) -> pd.DataFrame:
+def _fit_rows(
+    view: AsOfView, minutes_fit: MinutesFit, rows: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Rows (base p, category, bucket, outcome start) for the fit, sorted by key."""
     gameweeks = view.table("gameweek", columns=["season", "gw", "gw_index", "deadline_time"])
     gameweeks = gameweeks[gameweeks["deadline_time"] < view.deadline]
@@ -169,17 +187,18 @@ def _fit_rows(view: AsOfView, minutes_fit: MinutesFit) -> pd.DataFrame:
     gameweeks = gameweeks[gameweeks["deadline_time"] > snapshot_times.min()]
     flags = []
     for row in gameweeks.sort_values("deadline_time", kind="mergesort").itertuples(index=False):
-        found = _flags(view.earlier(row.deadline_time))
+        found = _snapshot_flags(view.earlier(row.deadline_time))
         if len(found):
             flags.append(found.assign(season=row.season, base_index=row.gw_index))
     if not flags:
         return pd.DataFrame()
-    flags = pd.concat(flags, ignore_index=True)
+    flags = _with_return_dates(pd.concat(flags, ignore_index=True))
     flags = flags[(flags["category"] != "") & flags["back"].isna()]
 
-    rows = training_frame(view)
+    rows = training_frame(view) if rows is None else rows
     params = minutes_fit.params
-    p_model = minutes_fit.start.predict(rows)
+    season, _ = view.gameweek_for_deadline()
+    p_model = out_of_fold_start(rows, season, params)
     n_long = rows["n_long"].to_numpy(dtype="float64")
     starts_long = np.nan_to_num(rows["start_rate_long"].to_numpy(dtype="float64")) * n_long
     long_run = (starts_long + params.long_run_prior * p_model) / (n_long + params.long_run_prior)
@@ -203,9 +222,12 @@ def _fit_rows(view: AsOfView, minutes_fit: MinutesFit) -> pd.DataFrame:
     return out.sort_values(sort_by, kind="mergesort").reset_index(drop=True)
 
 
-def fit_availability(view: AsOfView, minutes_fit: MinutesFit) -> AvailabilityFit:
-    """Fit the flag mapping walk-forward on the view (see the module docstring)."""
-    rows = _fit_rows(view, minutes_fit)
+def fit_availability(
+    view: AsOfView, minutes_fit: MinutesFit, rows: pd.DataFrame | None = None
+) -> AvailabilityFit:
+    """Fit the flag mapping walk-forward on the view (see the module docstring). `rows`:
+    `training_frame(view)` if the caller already built it (not modified)."""
+    rows = _fit_rows(view, minutes_fit, rows)
     if len(rows) < MIN_ROWS:
         return _identity(minutes_fit, len(rows))
     cells = pd.MultiIndex.from_product([CATEGORIES, range(HORIZON_BUCKETS)])
@@ -213,6 +235,8 @@ def fit_availability(view: AsOfView, minutes_fit: MinutesFit) -> AvailabilityFit
     z = logit(np.clip(rows["base"].to_numpy(dtype="float64"), EPS, 1 - EPS))
     y = rows["start"].to_numpy(dtype="float64")
     n_cells = len(cells)
+
+    n = len(y)  # the objective is per row, so the tolerance does not depend on the sample
 
     def loss(theta: np.ndarray) -> tuple[float, np.ndarray]:
         slope, offsets = theta[0], theta[1:]
@@ -224,10 +248,25 @@ def fit_availability(view: AsOfView, minutes_fit: MinutesFit) -> AvailabilityFit
         residual = p - y
         grad_offsets = np.bincount(cell, weights=residual, minlength=n_cells)
         grad_offsets += offsets / OFFSET_SD**2
-        return value, np.concatenate([[float(np.sum(residual * z))], grad_offsets])
+        grad = np.concatenate([[float(np.sum(residual * z))], grad_offsets])
+        return value / n, grad / n
+
+    def hessian(theta: np.ndarray) -> np.ndarray:
+        p = expit(theta[0] * z + theta[1:][cell])
+        w = p * (1.0 - p)
+        out = np.zeros((n_cells + 1, n_cells + 1))
+        out[0, 0] = float(np.sum(w * z * z))
+        cross = np.bincount(cell, weights=w * z, minlength=n_cells)
+        out[0, 1:] = cross
+        out[1:, 0] = cross
+        diagonal = np.bincount(cell, weights=w, minlength=n_cells) + 1.0 / OFFSET_SD**2
+        out[np.arange(1, n_cells + 1), np.arange(1, n_cells + 1)] = diagonal
+        return out / n
 
     start = np.concatenate([[1.0], np.zeros(n_cells)])
-    result = minimize(loss, start, jac=True, method="L-BFGS-B", options={"maxiter": 500})
+    result = minimize(
+        loss, start, jac=True, hess=hessian, method="trust-exact", options={"gtol": 1e-9}
+    )
     theta = result.x
     used = np.bincount(cell, minlength=n_cells) > 0
     offsets = tuple(

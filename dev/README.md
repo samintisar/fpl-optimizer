@@ -311,6 +311,14 @@ for everyone):
 
 ## `calibrate_v1.py`: v1 calibration and the ban residual
 
+> **Re-run after the review (2026-10-08):** the flag mapping now uses out-of-fold P(start).
+> `walk --seasons 2016-2024 --jobs 9 --ban-residual --out results/p5-review-walk` (3.2 min),
+> then `fit --walk results/p5-review-walk --first-fit 2017 --parts p_start:1+ --write`.
+> Develop means: none MSE h0 4.2608 / h1–5 4.6867; chosen (p_start:1+) 4.2608 / 4.6845. The
+> other parts are still worse. The walk writes `params.txt` (the `V1Params` fingerprint),
+> which `fit --write` stores as `CALIBRATION_PARAMS`. The numbers below are from the first
+> run.
+
 Phase 5 plan, Task 5 (PLAN §5 *Calibration*; `fplopt.models.assemble`, `.calibration`). Reads
 the built `data/` tables read-only into an in-memory store (`--data-dir`):
 

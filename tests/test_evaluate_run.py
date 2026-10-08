@@ -131,6 +131,34 @@ def test_dm_rows_on_the_common_sample(result):
     assert ("xi_regret", "validate", "0") in dm and ("captain_regret", "develop", "0") in dm
 
 
+def test_pairwise_candidates_do_not_depend_on_the_run(result):
+    """The pairwise candidate test uses the pair's own top-N union, not the run's union
+    (`candidate`), so adding or dropping other models cannot change it."""
+    predictions = result.predictions.copy()
+    rng = np.random.default_rng(0)
+    predictions["own_candidate"] = rng.random(len(predictions)) < 0.5
+    models = ["rolling", "ep_next"]
+    base = run.compute_metrics(predictions, result.regrets, models)
+    other_run = run.compute_metrics(predictions.assign(candidate=False), result.regrets, models)
+
+    def candidate_rows(metrics):
+        return [r for r in metrics["dm"] if r["metric"] == "mse_candidates"]
+
+    assert candidate_rows(base) == candidate_rows(other_run) != []
+    h0 = predictions[predictions["horizon"] == 0]
+    a = h0[h0["model"] == "rolling"].set_index(["deadline", "player_key"])
+    b = h0[h0["model"] == "ep_next"].set_index(["deadline", "player_key"]).reindex(a.index)
+    pair = a["own_candidate"] | b["own_candidate"]
+    expected = diebold_mariano(
+        ((a["xp"] - a["points"]) ** 2)[pair],
+        ((b["xp"] - a["points"]) ** 2)[pair],
+        a.index.get_level_values("deadline")[pair.to_numpy()],
+    )
+    row = next(r for r in candidate_rows(base) if r["split"] == "all" and r["horizon"] == "0")
+    assert row["n"] == int(pair.sum())
+    assert row["mean_diff"] == pytest.approx(expected.mean_diff)
+
+
 def test_regrets_use_the_same_squads_for_every_model(store, result):
     regrets = result.regrets
     assert list(regrets.columns) == [name for name, _ in REGRET_COLUMNS]

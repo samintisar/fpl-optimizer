@@ -39,7 +39,9 @@ from fplopt.models.minutes import MinutesParams
 
 RULES = backtest_rules(2023)  # 2026-27 rules without defcon: GK goal 10, DEF 6, MID 5, FWD 4
 SMALL = GbmParams(num_boost_round=20, min_data_in_leaf=20)
-FAST = V1Params(minutes=MinutesParams(start=SMALL, sixty=SMALL, sub=SMALL))
+# Small GBMs; uncalibrated, since the stored calibration table is only valid for V1Params()
+# (`calibration_fingerprint`). test_calibration_switch_and_season_table covers calibration.
+FAST = V1Params(minutes=MinutesParams(start=SMALL, sixty=SMALL, sub=SMALL), calibrate=False)
 
 
 def poisson(n: int, rate: float) -> float:
@@ -413,12 +415,35 @@ def test_caches_memoize_v1_fits_by_cutoff(league, monkeypatch):
 
 def test_calibration_switch_and_season_table(league, monkeypatch):
     view = view_at(league, 4)
-    fit = fit_v1(view, FAST)
+    fast = dataclasses.replace(FAST, calibrate=True)
+    fit = fit_v1(view, fast)
     plain = predict_fixtures(view, fit, calibration=None)
     cal = Calibration((2022,), xp=((1, 0.0, 2.0), (2, 0.0, 2.0), (3, 0.0, 2.0), (4, 0.0, 2.0)))
     doubled = predict_fixtures(view, fit, calibration=cal)
     np.testing.assert_allclose(doubled["xp"], 2 * plain["xp"])
     monkeypatch.setattr(assemble, "calibration_for", lambda season: cal)
+    # The season table is refused for settings it was not fitted with...
+    with pytest.raises(ValueError, match="fitted for other V1Params"):
+        predict_fixtures(view, fit)
+    # ... and used for the ones it was.
+    monkeypatch.setattr(assemble, "CALIBRATION_PARAMS", assemble.calibration_fingerprint(fast))
     np.testing.assert_allclose(predict_fixtures(view, fit)["xp"], doubled["xp"])
     off = dataclasses.replace(fit, params=dataclasses.replace(fit.params, calibrate=False))
     np.testing.assert_allclose(predict_fixtures(view, off)["xp"], plain["xp"])
+
+
+def test_the_calibration_table_matches_the_default_settings():
+    """MODELS['v1'] runs with V1Params(); the stored table must have been fitted with them
+    (regenerate it with dev/calibrate_v1.py after changing a default)."""
+    from fplopt.models.calibration_table import CALIBRATION_PARAMS
+
+    assert CALIBRATION_PARAMS == assemble.calibration_fingerprint(V1Params())
+
+
+def test_a_player_dropped_upstream_is_not_a_blank(league):
+    view = view_at(league, 4)
+    fixtures = predict_fixtures(view, fit_v1(view, FAST))
+    gw_frame(view, fixtures)  # complete: fine
+    dropped = fixtures[fixtures["player_key"] != fixtures["player_key"].iloc[0]]
+    with pytest.raises(ValueError, match="have no per-fixture rows"):
+        gw_frame(view, dropped)

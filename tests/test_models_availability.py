@@ -38,7 +38,8 @@ def view(tables, season=2023, gw=5):
 
 @pytest.fixture(scope="module")
 def league():
-    return synthetic_tables(seasons=(2022, 2023), n_clubs=10, seed=2)
+    # Three seasons: the out-of-fold bases of the flag fit need a season of each parity.
+    return synthetic_tables(seasons=(2021, 2022, 2023), n_clubs=10, seed=2)
 
 
 @pytest.fixture(scope="module")
@@ -90,7 +91,9 @@ def test_the_fit_learns_that_injured_players_do_not_start(fits):
     assert fit.n_rows > 1000
     assert offsets[("i", 0)] < -2
     assert offsets[("i", 0)] < offsets[("d50", 0)] < offsets[("a", 0)] + 1
-    assert 0.2 < fit.slope < 3
+    # Out-of-fold bases on the small synthetic league are flat, so the slope sharpens them
+    # (real data, 2021/22-2022/23 cutoffs: 0.77-0.78).
+    assert 0.2 < fit.slope < 5
 
 
 def test_the_fit_is_deterministic_and_uses_only_visible_flags(league, fits):
@@ -144,7 +147,9 @@ def test_flags_move_p_start_and_teams_stay_normalized(league, fits):
         assert adjusted[column].between(0, 1).all()
     assert (adjusted["e_minutes"] <= 90 * adjusted["p_play"] + 1e-9).all()
     sums = adjusted.groupby(["fixture_key", "team_key"])["p_start"].sum()
-    assert (sums <= 11 + 1e-6).all() and (sums > 10).all()
+    # The team shift is bounded (|δ| ≤ max_shift), so a club can stay a little off 11.
+    assert (sums <= 11.5).all() and (sums > 10).all()
+    assert (sums - 11).abs().median() < 1e-6
 
 
 def test_a_return_date_zeroes_the_fixtures_before_it(league, fits):

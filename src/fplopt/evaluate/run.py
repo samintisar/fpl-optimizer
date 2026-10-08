@@ -15,7 +15,10 @@ season. At each deadline:
 3. Candidates (`candidate`): the union over the models run at the deadline of each model's
    top-N per position by horizon-summed xP (N = the optimizer's pruning defaults,
    `DEFAULT_PRUNE_N`: 20/60/60/30 for GK/DEF/MID/FWD), so every model is scored on the same
-   candidate rows at a deadline.
+   candidate rows at a deadline. That set depends on which models are in the run (the
+   per-model `mse_candidates`), so each row also carries `own_candidate` (in the model's
+   own top-N), and a pairwise test uses the pair's union (`own_candidate` of either model):
+   the same rows whatever else is run.
 4. Decisions (`regrets`): squads = the template squad and `n_random` seeded random squads
    (`start_states`; a refused one is skipped), the same for every model. Each model picks
    its XI and captain with `best_lineup` on its horizon-0 xP; regret per `lineup_regret`.
@@ -31,8 +34,9 @@ is left out) and horizon ("0".."5", and "1-5" pooled):
 - `regret`: mean XI and captain regret (horizon 0);
 - `dm`: every pair of models on their common sample (deadlines where both ran): one-sided
   Diebold-Mariano tests (`metrics.diebold_mariano`, clustered by deadline, lag = the
-  horizon, pooled "1-5" with lag 5) on squared error (`mse`), squared error on candidates
-  (`mse_candidates`) and on regrets (`xi_regret`, `captain_regret`);
+  horizon, pooled "1-5" with lag 5) on squared error (`mse`), squared error on the pair's
+  candidates (`mse_candidates`: either model's own top-N) and on regrets (`xi_regret`,
+  `captain_regret`);
 - `components`: for models whose xP frames carry component columns (`metrics.COMPONENTS`,
   the hook for models with components): their metrics per split and horizon.
 
@@ -117,6 +121,7 @@ PREDICTION_COLUMNS = (
     ("target_gw_index", "int64"),
     ("xp", "float64"),
     ("candidate", "bool"),
+    ("own_candidate", "bool"),
     *((name, "float64") for name in REALIZED),
 )
 REGRET_COLUMNS = (
@@ -309,6 +314,9 @@ def _season_unit(
                 gw_index=gw_index,
                 element_type=frame["player_key"].map(positions).to_numpy(dtype="int64"),
                 candidate=frame["player_key"].isin(candidates).to_numpy(dtype=bool),
+                own_candidate=frame["player_key"]
+                .isin(candidate_keys({model: frame}, pool))
+                .to_numpy(dtype=bool),
             )
             rows = realized.join(rows.reset_index(drop=True))
             base = [name for name, _ in PREDICTION_COLUMNS]
@@ -526,10 +534,12 @@ def compute_metrics(
     for i, a in enumerate(models):
         for b in models[i + 1 :]:
             side_a = scored.loc[
-                scored["model"] == a, [*keys, "season", "candidate", "xp", "points"]
+                scored["model"] == a, [*keys, "season", "own_candidate", "xp", "points"]
             ]
-            side_b = scored.loc[scored["model"] == b, [*keys, "xp"]]
+            side_b = scored.loc[scored["model"] == b, [*keys, "own_candidate", "xp"]]
             merged = side_a.merge(side_b, on=keys, how="inner", suffixes=("_a", "_b"))
+            # The pair's candidates: independent of the other models in the run.
+            merged["candidate"] = merged["own_candidate_a"] | merged["own_candidate_b"]
             merged["loss_a"] = (merged["xp_a"] - merged["points"]) ** 2
             merged["loss_b"] = (merged["xp_b"] - merged["points"]) ** 2
             for split, part in _split_parts(merged):

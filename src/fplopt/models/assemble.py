@@ -68,17 +68,19 @@ rules config (`backtest_rules` reads `config/scoring`, never `data/`).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
 
 from fplopt.backtest.rules import Rules, backtest_rules
 from fplopt.features.baseline import HORIZON, player_pool, upcoming_fixtures
+from fplopt.features.history import training_frame
 from fplopt.features.store import AsOfView
 from fplopt.models.availability import AvailabilityFit, adjust_minutes, fit_availability
 from fplopt.models.baseline import XP_DTYPES
 from fplopt.models.calibration import Calibration, apply_isotonic, calibration_for
+from fplopt.models.calibration_table import CALIBRATION_PARAMS
 from fplopt.models.components import (
     BONUS_COLUMNS,
     DEFCON,
@@ -100,6 +102,7 @@ __all__ = (
     "V1Fit",
     "V1Params",
     "calibrate_inputs",
+    "calibration_fingerprint",
     "calibrate_xp",
     "fit_v1",
     "fixture_components",
@@ -195,12 +198,20 @@ class V1Fit:
     components: ComponentsFit
 
 
+def calibration_fingerprint(params: V1Params) -> str:
+    """The settings a calibration table is valid for: every `V1Params` field except
+    `calibrate` (its repr; frozen dataclasses of numbers and strings). `calibration_table.
+    CALIBRATION_PARAMS` holds the fingerprint of the walk it was fitted on."""
+    return repr(replace(params, calibrate=True))
+
+
 def fit_v1(view: AsOfView, params: V1Params | None = None) -> V1Fit:
     """Every component fit on the rows visible in `view` (the refit cutoff's view)."""
     params = V1Params() if params is None else params
     team = fit_team(view, params.team)
-    minutes = fit_minutes(view, params.minutes)
-    availability = fit_availability(view, minutes)
+    history = training_frame(view)  # shared by the minutes and availability fits
+    minutes = fit_minutes(view, params.minutes, history)
+    availability = fit_availability(view, minutes, history)
     shares = fit_shares(view, params.shares)
     components = fit_components(view, params.components)
     return V1Fit(view.deadline, params, team, minutes, availability, shares, components)
@@ -256,8 +267,13 @@ def fixture_components(view: AsOfView, fit: V1Fit) -> pd.DataFrame:
         validate="one_to_one",
     )
     frame = frame.merge(components, on=keys, how="left", validate="one_to_one")
-    for column in ("lambda_for", "lambda_against", "p_cs"):
-        frame[column] = frame[column].fillna(0.0)
+    missing = frame["lambda_for"].isna()
+    if missing.any():
+        fixtures = sorted(frame.loc[missing, "fixture_key"].astype(int).unique())
+        raise ValueError(
+            f"v1 at {view.deadline}: no team λ for {len(fixtures)} horizon fixture(s) "
+            f"{fixtures[:10]} (team_lambdas and the minutes frame disagree)"
+        )
     dtypes = {name: "int64" for name in (*KEYS, "element_type", "opponent_team_key")}
     dtypes |= {name: "float64" for name in FIXTURE_COLUMNS if name not in dtypes}
     out = frame[list(FIXTURE_COLUMNS)].astype(dtypes)
@@ -418,10 +434,19 @@ def predict_fixtures(
 ) -> pd.DataFrame:
     """Per player-fixture components and points at the view's deadline: calibrated with
     the season's table entry (`calibration="season"`, unless `fit.params.calibrate` is
-    False), with the given `Calibration`, or not at all (None)."""
+    False), with the given `Calibration`, or not at all (None). The table's maps were
+    fitted on predictions made with particular settings: with other `V1Params` they would
+    be applied to a different distribution, so that raises (regenerate the table with
+    `dev/calibrate_v1.py`, or pass calibrate=False)."""
     season, _ = view.gameweek_for_deadline()
     if isinstance(calibration, str):
         calibration = calibration_for(season) if fit.params.calibrate else None
+        if calibration is not None and calibration_fingerprint(fit.params) != CALIBRATION_PARAMS:
+            raise ValueError(
+                "the v1 calibration table was fitted for other V1Params "
+                "(calibration_table.CALIBRATION_PARAMS); regenerate it with "
+                "`dev/calibrate_v1.py walk` + `fit --write`, or use calibrate=False"
+            )
     frame = calibrate_inputs(fixture_components(view, fit), calibration)
     frame = fixture_points(frame, backtest_rules(season))
     return calibrate_xp(frame, calibration)
@@ -453,6 +478,16 @@ def gw_frame(view: AsOfView, fixtures: pd.DataFrame) -> pd.DataFrame:
     for column in GW_PROBABILITIES:
         per_gw[column] = np.where(double, np.nan, per_gw[column].to_numpy(dtype="float64"))
     out = grid.merge(per_gw, on=keys, how="left", validate="one_to_one")
+    # A blank is a GW without a fixture of his club; a pool player whose club plays but who
+    # has no fixture rows was dropped upstream, and must not pass as a 0-xP blank.
+    club_gws = upcoming.loc[upcoming["n_fixtures"] > 0, ["team_key", "gw"]].drop_duplicates()
+    playing = pool.merge(club_gws, on="team_key")
+    dropped = playing.merge(out.loc[out["n"].isna(), ["player_key", "gw"]], on=["player_key", "gw"])
+    if len(dropped):
+        raise ValueError(
+            f"v1 at {view.deadline}: {len(dropped)} pool player-GW(s) with a fixture have no "
+            f"per-fixture rows, e.g. players {sorted(dropped['player_key'].unique())[:10]}"
+        )
     blank = out["n"].isna().to_numpy()
     for column in ("xp", *GW_COMPONENTS):
         values = out[column].to_numpy(dtype="float64")
