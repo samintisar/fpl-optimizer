@@ -466,6 +466,25 @@ max Σ_t decay^t · [ Σ xP·lineup + xP·captain + Σ_k bench_xP_k + chip terms
 - **FT value is concave:** marginal value of the n-th banked FT, starting at {2: 2.0, 3: 1.6, 4: 1.3, 5: 1.1} (open-fpl-solver defaults), tuned.
 - **Money in the bank:** `itb_value` pts per £1m per GW. Default 0 (open-fpl-solver: 0.08): with 0.08 the planner hoarded cash (Phase 4 results below).
 - **Bench:** bench_xP_k = xP × P(bench slot k is needed), from the minutes model's P(starter doesn't play) and autosub order. Fallback fixed weights 0.21 / 0.06 / 0.002, GK 0.03.
+- **Bench and pruning from the minutes model** (Phase 5b Task 8, 2026-10-08; `fplopt.optimize.minutes`; used when the xP frame carries `p_play`, i.e. `v1`. The baseline models keep the fixed weights byte-identically):
+  - **Per-GW bench weights** from the incumbent squad's projected XI by that GW's xP:
+    - GK slot: P(the starting GK doesn't play);
+    - outfield slot k: P(M ≥ 1 + S_{k−1}), with M the absent outfield starters and S the earlier projected bench outfielders who do play (FPL's skip rule), all independent.
+
+    Formation limits on autosubs are ignored. Doubles use P(plays in neither fixture).
+  - **Bench reliability on develop** (898 squad-GWs, `dev/bench_weights_eval.py`; Brier vs "the slot was needed"):
+
+    | | GK | slot 1 | slot 2 | slot 3 |
+    |---|---|---|---|---|
+    | fixed weights | 0.224 | 0.501 | 0.670 | 0.720 |
+    | minutes, no skips | 0.033 | 0.155 | 0.135 | 0.247 |
+    | **minutes, with skips (adopted)** | **0.033** | **0.155** | **0.124** | **0.130** |
+
+    The fixed weights are far too low: slots are needed 24% / 79% / 76% / 72% of the time, largely because random squads hold non-playing players. Template squads: 27 / 56 / 56 / 51%.
+  - **Expected-minutes floor:** 180 minutes over a 6-GW horizon (pro rata on shorter ones); owned players are always kept. On 24 v1 bench cases (2021/22, 2022/23, 2026/27) every floor from 0 to 180 lost 0 points and removed at most 5 of ~200 candidates, because top-N and dominance pruning already drop low-minute players.
+  - **Solve time:** unchanged by the weights. v1's continuous xP leaves ~200 candidates (vs ~131 for the baseline models), so a v1 solve takes median 6.7 s (no chips), 30 s (chip search) and 35 s (top-3 + roll), vs 1.4 / 14 / 11 s in Phase 4.
+  - **Spec keys:** `bench_from_minutes` (0/1), `min_minutes`.
+  - Fixed before any criterion-2 comparison.
 
 ### Defaults (tuned by backtest)
 | Parameter | Start value |

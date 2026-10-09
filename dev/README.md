@@ -545,3 +545,5 @@ realized rate; Brier is of the `needed` event:
   play passes his turn) is ignored. Accounting for it (`skip`) halves slot 3's Brier score.
 - Random squads (678 of 898) hold more non-playing players than template squads (220): template
   `needed` rates are 0.27 / 0.56 / 0.56 / 0.51, random 0.23 / 0.86 / 0.82 / 0.79.
+
+> **Adopted (2026-10-08):** the package's `minutes_bench_weights` now uses the skip-aware weights (`skip_aware_tail`). In the table below, the `minutes` column is the version without skips and `skip` is what is shipped.

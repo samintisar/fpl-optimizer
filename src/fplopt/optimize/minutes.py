@@ -21,12 +21,16 @@ keep the fixed `params.bench_weights` exactly). Per horizon GW t:
   (NaN: a double GW in a frame without `p_play_gw`), the GW falls back to the fixed
   weights (conservative: the fixed weights are the Phase 4 defaults);
 - **GK slot** (bench slot 0): P(the projected starting GK doesn't play);
-- **outfield slot k** (1..3): P(at least k of the 10 projected outfield starters don't
-  play), with the number of absent starters Poisson-binomial over their q_i (independent).
-  Approximations: the formation limits on autosubs are ignored (a missing defender in a
-  3-defender XI can only be replaced by a bench defender; ignoring it slightly overstates
-  the weights), and so is the skip rule (a bench player who doesn't play passes his turn
-  to the next slot; ignoring it understates the later slots' weights);
+- **outfield slot k** (1..3), with FPL's skip rule (a bench player who doesn't play passes
+  his turn to the next slot): P(M ≥ 1 + S_{k−1}), M = the number of the 10 projected
+  outfield starters who don't play (Poisson-binomial over their q_i) and S_{k−1} = the
+  number of the projected bench outfielders in slots 1..k−1 who do play (the incumbent's
+  bench by xP, best first; Poisson-binomial over 1 − q_j), all independent
+  (`skip_aware_tail`). Without skips this is P(M ≥ k); develop 2017/18–2022/23 (898 squad
+  GWs, `dev/bench_weights_eval.py`): Brier vs "the slot was needed" 0.155 / 0.124 / 0.130
+  for slots 1–3 with skips, 0.155 / 0.135 / 0.247 without. The formation limits on
+  autosubs are ignored (a missing defender in a 3-defender XI can only be replaced by a
+  bench defender), which slightly overstates the weights;
 - **Bench Boost** keeps every bench weight at 1 (`model._Model.bench_weights`).
 
 The tail P(N ≥ k) is non-increasing in k, so the slots' order still follows from the
@@ -73,6 +77,30 @@ def poisson_binomial_tail(q: Iterable[float], k_max: int) -> tuple[float, ...]:
     )
 
 
+def _xp(xp: Mapping[int, float], key: int) -> float:
+    """A player's xP from a key → xP mapping; missing or NaN counts as 0."""
+    x = float(xp.get(key, 0.0))
+    return 0.0 if x != x else x
+
+
+def skip_aware_tail(q_starters: Iterable[float], p_bench: Sequence[float]) -> tuple[float, ...]:
+    """Per bench slot k (1..len(p_bench)): P(M ≥ 1 + S_{k−1}), M = Σ Bernoulli(q_starters)
+    (starters who don't play) and S_{k−1} = Σ_{j<k} Bernoulli(p_bench[j]) (earlier bench
+    players who do play), all independent; probabilities clipped to [0, 1]."""
+    q = [float(v) for v in q_starters]
+    tail = (1.0, *poisson_binomial_tail(q, len(q) + len(p_bench) + 1))  # tail[m] = P(M ≥ m)
+    out = []
+    dist = np.ones(1)  # P(S = s) over the bench players seen so far
+    for value in p_bench:
+        reach = [tail[s + 1] if s + 1 < len(tail) else 0.0 for s in range(len(dist))]
+        out.append(float(min(max(np.dot(dist, reach), 0.0), 1.0)))
+        p = min(max(float(value), 0.0), 1.0)
+        nxt = np.append(dist * (1.0 - p), 0.0)
+        nxt[1:] += dist * p
+        dist = nxt
+    return tuple(out)
+
+
 def projected_xi(
     players: Sequence[tuple[int, int]], xp: Mapping[int, float], rules: Rules
 ) -> tuple[int, ...]:
@@ -81,11 +109,7 @@ def projected_xi(
     while their position is under `play_max` (as `backtest.policies.best_lineup`). Missing
     or NaN xP counts as 0; ties by player_key."""
 
-    def value(key: int) -> float:
-        x = float(xp.get(key, 0.0))
-        return 0.0 if x != x else x
-
-    order = sorted(players, key=lambda p: (-value(p[0]), p[0]))
+    order = sorted(players, key=lambda p: (-_xp(xp, p[0]), p[0]))
     starters: list[tuple[int, int]] = []
     counts: Counter[int] = Counter()
     for et, n in sorted(rules.play_min.items()):
@@ -155,14 +179,21 @@ def minutes_bench_weights(
         )
         xi = projected_xi(squad, target, rules)
         # No row in the frame: the player left the game (or has no fixture data): q = 1.
-        risks = {k: float(q_map.get((k, int(h)), 1.0)) for k in xi}
+        # Projected bench outfielders in slot order: by xP, best first (ties by key).
+        bench = sorted(
+            (k for k, _ in squad if k not in xi and et[k] != GOALKEEPER),
+            key=lambda k: (-_xp(target, k), k),
+        )[:n_outfield]
+        risks = {k: float(q_map.get((k, int(h)), 1.0)) for k in (*xi, *bench)}
         if any(r != r for r in risks.values()):
             out.append(tuple(float(w) for w in fallback))
             continue
         keepers = [risks[k] for k in xi if et[k] == GOALKEEPER]
         outfield = [risks[k] for k in xi if et[k] != GOALKEEPER]
         gk = poisson_binomial_tail(keepers, 1)[0]
-        out.append((gk, *poisson_binomial_tail(outfield, n_outfield)))
+        plays = [1.0 - risks[k] for k in bench]
+        plays += [0.0] * (n_outfield - len(plays))  # an empty slot never comes on
+        out.append((gk, *skip_aware_tail(outfield, plays)))
     return tuple(out)
 
 

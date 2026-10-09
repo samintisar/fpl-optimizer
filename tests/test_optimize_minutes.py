@@ -27,6 +27,7 @@ from fplopt.optimize.minutes import (  # noqa: E402
     not_play_probabilities,
     poisson_binomial_tail,
     projected_xi,
+    skip_aware_tail,
 )
 from fplopt.optimize.model import solve_plan  # noqa: E402
 from fplopt.optimize.params import DEFAULT_BENCH_WEIGHTS  # noqa: E402
@@ -109,11 +110,32 @@ def test_weights_from_the_projected_xi() -> None:
     outfield = [k for k in xi if et[k] != 1]
     bench = [k for k, _ in squad if k not in xi]
     # Starters: GK plays w.p. 0.7, outfield starters w.p. 0.9, 0.8 and 1 for the rest.
-    # Bench players' P(play) must not matter.
     p = {gk: [0.7], outfield[0]: [0.9], outfield[1]: [0.8]}
-    p |= {k: [1.0] for k in outfield[2:]} | {k: [0.1] for k in bench}
-    weights = minutes_bench_weights(squad, with_minutes(xp, p), [0], RULES, DEFAULT_BENCH_WEIGHTS)
+    p |= {k: [1.0] for k in outfield[2:]}
+    # Bench players who always play: no skips, slot k = P(at least k starters miss).
+    certain = p | {k: [1.0] for k in bench}
+    weights = minutes_bench_weights(
+        squad, with_minutes(xp, certain), [0], RULES, DEFAULT_BENCH_WEIGHTS
+    )
     assert weights == (pytest.approx((0.3, 0.28, 0.02, 0.0)),)
+    # Bench players who play w.p. 0.1: a later slot also comes on when an earlier one is
+    # skipped (M = starters out: P(0) 0.72, P(1) 0.26, P(2) 0.02).
+    unlikely = p | {k: [0.1] for k in bench}
+    weights = minutes_bench_weights(
+        squad, with_minutes(xp, unlikely), [0], RULES, DEFAULT_BENCH_WEIGHTS
+    )
+    slot2 = 0.9 * 0.28 + 0.1 * 0.02
+    slot3 = 0.81 * 0.28 + 0.18 * 0.02
+    assert weights == (pytest.approx((0.3, 0.28, slot2, slot3)),)
+
+
+def test_skip_aware_tail_hand_values() -> None:
+    # Bench players certain to play: the plain Poisson-binomial tail.
+    assert skip_aware_tail([0.1, 0.2], [1.0, 1.0, 1.0]) == pytest.approx((0.28, 0.02, 0.0))
+    # Bench players who never play: every slot is needed as soon as one starter misses.
+    assert skip_aware_tail([0.1, 0.2], [0.0, 0.0, 0.0]) == pytest.approx((0.28, 0.28, 0.28))
+    assert skip_aware_tail([0.5], [0.5, 0.5]) == pytest.approx((0.5, 0.25))
+    assert skip_aware_tail([], [0.3]) == (0.0,)
 
 
 def test_gk_slot_is_the_starting_keepers_risk_only() -> None:
@@ -146,7 +168,7 @@ def test_double_gw_uses_p_play_gw_and_unknown_falls_back_to_fixed_weights() -> N
     # With p_play_gw (P(plays in at least one fixture)) the double is weighted from it.
     frame["p_play_gw"] = np.where(double, 0.5, frame["p_play"])
     weights = minutes_bench_weights(squad, frame, [0, 1], RULES, DEFAULT_BENCH_WEIGHTS)
-    assert weights[1] == pytest.approx((0.5, *poisson_binomial_tail([0.5] * 10, 3)))
+    assert weights[1] == pytest.approx((0.5, *skip_aware_tail([0.5] * 10, [0.5] * 3)))
 
 
 def test_rows_per_fixture_multiply_and_missing_players_never_play() -> None:
@@ -223,8 +245,9 @@ def test_per_gw_weights_reach_the_objective() -> None:
     problem = PlanInput.from_context(state, pool, frame, RULES, params)
     weights = problem.bench_weights
     assert weights is not None and weights[0] != weights[1]
-    assert weights[0] == pytest.approx((0.1, *poisson_binomial_tail([0.1] * 10, 3)))
-    assert weights[1] == pytest.approx((0.4, *poisson_binomial_tail([0.4] * 10, 3)))
+    # Bench outfielders play w.p. 0.9 / 0.6 too (skip rule, `skip_aware_tail`).
+    assert weights[0] == pytest.approx((0.1, *skip_aware_tail([0.1] * 10, [0.9] * 3)))
+    assert weights[1] == pytest.approx((0.4, *skip_aware_tail([0.4] * 10, [0.6] * 3)))
     plan = solve_plan(problem, params)
     et = dict(squad)
     for t, g in enumerate(plan.gws):
