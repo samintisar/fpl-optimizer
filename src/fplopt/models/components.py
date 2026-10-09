@@ -1,7 +1,6 @@
-"""The remaining xP components: bonus, goalkeeper saves and penalty saves, cards, own goals
-and penalty misses (PLAN §6.5; Phase 5 plan, *Other components* and Task 5). Defensive
-contributions are Phase 5b (Task 10): see `DEFCON` below, the hook `fplopt.models.assemble`
-reads.
+"""The remaining xP components: bonus, goalkeeper saves and penalty saves, cards, own goals,
+penalty misses (PLAN §6.5; Phase 5 plan, *Other components* and Task 5) and defensive
+contributions (Phase 5b, Task 10).
 
 `fit_components(view) -> ComponentsFit` fits on the rows visible in `view` (the caller passes
 the view at the refit cutoff, `fplopt.models.fitted`); `predict_components(view, fit,
@@ -56,10 +55,27 @@ club's conversion from the shares fit (`SharesFit.team_pen`, else the league's);
 assembly multiplies `pen_miss_ratio` = (1 − c) / c by the shares' (possibly calibrated)
 expected penalty goals, so misses stay consistent with the penalty goals.
 
+**Defensive contributions** (PLAN §6.5: fixed in-season form, prior set once; no fit, read
+at the *deadline's* view by `defcon_rates`). The count of a played `player_match` row is
+FPL's `defensive_contribution` (DEF: clearances + blocks + interceptions + tackles, CBIT;
+MID/FWD: CBIT + recoveries, CBIRT; 2025/26+), else the sum of the position's components
+when all are non-null (2016/17–2018/19), else unknown (2019/20–2024/25: the row is left
+out). Only rows of the deadline's season count, with the player's `player_season` position
+of that season (DEF, MID, FWD; goalkeepers are not eligible). Per position the mean m =
+Σ count / Σ minutes/90 over those rows, or `DEFCON_PRIOR_MEAN` while the position has none
+(a season's first deadline); per player rate = (Σ count + k · m) / (Σ minutes/90 + k), the
+position mean for a player without rows. k (`defcon_k`, pseudo-90s) and the negative-
+binomial dispersion r (`defcon_r`) per position: `DEFCON_K`, `DEFCON_R`, set once (below).
+The assembly turns the rate into P(count ≥ the rules' threshold) under NB(mean = rate ·
+fraction of the match on the pitch, r) (`negbin_tail`) over its minutes split; only when
+the deadline season's rules score defcon (develop/validate: never, so their xP is
+unchanged).
+
 **Prediction rows** (`predict_components`): the `minutes` frame's keys plus
 `element_type` (from the pool), `opponent_team_key`, the saves rate per 90 on the pitch
 (θ · exp(a + b · log λ_against); 0 for outfield players), the penalty-save rate per 90 (0 for
-outfield players), the three card / own-goal rates per 90, `pen_miss_ratio` and the
+outfield players), the three card / own-goal rates per 90, `pen_miss_ratio`, the defcon
+rate per 90 and dispersion (`defcon_rate`, `defcon_r`; 0 for goalkeepers) and the
 position's bonus coefficients `b_<feature>`. Sorted by (player_key, horizon, fixture_key).
 
 No state, no file access.
@@ -82,16 +98,21 @@ from fplopt.models.team import RHO, market_lambdas, market_probabilities, visibl
 __all__ = (
     "BONUS_FEATURES",
     "COMPONENT_COLUMNS",
-    "DEFCON",
+    "DEFCON_K",
+    "DEFCON_PRIOR_MEAN",
+    "DEFCON_R",
     "BonusFit",
     "ComponentsFit",
     "ComponentsParams",
     "RatesFit",
     "SavesFit",
+    "defcon_counts",
+    "defcon_rates",
     "fit_bonus",
     "fit_components",
     "fit_rates",
     "fit_saves",
+    "negbin_tail",
     "predict_components",
 )
 
@@ -106,10 +127,32 @@ DEFAULT_PEN_SAVE_RATE = 0.02  # penalty saves per 90 on the pitch (EPL long run)
 PEN_SAVE_PRIOR = 200.0  # pseudo goalkeeper-90s at DEFAULT_PEN_SAVE_RATE
 SAVES_B_START = 0.5  # every saves fit starts at b = this, a = the flat rate at the mean log λ
 LAMBDA_FLOOR = 0.05  # λ_against below this is clipped before taking logs
-# Defensive contributions (Phase 5b, Task 10): no term yet. The assembly adds `DEFCON`
-# points per player-fixture; develop/validate rules score no defcon anyway
-# (`backtest_rules`: 2026-27 without defcon), so only 2025/26+ xP lacks it until then.
-DEFCON = 0.0
+# Defensive contributions (PLAN §6.5), per position (element_type DEF 2, MID 3, FWD 4).
+# Set once by `dev/defcon_prior.py fit` (2026-10-08) on FPL-Core-Insights 2024/25 (research
+# use only; its CBIT/CBIRT reproduce FPL's counts exactly on 2026/27 GW1–5, issue #14):
+# (k, r) maximize the walk-forward predictive NB log-likelihood of every played match from
+# the player's earlier matches of the season (DEF CBIT: 3.494, 13.22; MID + FWD CBIRT
+# pooled: 1.939, 15.20). Never re-tuned. The prior means are that season's per-90 counts
+# (FCI `tackles_won` as tackles), used only before a position has any row of the season.
+DEFCON_POSITIONS = (2, 3, 4)
+DEFCON_K = ((2, 3.49), (3, 1.94), (4, 1.94))  # pseudo-90s at the position mean
+DEFCON_R = ((2, 13.2), (3, 15.2), (4, 15.2))  # NB dispersion: var = μ + μ² / r
+DEFCON_PRIOR_MEAN = ((2, 6.57), (3, 7.73), (4, 4.07))  # count per 90
+# What a row counts when FPL's `defensive_contribution` is null (scoring.DEFCON_STATS).
+DEFCON_STATS = (
+    (2, ("clearances_blocks_interceptions", "tackles")),
+    (3, ("clearances_blocks_interceptions", "tackles", "recoveries")),
+    (4, ("clearances_blocks_interceptions", "tackles", "recoveries")),
+)
+DEFCON_COLUMNS = (
+    "player_key",
+    "season",
+    "minutes",
+    "defensive_contribution",
+    "clearances_blocks_interceptions",
+    "tackles",
+    "recoveries",
+)
 KEYS = ("player_key", "fixture_key", "team_key", "season", "gw", "gw_index", "horizon")
 RATE_COLUMNS = (
     "saves_rate",
@@ -118,6 +161,8 @@ RATE_COLUMNS = (
     "red_rate",
     "own_goal_rate",
     "pen_miss_ratio",
+    "defcon_rate",
+    "defcon_r",
 )
 BONUS_COLUMNS = tuple(f"b_{name}" for name in BONUS_FEATURES)
 COMPONENT_COLUMNS = (*KEYS, "element_type", "opponent_team_key", *RATE_COLUMNS, *BONUS_COLUMNS)
@@ -153,12 +198,25 @@ class ComponentsParams:
     yellow_prior: float = 10.0  # pseudo 90s at the position rate
     red_prior: float = 60.0
     own_goal_prior: float = 60.0
+    # Defensive contributions, per element_type (module docstring; set once, not tuned).
+    defcon_k: tuple[tuple[int, float], ...] = DEFCON_K
+    defcon_r: tuple[tuple[int, float], ...] = DEFCON_R
+    defcon_prior_mean: tuple[tuple[int, float], ...] = DEFCON_PRIOR_MEAN
 
     def __post_init__(self) -> None:
         if self.seasons < 1:
             raise ValueError("seasons must be >= 1")
         if not 0 < self.season_decay <= 1:
             raise ValueError("season_decay must be in (0, 1]")
+        defcon = {
+            "defcon_k": self.defcon_k,
+            "defcon_r": self.defcon_r,
+            "defcon_prior_mean": self.defcon_prior_mean,
+        }
+        for name, pairs in defcon.items():
+            values = dict(pairs)
+            if set(values) != set(DEFCON_POSITIONS) or any(v <= 0 for v in values.values()):
+                raise ValueError(f"{name} needs a positive value for each of {DEFCON_POSITIONS}")
 
 
 @dataclass(frozen=True)
@@ -381,6 +439,88 @@ def fit_rates(rows: pd.DataFrame, params: ComponentsParams) -> RatesFit:
     return RatesFit(tuple(positions), tuple(players))
 
 
+# --- defensive contributions ----------------------------------------------------------------
+
+
+def negbin_tail(mean: np.ndarray, r: np.ndarray, k: np.ndarray) -> np.ndarray:
+    """P(X ≥ k) for X ~ NB(mean, dispersion r) (var = mean + mean² / r, r > 0), elementwise:
+    1 − Σ_{n<k} P(n), with P(0) = (r / (r + mean))^r and P(n) = P(n − 1) · (n − 1 + r) / n ·
+    mean / (r + mean). Mean 0 gives 0 for k ≥ 1; k ≤ 0 gives 1."""
+    mean, r, k = np.broadcast_arrays(
+        np.clip(np.asarray(mean, dtype="float64"), 0.0, None),
+        np.asarray(r, dtype="float64"),
+        np.asarray(k, dtype="int64"),
+    )
+    if np.any(r <= 0):
+        raise ValueError("negbin_tail: r must be > 0")
+    q = mean / (r + mean)
+    pmf = np.exp(r * np.log1p(-q))
+    cdf = np.zeros(mean.shape)
+    for n in range(int(k.max(initial=0))):
+        cdf = cdf + np.where(n < k, pmf, 0.0)
+        pmf = pmf * (n + r) / (n + 1) * q
+    return np.clip(1.0 - cdf, 0.0, 1.0)
+
+
+def defcon_counts(rows: pd.DataFrame) -> np.ndarray:
+    """Per row (`element_type` and any of `DEFCON_COLUMNS`) the defcon count: FPL's
+    `defensive_contribution` when non-null, else the sum of the position's `DEFCON_STATS`
+    when all are non-null, else NaN."""
+    count = np.full(len(rows), np.nan)
+    element_type = rows["element_type"].to_numpy()
+    for position, stats in DEFCON_STATS:
+        if all(stat in rows for stat in stats):
+            total = np.sum([_floats(rows, stat) for stat in stats], axis=0)  # NaN stays NaN
+            count = np.where(element_type == position, total, count)
+    if "defensive_contribution" in rows:
+        fpl = _floats(rows, "defensive_contribution")
+        count = np.where(np.isnan(fpl), count, fpl)
+    return count
+
+
+def defcon_rates(
+    view: AsOfView, params: ComponentsParams
+) -> tuple[dict[int, float], dict[int, float]]:
+    """(per element_type the position mean, per player_key the shrunk rate), counts per 90
+    minutes on the pitch, from the played `player_match` rows of the deadline's season
+    visible in `view` (module docstring). Positions outside `DEFCON_POSITIONS` are left out."""
+    season, _ = view.gameweek_for_deadline()
+    rows = view.table("player_match", columns=list(DEFCON_COLUMNS))
+    rows = rows[rows["season"] == season]
+    rows = rows[np.nan_to_num(_floats(rows, "minutes")) > 0]
+    positions = view.table("player_season", columns=["player_key", "season", "element_type"])
+    positions = positions[positions["season"] == season]
+    positions = positions.drop_duplicates("player_key", keep="last")[["player_key", "element_type"]]
+    rows = rows.merge(positions, on="player_key", how="inner", validate="many_to_one")
+    frame = pd.DataFrame(
+        {
+            "player_key": rows["player_key"].to_numpy(dtype="int64"),
+            "element_type": rows["element_type"].to_numpy(dtype="int64"),
+            "count": defcon_counts(rows),
+            "exposure": _floats(rows, "minutes") / 90.0,
+        }
+    )
+    frame = frame[np.isfinite(frame["count"]) & frame["element_type"].isin(DEFCON_POSITIONS)]
+    totals = frame.groupby("element_type", sort=True)[["count", "exposure"]].sum()
+    prior = dict(params.defcon_prior_mean)
+    means = {}
+    for position in DEFCON_POSITIONS:
+        if position in totals.index and totals.loc[position, "exposure"] > 0:
+            means[position] = float(
+                totals.loc[position, "count"] / totals.loc[position, "exposure"]
+            )
+        else:
+            means[position] = float(prior[position])
+    shrink = dict(params.defcon_k)
+    sums = frame.groupby(["player_key", "element_type"], sort=True)[["count", "exposure"]].sum()
+    players = {}
+    for (key, position), row in sums.iterrows():
+        k = shrink[int(position)]
+        rate = (row["count"] + k * means[int(position)]) / (row["exposure"] + k)
+        players[int(key)] = float(rate)
+    return means, players
+
+
 # --- fit and predict ------------------------------------------------------------------------
 
 
@@ -444,6 +584,19 @@ def predict_components(
         dtype="float64",
     ).reshape(len(frame), 3)
 
+    means, players = defcon_rates(view, fit.params)
+    eligible = np.isin(element_type, DEFCON_POSITIONS)
+    defcon_rate = np.array(
+        [
+            players.get(int(k), means.get(int(e), 0.0))
+            for k, e in zip(frame["player_key"].to_numpy(), element_type, strict=True)
+        ],
+        dtype="float64",
+    )
+    defcon_rate = np.where(eligible, defcon_rate, 0.0)
+    dispersion = dict(fit.params.defcon_r)
+    defcon_r = np.array([dispersion.get(int(e), 0.0) for e in element_type], dtype="float64")
+
     coefficients = dict(fit.bonus.coefficients)
     zero = (0.0,) * len(BONUS_FEATURES)
     beta = np.array(
@@ -459,6 +612,8 @@ def predict_components(
         red_rate=rates[:, 1],
         own_goal_rate=rates[:, 2],
         pen_miss_ratio=(1.0 - conversion) / conversion,
+        defcon_rate=defcon_rate,
+        defcon_r=defcon_r,
         **{column: beta[:, i] for i, column in enumerate(BONUS_COLUMNS)},
     )
     dtypes = {name: "int64" for name in (*KEYS, "element_type", "opponent_team_key")}
