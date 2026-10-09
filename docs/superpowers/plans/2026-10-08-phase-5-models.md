@@ -202,12 +202,31 @@ Phase 5 is done when (PLAN §9):
     - per decision with each arm's own continuation, at greedy's states: 80% CI lower bound > 0.
   - Plus: the same sign on xG, and a deflated mean > 0 over all seasons.
 
+**Pre-registered 2026-10-08 (approved by the user before any 5b comparison):**
+- **Arms:** A = `optimizer:v1`, B = `greedy:v1`. Same xP (v1), no chips. Bench weights and the minutes-based pruning floor are those Task 8 fixes, decided before any comparison below.
+- **Starts:** `template@1,random:3@1,random:3@20`.
+- **Selection on develop** (2017/18–2022/23; 2016/17 is left out, since v1 has no earlier data there):
+  - greedy's `threshold` ∈ {0.5, 1.0, 2.0}, chosen by greedy's full-run paired difference vs `greedy:v1` defaults;
+  - then the optimizer vs the chosen greedy over `max_hits` ∈ {0, 1 with `hit_margin` 2} × `horizon` ∈ {4, 6} × `decay` ∈ {0.75, 0.85};
+  - each run `backtest compare --continuation own --reference b`, with family `optimizer:v1 vs greedy:v1 develop`;
+  - the variant with the largest full-run realized mean per GW wins;
+  - N = the number of optimizer variants run.
+- **Confirmation on validate, one run:** `backtest compare --a optimizer:v1:<chosen> --b greedy:v1:<chosen> --seasons 2023-2024 --starts template@1,random:3@1,random:3@20 --continuation own --reference b`.
+- **Passes if all three hold:**
+  1. the full-run realized paired mean per GW is > 0, with the 80% GW-block-bootstrap CI's lower bound > 0;
+  2. the xG-scored full-run mean is > 0 (same sign);
+  3. the deflated validate mean, mean − SE·√(2 ln N), is > 0.
+
+  The per-decision result (own continuation, B's states, k = 4) is reported but does not gate (two seasons are too few for it, Phase 4).
+
+**Procedure amendment (2026-10-09, user-approved, before any selection run):** the develop selection runs use `--no-per-decision`. Selection is decided on the full-run mean alone, which per-decision windows cannot change; the validate run keeps the per-decision report. The runs are split between the local machine and the server, on the same commit and an identical copy of `data/`, checked first on one case with identical results.
+
 ### Task 10: Defcon (5b, wave A)
 - [ ] #14: check that FPL-Core-Insights reproduces FPL CBIT/CBIRT on 2026/27 GW1–5, then set `k` and `r` once from its 2024/25 data (research use only, never shipped).
 - [ ] The defcon component, active only for 2025/26+ rules, so develop/validate xP is unchanged. Close #14.
 
 ### Task 11: Criterion 2, review, PR 5b (lead)
-- [ ] Develop tuning runs, then the single validate confirmation. Results in PLAN §7 and §12, and the §9 row marked done.
+- [x] Develop tuning runs, then the single validate confirmation. Results in PLAN §7 and §12, and the §9 row marked done. (2026-10-09: criterion 2 not met as pre-registered; full run +0.74/GW, CI lower bound −0.85. PLAN §7 *Phase 5 results*.)
 - [ ] Review, PR, merge with the go-ahead, server update.
 
 ---

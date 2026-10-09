@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 
 from fplopt.backtest.gw_score import Lineup
-from fplopt.backtest.rules import Rules
+from fplopt.backtest.rules import Rules, best_xi
 from fplopt.backtest.state import (
     GOALKEEPER,
     Decision,
@@ -132,20 +132,10 @@ def best_lineup(squad: pd.DataFrame, xp_target: Mapping[int, float], rules: Rule
         return (-_value(xp_target, player[0]), player[0])
 
     order = sorted(players, key=rank)
-    starters: list[tuple[int, int]] = []
-    counts: Counter[int] = Counter()
-    for et, n in sorted(rules.play_min.items()):
-        picked = [p for p in order if p[1] == et][:n]
-        starters += picked
-        counts[et] += len(picked)
-    for player in order:
-        if len(starters) >= rules.squad_play:
-            break
-        if player not in starters and counts[player[1]] < rules.play_max[player[1]]:
-            starters.append(player)
-            counts[player[1]] += 1
+    starters = best_xi(order, rules)
     if len(starters) != rules.squad_play:
-        raise ValueError(f"squad cannot field {rules.squad_play} starters: {dict(counts)}")
+        counts = dict(Counter(et for _, et in starters))
+        raise ValueError(f"squad cannot field {rules.squad_play} starters: {counts}")
     chosen = set(starters)
     bench = [p for p in order if p not in chosen and p[1] == GOALKEEPER]
     bench += [p for p in order if p not in chosen and p[1] != GOALKEEPER]
@@ -368,6 +358,10 @@ def _optimizer_extras(params: OptimizerParams) -> list[str]:
         parts.append(f"nodes={params.node_limit}")
     if params.tie_epsilon != default.tie_epsilon:
         parts.append(f"eps={params.tie_epsilon!r}")
+    if params.bench_from_minutes != default.bench_from_minutes:
+        parts.append(f"bfm={int(params.bench_from_minutes)}")
+    if params.min_minutes != default.min_minutes:
+        parts.append(f"minm={float(params.min_minutes)!r}")
     return parts
 
 
