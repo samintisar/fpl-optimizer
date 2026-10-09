@@ -408,6 +408,12 @@ Post-processing:
   - P(threshold reached | minutes) from a negative binomial with that rate scaled by expected minutes and dispersion `r`.
   - `k` and `r` are set **once** from FPL-Core-Insights 2024/25 data (a validate season; research use only), after checking that its components reproduce FPL's own CBIT/CBIRT on 2026/27 GW1–5. Never re-tuned; the 2025/26 holdout is untouched.
   - Identical in the holdout and live. No defcon term before 2025/26.
+  - **Set 2026-10-08 (Phase 5b Task 10, `dev/defcon_prior.py`, FPL-Core-Insights 2024/25 at commit d6148f8, research copy in the git-ignored `research/`):**
+    - Fit: the predictive likelihood of each match from the player's earlier matches that season, with a negative binomial.
+    - DEF (CBIT): `k` 3.49 pseudo-90s, `r` 13.2. MID+FWD pooled (CBIRT): `k` 1.94, `r` 15.2.
+    - Mean predicted P(threshold) vs realized: 12.2% vs 13.6% (DEF), 6.8% vs 6.2% (MID+FWD).
+    - Before a season's first row exists (GW1), the position means are FCI 2024/25's per-90 means (DEF 6.57, MID 7.73, FWD 4.07). These are a little below FPL's own 2026/27 GW1–5 means (7.63 / 8.14 / 4.27); FotMob's tackle stat changed definition between the seasons, see §11.
+    - Live check, 2026/27 GW2–5 at horizon 0: P(defcon) DEF 0.088 vs 0.104 realized, MID 0.047 vs 0.038.
 - **Saves (GK):** Poisson on saves vs opponent shots/xG.
 - **Cards / own goals / penalty misses:** small per-player rates.
 
@@ -629,7 +635,6 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 
 - Free-transfer reconstruction rules from public transfer history, and the 2025/26 AFCON top-up (GW and amount; absent from the API). (WC/FH effect resolved below.)
 - Free Hit consecutive-GW restriction in 2026/27.
-- FPL-Core-Insights components reproduce FPL CBIT/CBIRT (2026/27 GW1–5) before setting defcon `k`, `r`.
 - Go-live test size on a single season (~0.14 at nominal 0.10 with the block bootstrap, §5): choose a size-correct test (e.g. a HAC t-test with t critical values, or calibrate the threshold by A/A placebo) and how chips enter it, before Phase 6.
 - Per-decision gate design (Phase 4 review): continuation (shared roll vs each arm's own policy, `--continuation own`) and reference (whose run gives the states, `--reference a|b`); the roll continuation never credits a plan's follow-up moves. Decide and log in §12 before Phase 6.
 - A heuristic chip baseline (e.g. Wildcard at the first international break, Bench Boost / Triple Captain at the best double), so chip timing is judged against something better than never playing chips.
@@ -638,6 +643,7 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 - Exclude the degenerate 2016/17 GW1 under `rolling` (no earlier matches: every xP is 0) from comparisons, or start 2016/17 at GW2.
 
 **Resolved (2026-10-08):**
+- FPL-Core-Insights reproduces FPL's CBIT/CBIRT exactly for 2026/27 GW1–5 (1,437 outfield rows, every component; DEF/MID/FWD 100%), **if its `tackles_won` column is used as tackles**. Its `tackles` column is empty in 2026/27 and holds attempts in 2024/25. FotMob's team "tackles won" also rose from 10.5 (2024/25) to 15.4 (2026/27) per team-match, so the definition probably changed between seasons. #14 closed; defcon `k`, `r` in §6.5.
 - FPL xG minus penalty xG as npxG for 2025/26+ → §3 *Backfill rules* (verified on the overlap; scale factors fitted walk-forward).
 
 **Resolved (2026-10-07):**
