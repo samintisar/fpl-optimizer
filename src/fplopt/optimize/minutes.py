@@ -170,13 +170,11 @@ def minutes_bench_weights(
     out = []
     for h in horizons:
         rows = xp[xp["horizon"] == h]
-        target = dict(
-            zip(
-                rows["player_key"].to_numpy(dtype="int64").tolist(),
-                rows["xp"].to_numpy(dtype="float64").tolist(),
-                strict=True,
-            )
-        )
+        # The GW's xP per player: rows of one player (one per fixture) add up.
+        target = {
+            int(k): float(v)
+            for k, v in rows.groupby("player_key", sort=True)["xp"].sum(min_count=1).items()
+        }
         xi = projected_xi(squad, target, rules)
         # No row in the frame: the player left the game (or has no fixture data): q = 1.
         # Projected bench outfielders in slot order: by xP, best first (ties by key).

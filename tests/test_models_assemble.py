@@ -446,6 +446,23 @@ def test_v1_frame_schema_doubles_and_blanks(league):
     assert (out["xp"].abs() < 20).all() and out["xp"].notna().all()
 
 
+def test_unknown_p_play_in_a_fixture_leaves_p_play_gw_unknown(league):
+    # prod() skips NaN: without the guard a NaN P(play) would read as certain absence.
+    view = view_at(league, 4)
+    fixtures = predict_fixtures(view, fit_v1(view, FAST))
+    pool = player_pool(view)
+    club = pool.loc[pool["team_key"] == 1, "player_key"]  # plays twice in GW 7
+    in_double = fixtures[(fixtures["gw"] == 7) & fixtures["player_key"].isin(club)]
+    player = int(in_double["player_key"].iloc[0])
+    row = in_double.index[0]
+    fixtures.loc[row, "p_play"] = np.nan
+    out = gw_frame(view, fixtures)
+    mine = out[(out["player_key"] == player) & (out["gw"] == 7)]
+    assert mine["p_play_gw"].isna().all()
+    others = out[(out["player_key"] != player) & (out["gw"] == 7)]
+    assert others["p_play_gw"].notna().all()
+
+
 def test_fixture_components_cover_the_minutes_rows(league):
     view = view_at(league, 4)
     fit = fit_v1(view, FAST)

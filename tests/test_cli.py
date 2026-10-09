@@ -474,6 +474,10 @@ def test_parse_optimizer_minutes_keys():
         cli.parse_policy_spec("optimizer:v1:min_minutes=-1")
     with pytest.raises(argparse.ArgumentTypeError, match="no parameter 'bench_from_minutes'"):
         cli.parse_policy_spec("greedy:v1:bench_from_minutes=0")
+    # On a model without minutes the keys would change nothing but the variant count.
+    for text in ("optimizer:rolling:min_minutes=90", "optimizer:ep_next:bench_from_minutes=0"):
+        with pytest.raises(argparse.ArgumentTypeError, match="only apply to xP models"):
+            cli.parse_policy_spec(text)
 
 
 @pytest.mark.parametrize(

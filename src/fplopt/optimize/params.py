@@ -158,6 +158,11 @@ class OptimizerParams:
             # which the FT dynamics (exact) cannot express anyway; keep them meaningful.
             raise ValueError(f"ft_value keys must be >= 1 and values >= 0, got {ft_value}")
         object.__setattr__(self, "ft_value", _frozen(ft_value))
+        if self.bench_from_minutes not in (0, 1) or isinstance(self.bench_from_minutes, str):
+            # bool("0") is True: accept only a bool or 0/1.
+            raise ValueError(
+                f"bench_from_minutes must be a bool or 0/1, got {self.bench_from_minutes!r}"
+            )
         object.__setattr__(self, "bench_from_minutes", bool(self.bench_from_minutes))
         if len(self.bench_weights) != 4:
             raise ValueError(f"bench_weights needs 4 values, got {self.bench_weights}")

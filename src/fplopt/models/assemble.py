@@ -516,7 +516,10 @@ def gw_frame(view: AsOfView, fixtures: pd.DataFrame) -> pd.DataFrame:
     sums = grouped[["xp", *GW_SUMS]].sum()
     firsts = grouped[list(GW_PROBABILITIES)].first()
     counts = grouped.size().rename("n")
-    plays = (1.0 - grouped["p_dnp"].prod()).rename("p_play_gw")
+    # NaN P(play) in any fixture leaves the GW's unknown (prod() would skip it, i.e. treat it
+    # as certain absence), so the optimizer falls back to the fixed bench weights there.
+    unknown = rows["p_dnp"].isna().groupby([rows[k] for k in keys], sort=True).any()
+    plays = (1.0 - grouped["p_dnp"].prod()).mask(unknown).rename("p_play_gw")
     per_gw = sums.join(firsts).join(counts).join(plays).reset_index()
     double = per_gw["n"].to_numpy() > 1
     for column in GW_PROBABILITIES:

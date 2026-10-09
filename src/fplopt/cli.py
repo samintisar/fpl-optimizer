@@ -130,6 +130,10 @@ def _check_leakage(c: Context) -> object:
 BACKTEST_SEASONS = range(2016, 2027)  # seasons with built tables and backtest rules
 EP_NEXT_FIRST_SEASON = 2021  # FPL's ep_next is in the snapshots from 2020/21 GW32 on
 XP_MODELS = ("rolling", "ep_next", "ep_next_fade", "v1")  # fplopt.models.MODELS keys
+# xP models whose frames carry `p_play` / `e_minutes`; the optimizer's minutes keys do
+# nothing on the others (and would only add a variant to the comparison family).
+MINUTES_XP_MODELS = ("v1",)
+MINUTES_KEYS = ("bench_from_minutes", "min_minutes")
 EP_NEXT_MODELS = frozenset({"ep_next", "ep_next_fade"})  # need FPL snapshots (2021/22+)
 # Planner horizons are capped at the xP frames' GWs (fplopt.models.MAX_HORIZON; a test
 # checks they agree): a longer one would silently plan over fewer GWs.
@@ -298,6 +302,13 @@ def make_policy_spec(name: str, xp: str, params: dict[str, str]) -> PolicySpec:
         )
     if name == "greedy" and given.get("max_transfers", 0) < 0:
         raise argparse.ArgumentTypeError(f"bad policy {spec}: need max_transfers >= 0")
+    if name == "optimizer" and xp not in MINUTES_XP_MODELS:
+        ignored = [key for key in MINUTES_KEYS if key in given]
+        if ignored:
+            raise argparse.ArgumentTypeError(
+                f"bad policy {spec}: {', '.join(ignored)} only apply to xP models with "
+                f"minutes ({', '.join(MINUTES_XP_MODELS)})"
+            )
     if name == "optimizer" and not 0 < given.get("decay", 0.5) <= 1:
         raise argparse.ArgumentTypeError(f"bad policy {spec}: need 0 < decay <= 1")
     try:  # whatever else the policy rejects (e.g. a negative hit_margin or itb_value)

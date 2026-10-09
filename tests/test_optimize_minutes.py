@@ -197,6 +197,48 @@ def test_rows_per_fixture_multiply_and_missing_players_never_play() -> None:
     assert weights == ((1.0, 0.0, 0.0, 0.0),)
 
 
+def test_projected_xi_sums_a_double_gws_rows() -> None:
+    # One row per fixture: the projected XI ranks players by the GW's summed xP.
+    state, pool, xp = instance(4, n_gws=1)
+    squad = squad_of(state)
+    frame = with_minutes(xp, 1.0)
+    target = dict(zip(frame["player_key"], frame["xp"], strict=True))
+    xi = projected_xi(squad, target, RULES)
+    et = dict(squad)
+    benched = min((k for k, _ in squad if k not in xi and et[k] != 1), key=lambda k: target[k])
+    # Give the benched player two fixture rows, xP above every starter's and 0: on the sum
+    # he starts (on the last row alone he would not), and P(play) multiplies over the rows.
+    row = frame[frame["player_key"] == benched]
+    split = pd.concat(
+        [row.assign(xp=max(target.values()) + 1.0, p_play=0.5), row.assign(xp=0.0, p_play=0.5)],
+        ignore_index=True,
+    )
+    frame = pd.concat([frame[frame["player_key"] != benched], split], ignore_index=True)
+    weights = minutes_bench_weights(squad, frame, [0], RULES, DEFAULT_BENCH_WEIGHTS)
+    (w,) = weights
+    if et[benched] == 1:
+        assert w[0] == pytest.approx(0.25)
+    else:
+        assert w[1] == pytest.approx(0.25)
+
+
+def test_weights_never_increase_down_the_bench_and_blanks_never_play() -> None:
+    rng = np.random.default_rng(0)
+    state, pool, xp = instance(5, n_gws=3)
+    squad = squad_of(state)
+    for _ in range(20):
+        p = {k: list(rng.uniform(0.0, 1.0, 3)) for k, _ in squad}
+        # Several incumbents blank in GW 1 (P(play) 0): they never start or come on.
+        for k, _ in squad[:4]:
+            p[k][1] = 0.0
+        weights = minutes_bench_weights(
+            squad, with_minutes(xp, p), [0, 1, 2], RULES, DEFAULT_BENCH_WEIGHTS
+        )
+        for w in weights:
+            assert all(0.0 <= v <= 1.0 for v in w)
+            assert w[1] >= w[2] - 1e-12 >= w[3] - 2e-12
+
+
 # --- the planner --------------------------------------------------------------------------
 
 # Plan of `instance(3, n_gws=3)` with OptimizerParams(horizon=3) on the Phase 4 code
@@ -344,6 +386,9 @@ def test_min_minutes_validation() -> None:
     with pytest.raises(ValueError, match="min_minutes"):
         OptimizerParams(min_minutes=-1.0)
     assert OptimizerParams(bench_from_minutes=0).bench_from_minutes is False
+    for bad in ("0", 2, None):  # bool("0") would be True
+        with pytest.raises(ValueError, match="bench_from_minutes"):
+            OptimizerParams(bench_from_minutes=bad)
     assert OptimizerParams().min_minutes == 180.0  # Task 8 benchmark
 
 
