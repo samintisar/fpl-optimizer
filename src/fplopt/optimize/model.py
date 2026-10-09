@@ -47,6 +47,8 @@ Chips (one fixed `ChipScenario` per solve, `chips.py`):
   from it. Transfers are free and FTs follow `chip_week_ft` as for the Wildcard. Next
   GW continues from the persistent squad and bank (the revert of `state.next_state`).
 - **Bench Boost** GW: every bench weight is 1 (all 15 count, no autosub weighting).
+  Otherwise GW t's weights are `PlanInput.gw_bench_weights(t)`: from the minutes model
+  per GW (`minutes.minutes_bench_weights`) or the fixed `params.bench_weights`.
 - **Triple Captain** GW: the captain's xP counts 3× (2 extra instead of 1).
 
 Objective (maximised), with h_t the GW's horizon offset:
@@ -325,9 +327,11 @@ class _Model:
         return self.fh_squad[k, t] if t in self.fh else self.squad[k, t]
 
     def bench_weights(self, t: int) -> tuple[float, ...]:
+        """GW t's bench weights: 1 under Bench Boost, else the problem's (minutes-based
+        per GW, or the fixed `params.bench_weights`)."""
         if self.chips.get(t) == "bboost":
             return (1.0,) * len(self.params.bench_weights)
-        return self.params.bench_weights
+        return self.problem.gw_bench_weights(t, self.params)
 
     def captain_extra(self, t: int) -> float:
         """The captain's xP counted on top of his starter xP: 1 (×2), 2 under TC (×3)."""

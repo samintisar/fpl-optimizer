@@ -169,6 +169,8 @@ POLICY_PARAMS: dict[str, dict[str, Callable[[str], Any]]] = {
         "hit_margin": float,
         "max_hits": parse_max_hits,
         "itb_value": float,
+        "bench_from_minutes": parse_flag,
+        "min_minutes": float,
         "chips": parse_flag,
     },
 }
@@ -1136,6 +1138,9 @@ def _optimize_bench(c: Context) -> object:
         ),
         all_chips=args.all_chips,
         prune_study=args.prune_study,
+        seasons=args.seasons,
+        xp_models=args.xp,
+        floors=args.floors,
         progress=lambda line: print(line, flush=True),
     )
     summary = summarize(result)
@@ -1370,6 +1375,28 @@ def _prune_n(text: str) -> dict[int, int]:
     return dict(zip((1, 2, 3, 4), values, strict=True))
 
 
+def _xp_models(text: str) -> tuple[str, ...]:
+    """`v1,rolling` -> ('v1', 'rolling') (each a known xP model, no duplicates)."""
+    models = tuple(m.strip() for m in text.split(","))
+    unknown = [m for m in models if m not in XP_MODELS]
+    if unknown or len(set(models)) != len(models) or not models:
+        raise argparse.ArgumentTypeError(
+            f"--xp: expected distinct models from {', '.join(XP_MODELS)}, got {text!r}"
+        )
+    return models
+
+
+def _floors(text: str) -> tuple[float, ...]:
+    """`0,30,60` -> (0.0, 30.0, 60.0) (finite, >= 0)."""
+    try:
+        values = tuple(float(v) for v in text.split(","))
+    except ValueError:
+        values = ()
+    if not values or not all(math.isfinite(v) and v >= 0 for v in values):
+        raise argparse.ArgumentTypeError(f"--floors: expected minutes >= 0, got {text!r}")
+    return values
+
+
 def _plan_start(text: str) -> str:
     if text == "template" or re.fullmatch(r"random:\d+", text):
         return text
@@ -1409,6 +1436,27 @@ def _add_optimize_parsers(groups: Any) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="solve every pruning variant at a tight gap (default on)",
+    )
+    bench.add_argument(
+        "--seasons",
+        type=parse_seasons,
+        default=None,
+        help="seasons to sample deadlines from (default 2021-2024,2026)",
+    )
+    bench.add_argument(
+        "--xp",
+        type=_xp_models,
+        default=None,
+        metavar="MODEL[,MODEL...]",
+        help="xP models (default ep_next,rolling)",
+    )
+    bench.add_argument(
+        "--floors",
+        type=_floors,
+        default=None,
+        metavar="M[,M...]",
+        help="expected-minutes floors over the horizon in the pruning study, for xP frames "
+        "with minutes (v1; default 0,30,60,90,135,180)",
     )
     bench.add_argument(
         "--out", default=None, help="output directory (default results/<UTC time>-bench)"
@@ -1637,6 +1685,15 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
             args.subparser.error("--deadlines must be >= 1 and --all-chips >= 0")
         if not 1 <= args.horizon <= MAX_PLAN_HORIZON:
             args.subparser.error(f"--horizon must be in 1..{MAX_PLAN_HORIZON} (the xP frames' GWs)")
+        from fplopt.optimize.bench import BENCH_SEASONS, FLOORS
+        from fplopt.optimize.bench import XP_MODELS as BENCH_XP_MODELS
+
+        args.seasons = BENCH_SEASONS if args.seasons is None else args.seasons
+        args.xp = BENCH_XP_MODELS if args.xp is None else args.xp
+        args.floors = FLOORS if args.floors is None else args.floors
+        early = [s for s in args.seasons if s < EP_NEXT_FIRST_SEASON]
+        for xp in args.xp:
+            _refuse_early_ep_next(args.subparser, xp, f"--xp {xp}", early)
     elif name == "optimize plan":
         if len(args.season) != 1:
             args.subparser.error("--season: give one season")

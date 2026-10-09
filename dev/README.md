@@ -494,3 +494,54 @@ By predicted bin (all positions): ≤ 0.02 → 0.001 realized (1,090 rows), 0.02
 about 15% under their realized rate (as in the 2024/25 fit check, 12.2% vs 13.6%, and DEF
 CBIT per 90 is higher so far this season than FCI's 2024/25), midfielders slightly over; GW2
 rates rest on a single match each.
+
+## `bench_weights_eval.py`: bench-weight reliability
+
+Phase 5 plan, Task 8 (PLAN §7 *Bench*). Develop only (refuses anything but 2017/18–2022/23):
+
+```sh
+uv run python dev/bench_weights_eval.py --data-dir data [--seasons 2017-2022] [--random 3] \
+    [--jobs 6] [--out <dir>] [--max-gws N]
+```
+
+At every GW deadline: the template squad and `--random` seeded random squads
+(`fplopt.backtest.start_states`), each with its lineup from `best_lineup` on `v1`'s horizon-0 xP
+(the same rule as the planner's projected XI). Per bench slot (0 = GK, 1–3 outfield) it compares
+the fixed weights (0.03 / 0.21 / 0.06 / 0.002) and the minutes-based ones
+(`fplopt.optimize.minutes.minutes_bench_weights`) with the realized autosubs under
+`gw_score`'s rules:
+
+- `needed`: slot k's player would have come on had he played (the lineup is rescored with his
+  minutes set to 1 if he had none). This is what the weight estimates: the objective values the
+  slot at w_k · xP_k, and xP_k already includes his own P(play).
+- `came_on`: he did come on, compared with w_k · P(he plays).
+- `skip` (diagnostic, not used by the planner): outfield slot k with the skip rule,
+  P(M ≥ 1 + Σ_{j<k} B_j), with M the absent outfield starters (Poisson-binomial) and B_j the
+  earlier outfield bench players playing (Bernoulli of their P(play)).
+
+It prints means and Brier scores per slot (all rows, single-fixture and double GWs) and a
+reliability table per slot (bins of the minutes-based weight); `--out` also writes
+`rows.parquet`, `summary.json` and `summary.txt`. The in-memory store holds only seasons ≤ the
+season being run. About 4 min for 2017/18–2022/23 at `--jobs 6` (v1 fits dominate).
+
+### Results (2026-10-09)
+
+898 squad-GWs (2017/18–2022/23, template + 3 random squads per deadline). `needed` is the
+realized rate; Brier is of the `needed` event:
+
+| slot | needed | fixed | minutes | skip | Brier fixed | Brier minutes | Brier skip |
+|---|---|---|---|---|---|---|---|
+| GK | 0.237 | 0.030 | 0.263 | 0.263 | 0.224 | 0.033 | 0.033 |
+| 1 | 0.787 | 0.210 | 0.894 | 0.894 | 0.501 | 0.155 | 0.155 |
+| 2 | 0.757 | 0.060 | 0.677 | 0.805 | 0.670 | 0.135 | 0.124 |
+| 3 | 0.723 | 0.002 | 0.430 | 0.768 | 0.720 | 0.247 | 0.130 |
+
+- The fixed weights are far too low for these squads: a bench slot was needed 24% (GK) to 79%
+  (slot 1) of the time. The minutes-based weights track that; the GK slot's reliability is
+  close to the diagonal in every bin.
+- Slot 1 is overpredicted (0.89 vs 0.79; template squads 0.80 vs 0.56): a small underestimate of
+  each starter's P(play) compounds over ten starters.
+- Slots 2–3 are underpredicted (slot 3: 0.43 vs 0.72): the skip rule (a bench player who doesn't
+  play passes his turn) is ignored. Accounting for it (`skip`) halves slot 3's Brier score.
+- Random squads (678 of 898) hold more non-playing players than template squads (220): template
+  `needed` rates are 0.27 / 0.56 / 0.56 / 0.51, random 0.23 / 0.86 / 0.82 / 0.79.

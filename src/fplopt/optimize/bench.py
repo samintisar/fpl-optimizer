@@ -1,11 +1,11 @@
 """Optimizer benchmark on real data (Phase 4 plan, Task 3; issue #10): solve times, gaps,
 the chip scenario search and the pruning defaults.
 
-`run_bench(store, ...)` samples `deadlines` (season, gw_index) pairs from 2021/22-2024/25 and
-2026/27 (never the holdout; the last season only up to now), builds a template and a
-seeded random start state at each (`start_states`, no chips used: every chip scenario is
-open) and plans with both xP models (`ep_next`, `rolling`). Per case (deadline × start ×
-xP) it records:
+`run_bench(store, ...)` samples `deadlines` (season, gw_index) pairs from `seasons`
+(default 2021/22-2024/25 and 2026/27; never the holdout; the last season only up to now),
+builds a template and a seeded random start state at each (`start_states`, no chips used:
+every chip scenario is open) and plans with each of `xp_models` (default `ep_next`,
+`rolling`; `v1` too, Phase 5b). Per case (deadline × start × xP) it records:
 
 - `nochip`: input build (`PlanInput.from_context`), model build and HiGHS solve time,
   final gap and status of the default no-chip solve (`OptimizerParams()`);
@@ -15,10 +15,15 @@ xP) it records:
   `all_chips` cases also the exhaustive search (`scenario_search="all"`), checked equal
   (undetermined when a limit stopped a solve),
   and the chip search at a tight gap with the default pool vs dominance pruning only;
+- `fixed_bench`: for a frame with the minutes model's `p_play` (`v1`), the default no-chip
+  solve again with the fixed bench weights (`bench_from_minutes=False`): time and
+  objective (a different objective, for the solve-time impact of the per-GW weights);
 - `prune`: the no-chip solve at a tight gap (`PRUNE_GAP`) per pruning variant
   (`PRUNE_VARIANTS`, from no pruning at all to small N), with candidates, solve time and
   the objective loss vs the best variant (the unpruned pool is the reference: same
-  objective, more candidates).
+  objective, more candidates). For a frame with `e_minutes` (`v1`) also the expected-
+  minutes floors `floors` (`floor_<m>`: the default top-N and dominance after a floor of m
+  minutes over the horizon), with `floor_loss` = objective(floor 0) − objective(floor m).
 
 The CLI (`fplopt optimize bench`) prints `summary_text` and writes `cases.csv`,
 `prune.csv` and `summary.json`. Reads data only through the store's views.
@@ -50,11 +55,13 @@ log = logging.getLogger(__name__)
 BENCH_SEASONS = (2021, 2022, 2023, 2024, 2026)  # ep_next exists from 2021/22; 2025 = holdout
 XP_MODELS = ("ep_next", "rolling")
 PRUNE_GAP = 1e-4  # tight, so pruning losses aren't hidden by the MIP gap
+# Expected-minutes floors (over the horizon) measured for frames with e_minutes (Task 8).
+FLOORS = (0.0, 30.0, 60.0, 90.0, 135.0, 180.0)
 # Pruning variants: OptimizerParams overrides. "none" (every pool player) is the reference.
 PRUNE_VARIANTS: Mapping[str, dict[str, Any]] = {
-    "none": {"prune_n": None, "prune_dominated": False},
-    "dominance": {"prune_n": None},
-    "default": {},  # 20/60/60/30 + dominance
+    "none": {"prune_n": None, "prune_dominated": False, "min_minutes": 0.0},
+    "dominance": {"prune_n": None, "min_minutes": 0.0},
+    "default": {},  # 20/60/60/30 + dominance (+ the default minutes floor)
     "n10_30": {"prune_n": {1: 10, 2: 30, 3: 30, 4: 15}},
     "n5_15": {"prune_n": {1: 5, 2: 15, 3: 15, 4: 8}},
 }
@@ -151,6 +158,7 @@ def bench_case(
     *,
     chips_all: bool,
     prune_study: bool,
+    floors: Sequence[float] = FLOORS,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """The case's row of measurements and its pruning rows (module docstring)."""
     state, pool, xp, rules = build_case(store, caches, case)
@@ -174,7 +182,16 @@ def bench_case(
         "status": plan.status,
         "nodes": plan.n_nodes,
         "objective": plan.total_objective,
+        "minutes_bench": problem.bench_weights is not None,
     }
+    if problem.bench_weights is not None:
+        fixed = replace(params, bench_from_minutes=False)
+        fixed_plan = solve_plan(PlanInput.from_context(state, pool, xp, rules, fixed), fixed)
+        row |= {
+            "fixed_bench_solve_s": fixed_plan.solve_seconds,
+            "fixed_bench_objective": fixed_plan.total_objective,
+            "fixed_bench_status": fixed_plan.status,
+        }
     top3 = optimize(problem, params, top_k=3, chips=False, roll=True)
     row |= {"top3_s": top3.seconds, "top3_plans": len(top3.plans)}
     chips = optimize(problem, params, top_k=1, chips=True, roll=False)
@@ -210,7 +227,11 @@ def bench_case(
         )
     prune_rows: list[dict[str, Any]] = []
     if prune_study:
-        for variant, overrides in PRUNE_VARIANTS.items():
+        variants = dict(PRUNE_VARIANTS)
+        if "e_minutes" in xp.columns:
+            for floor in sorted({0.0, *(float(f) for f in floors)}):
+                variants[f"floor_{floor:g}"] = {"min_minutes": floor}
+        for variant, overrides in variants.items():
             p = replace(params, mip_gap=PRUNE_GAP, **overrides)
             prob, input_s = _timed(lambda p=p: PlanInput.from_context(state, pool, xp, rules, p))
             sol = solve_plan(prob, p)
@@ -229,8 +250,11 @@ def bench_case(
                 }
             )
         best = max(r["objective"] for r in prune_rows)
+        no_floor = next((r["objective"] for r in prune_rows if r["variant"] == "floor_0"), None)
         for r in prune_rows:
             r["loss"] = best - r["objective"]
+            if no_floor is not None and r["variant"].startswith("floor_"):
+                r["floor_loss"] = no_floor - r["objective"]
     return row, prune_rows
 
 
@@ -241,12 +265,18 @@ class BenchResult:
     config: dict[str, Any]
 
 
-def bench_cases(store: DataStore, deadlines: int, seed: int) -> list[BenchCase]:
-    """Template and random:<seed + i> starts at each sampled deadline, × both xP models."""
+def bench_cases(
+    store: DataStore,
+    deadlines: int,
+    seed: int,
+    seasons: Iterable[int] = BENCH_SEASONS,
+    xp_models: Sequence[str] = XP_MODELS,
+) -> list[BenchCase]:
+    """Template and random:<seed + i> starts at each sampled deadline, × each xP model."""
     out = []
-    for i, (season, gw_index) in enumerate(bench_deadlines(store, deadlines, seed)):
+    for i, (season, gw_index) in enumerate(bench_deadlines(store, deadlines, seed, seasons)):
         for start in ("template", f"random:{seed + i}"):
-            out += [BenchCase(season, gw_index, start, xp) for xp in XP_MODELS]
+            out += [BenchCase(season, gw_index, start, xp) for xp in xp_models]
     return out
 
 
@@ -258,15 +288,20 @@ def run_bench(
     params: OptimizerParams | None = None,
     all_chips: int = 0,
     prune_study: bool = True,
+    seasons: Iterable[int] = BENCH_SEASONS,
+    xp_models: Sequence[str] = XP_MODELS,
+    floors: Sequence[float] = FLOORS,
     progress: Callable[[str], None] = log.info,
 ) -> BenchResult:
     """Run the benchmark (module docstring). `all_chips`: on how many cases (the first)
     to also run the exhaustive chip search; `prune_study=False` skips the pruning
-    variants."""
+    variants; `floors`: the expected-minutes floors of the pruning study (frames with
+    `e_minutes` only)."""
     params = OptimizerParams() if params is None else params
+    seasons = tuple(sorted(set(seasons)))
     caches = Caches()
     rows, prune_rows = [], []
-    cases = bench_cases(store, deadlines, seed)
+    cases = bench_cases(store, deadlines, seed, seasons, xp_models)
     for k, case in enumerate(cases):
         try:
             row, prows = bench_case(
@@ -276,6 +311,7 @@ def run_bench(
                 params,
                 chips_all=len(rows) < all_chips,
                 prune_study=prune_study,
+                floors=floors,
             )
         except StartStateError as exc:
             progress(f"[{k + 1}/{len(cases)}] {case.name}: skipped ({exc})")
@@ -300,6 +336,9 @@ def run_bench(
         "all_chips": all_chips,
         "prune_study": prune_study,
         "prune_gap": PRUNE_GAP,
+        "seasons": list(seasons),
+        "xp_models": list(xp_models),
+        "floors": [float(f) for f in floors],
         "params": {
             "horizon": params.horizon,
             "decay": params.decay,
@@ -307,6 +346,8 @@ def run_bench(
             "threads": params.threads,
             "prune_n": None if params.prune_n is None else dict(params.prune_n),
             "prune_dominated": params.prune_dominated,
+            "bench_from_minutes": params.bench_from_minutes,
+            "min_minutes": params.min_minutes,
         },
         "prune_variants": {k: _plain(v) for k, v in PRUNE_VARIANTS.items()},
     }
@@ -351,6 +392,8 @@ def summarize(result: BenchResult) -> dict[str, Any]:
             "n_candidates",
         )
     }
+    if "fixed_bench_solve_s" in cases:
+        timings["fixed_bench_solve_s"] = _stats(cases["fixed_bench_solve_s"])
     out: dict[str, Any] = {"n_cases": len(cases), "timings": timings}
     if "chips_all_s" in cases:
         done = cases.dropna(subset=["chips_all_s"])
@@ -370,6 +413,15 @@ def summarize(result: BenchResult) -> dict[str, Any]:
                 "solve_s": _stats(group["solve_s"]),
                 "loss": _stats(group["loss"]),
                 "n_loss_over_0.1": int((group["loss"] > 0.1).sum()),
+                **(
+                    {
+                        "floor_loss": _stats(group["floor_loss"]),
+                        "n_floor_loss_over_0.1": int((group["floor_loss"] > 0.1).sum()),
+                        "n_cases": len(group),
+                    }
+                    if "floor_loss" in group and group["floor_loss"].notna().any()
+                    else {}
+                ),
             }
             for variant, group in result.prune.groupby("variant", sort=False)
         }
@@ -396,6 +448,8 @@ def summary_text(summary: Mapping[str, Any]) -> str:
         ("  MILPs solved", "n_solves", 0),
         ("candidates", "n_candidates", 0),
     ]
+    if "fixed_bench_solve_s" in summary["timings"]:
+        rows.insert(3, ("  fixed bench weights (s)", "fixed_bench_solve_s", 2))
     width = max(len(r[0]) for r in rows)
     lines = [f"{summary['n_cases']} cases (median / p90 / max)"]
     lines.append(f"{'':{width}}  {'median':>8} {'p90':>8} {'max':>8}")
@@ -438,4 +492,22 @@ def summary_text(summary: Mapping[str, Any]) -> str:
                 str(s["n_loss_over_0.1"]),
             ]
             lines.append(f"{variant:<14}" + "".join(f"{c:>11}" for c in cells))
+        floors = {v: s for v, s in summary["prune"].items() if "floor_loss" in s}
+        if floors:
+            lines.append(
+                "\nMinutes floors (loss vs floor 0 = objective(floor 0) - objective(floor), "
+                "points; frames with e_minutes)"
+            )
+            header = ("variant", "cases", "cands med", "solve med", "loss med", "loss max", ">0.1")
+            lines.append(f"{header[0]:<14}" + "".join(f"{h:>11}" for h in header[1:]))
+            for variant, s in floors.items():
+                cells = [
+                    str(s["n_cases"]),
+                    fmt(s["n_candidates"]["median"], 0),
+                    fmt(s["solve_s"]["median"]),
+                    fmt(s["floor_loss"]["median"], 3),
+                    fmt(s["floor_loss"]["max"], 3),
+                    str(s["n_floor_loss_over_0.1"]),
+                ]
+                lines.append(f"{variant:<14}" + "".join(f"{c:>11}" for c in cells))
     return "\n".join(lines)

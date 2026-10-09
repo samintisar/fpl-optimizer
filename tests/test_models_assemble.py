@@ -18,6 +18,7 @@ from fplopt.models import MODELS
 from fplopt.models.assemble import (
     FIXTURE_COLUMNS,
     GW_COMPONENTS,
+    GW_EXTRAS,
     POINT_COLUMNS,
     V1Params,
     calibrate_inputs,
@@ -405,10 +406,10 @@ def test_v1_frame_schema_doubles_and_blanks(league):
     fixtures = predict_fixtures(view, fit)
     out = gw_frame(view, fixtures)
     base = [name for name, _ in XP_DTYPES]
-    assert list(out.columns) == [*base, *GW_COMPONENTS]
+    assert list(out.columns) == [*base, *GW_COMPONENTS, *GW_EXTRAS]
     assert dict(out.dtypes) == {
         **{name: np.dtype(dtype) for name, dtype in XP_DTYPES},
-        **{name: np.dtype("float64") for name in GW_COMPONENTS},
+        **{name: np.dtype("float64") for name in (*GW_COMPONENTS, *GW_EXTRAS)},
     }
     assert out.index.equals(pd.RangeIndex(len(out)))
     pool = player_pool(view)
@@ -429,11 +430,19 @@ def test_v1_frame_schema_doubles_and_blanks(league):
     np.testing.assert_allclose(double["xp"], sums.loc[double["player_key"], "xp"])
     np.testing.assert_allclose(double["e_minutes"], sums.loc[double["player_key"], "e_minutes"])
     assert double["p_start"].isna().all() and double["p_cs"].isna().all()
+    # P(plays in at least one fixture): independent fixtures in a double, p_play in a
+    # single GW, 0 in a blank.
+    neither = (1.0 - in_double["p_play"]).groupby(in_double["player_key"]).prod()
+    np.testing.assert_allclose(
+        double["p_play_gw"], 1.0 - neither.loc[double["player_key"]].to_numpy()
+    )
+    assert (blank["p_play_gw"] == 0).all()
     single = out[(out["gw"] == 6)].merge(
         fixtures[fixtures["gw"] == 6], on="player_key", suffixes=("", "_fixture")
     )
     np.testing.assert_allclose(single["p_cs"], single["p_60_fixture"] * single["p_cs_fixture"])
     np.testing.assert_allclose(single["p_min_0"] + single["p_min_1_59"] + single["p_min_60"], 1.0)
+    np.testing.assert_allclose(single["p_play_gw"], single["p_play"])
     assert (out["xp"].abs() < 20).all() and out["xp"].notna().all()
 
 

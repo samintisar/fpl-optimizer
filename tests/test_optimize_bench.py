@@ -129,3 +129,55 @@ def test_same_plan_is_undetermined_when_a_limit_stopped_a_solve() -> None:
     summary = summarize(BenchResult(cases.assign(**timings), pd.DataFrame(), {}))
     assert summary["chips_all"]["matches"] == 1 and summary["chips_all"]["undetermined"] == 1
     assert "same best plan in 1/2 (1 undetermined" in summary_text(summary)
+
+
+class _MinutesCaches:
+    """`Caches` whose xP frames carry the minutes columns (as v1's do), on rolling xP:
+    expected minutes 90 per GW for players with positive xP, else 10; P(play) 0.9."""
+
+    def __init__(self) -> None:
+        from fplopt.backtest.simulator import Caches
+
+        self._caches = Caches()
+
+    def pool(self, store, view):
+        return self._caches.pool(store, view)
+
+    def xp(self, store, model, view):
+        frame = self._caches.xp(store, "rolling", view)
+        minutes = frame["xp"].gt(0).map({True: 90.0, False: 10.0}).astype("float64")
+        return frame.assign(p_play=0.9, e_minutes=minutes)
+
+
+def test_bench_case_measures_minutes_floors_and_fixed_bench(league) -> None:
+    """Task 8: frames with minutes get the floor variants (loss vs floor 0) and a no-chip
+    solve with the fixed bench weights; the no-floor references stay floor-free."""
+    from fplopt.optimize import OptimizerParams
+    from fplopt.optimize.bench import BenchCase, bench_case
+
+    season, gw_index = bench_deadlines(league, 1, seed=3, seasons=(2023,))[0]
+    case = BenchCase(season, max(gw_index, 3), "random:1", "v1")
+    params = OptimizerParams(horizon=2, prune_n={1: 4, 2: 8, 3: 8, 4: 5}, time_limit=60.0)
+    row, prune = bench_case(
+        league,
+        _MinutesCaches(),
+        case,
+        params,
+        chips_all=False,
+        prune_study=True,
+        floors=(0.0, 60.0, 500.0),
+    )
+    assert row["minutes_bench"] and "fixed_bench_solve_s" in row
+    variants = [r["variant"] for r in prune]
+    assert variants[-3:] == ["floor_0", "floor_60", "floor_500"]
+    by = {r["variant"]: r for r in prune}
+    assert by["floor_0"]["floor_loss"] == 0.0 and "floor_loss" not in by["none"]
+    # No player reaches 500 expected minutes over 2 GWs: only the owned squad is left.
+    assert by["floor_500"]["n_candidates"] == 15
+    assert by["floor_500"]["floor_loss"] >= -1e-6
+    assert by["none"]["n_candidates"] >= by["floor_60"]["n_candidates"]
+    summary = summarize(BenchResult(pd.DataFrame([row]), pd.DataFrame(prune), {}))
+    assert "floor_loss" in summary["prune"]["floor_60"]
+    assert "floor_loss" not in summary["prune"]["none"]
+    text = summary_text(summary)
+    assert "Minutes floors" in text and text.isascii()
