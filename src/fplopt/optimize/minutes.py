@@ -9,9 +9,10 @@ keep the fixed `params.bench_weights` exactly). Per horizon GW t:
   GW t's xP (`projected_xi`: the same rule as `backtest.policies.best_lineup`, each
   position's minimum by xP, then the best of the rest within the maximums; ties by
   player_key). It is computed once for the incumbent squad, not for each plan's squad, so
-  the weights are constants and the MILP stays linear. A plan that changes the squad
-  (transfers, a Wildcard or Free Hit, GW1 rebuilds) is weighted with the incumbent's
-  starters' risks, an approximation;
+  the weights are constants and the MILP stays linear. A plan's transfers are weighted
+  with the incumbent's starters' risks, an approximation; where the squad is rebuilt
+  (GW1's unlimited transfers, a Free Hit's GW, every GW from a Wildcard on) the fixed
+  weights apply instead (`problem.PlanInput.from_context`, `model._Model.bench_weights`);
 - **q_i = P(starter i doesn't play)** in GW t: 1 − `p_play_gw` (P(plays in at least one
   of the GW's fixtures); `v1` computes it as 1 − Π_f (1 − p_play_f), fixtures independent),
   else 1 − `p_play`. In a double GW `p_play` is NaN and `p_play_gw` is the product rule,
@@ -48,13 +49,12 @@ Pure: no I/O.
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
-from fplopt.backtest.rules import Rules
+from fplopt.backtest.rules import Rules, best_xi
 from fplopt.backtest.state import GOALKEEPER
 
 P_PLAY = "p_play"  # P(plays) per player-GW; NaN in a double GW (v1)
@@ -62,15 +62,21 @@ P_PLAY_GW = "p_play_gw"  # P(plays in at least one of the GW's fixtures) (v1)
 E_MINUTES = "e_minutes"  # expected minutes per player-GW, summed over the GW's fixtures
 
 
+def _add_bernoulli(dist: np.ndarray, value: float) -> np.ndarray:
+    """The distribution of N + B for dist[n] = P(N = n) and B ~ Bernoulli(value), independent
+    (value clipped to [0, 1])."""
+    p = min(max(float(value), 0.0), 1.0)
+    out = np.append(dist * (1.0 - p), 0.0)
+    out[1:] += dist * p
+    return out
+
+
 def poisson_binomial_tail(q: Iterable[float], k_max: int) -> tuple[float, ...]:
     """(P(N ≥ 1), ..., P(N ≥ k_max)) for N = Σ_i Bernoulli(q_i), independent (q clipped
     to [0, 1])."""
     dist = np.ones(1)  # dist[n] = P(N = n) over the q seen so far
     for value in q:
-        p = min(max(float(value), 0.0), 1.0)
-        nxt = np.append(dist * (1.0 - p), 0.0)
-        nxt[1:] += dist * p
-        dist = nxt
+        dist = _add_bernoulli(dist, value)
     tail = np.cumsum(dist[::-1])[::-1]  # tail[k] = P(N >= k)
     return tuple(
         float(min(max(tail[k], 0.0), 1.0)) if k < len(tail) else 0.0 for k in range(1, k_max + 1)
@@ -94,10 +100,7 @@ def skip_aware_tail(q_starters: Iterable[float], p_bench: Sequence[float]) -> tu
     for value in p_bench:
         reach = [tail[s + 1] if s + 1 < len(tail) else 0.0 for s in range(len(dist))]
         out.append(float(min(max(np.dot(dist, reach), 0.0), 1.0)))
-        p = min(max(float(value), 0.0), 1.0)
-        nxt = np.append(dist * (1.0 - p), 0.0)
-        nxt[1:] += dist * p
-        dist = nxt
+        dist = _add_bernoulli(dist, value)
     return tuple(out)
 
 
@@ -110,19 +113,7 @@ def projected_xi(
     or NaN xP counts as 0; ties by player_key."""
 
     order = sorted(players, key=lambda p: (-_xp(xp, p[0]), p[0]))
-    starters: list[tuple[int, int]] = []
-    counts: Counter[int] = Counter()
-    for et, n in sorted(rules.play_min.items()):
-        picked = [p for p in order if p[1] == et][:n]
-        starters += picked
-        counts[et] += len(picked)
-    for player in order:
-        if len(starters) >= rules.squad_play:
-            break
-        if player not in starters and counts[player[1]] < rules.play_max[player[1]]:
-            starters.append(player)
-            counts[player[1]] += 1
-    return tuple(k for k, _ in starters)
+    return tuple(k for k, _ in best_xi(order, rules))
 
 
 def not_play_probabilities(xp: pd.DataFrame) -> pd.Series | None:
@@ -198,16 +189,15 @@ def minutes_bench_weights(
 def horizon_minutes(
     xp: pd.DataFrame, horizons: Sequence[int], keys: np.ndarray
 ) -> np.ndarray | None:
-    """Expected minutes per player of `keys`, summed over `horizons` (NaN and missing rows
-    count 0); None when the frame has no `e_minutes`."""
+    """Expected minutes per player of `keys`, summed over `horizons` (a player without rows,
+    e.g. one who left the game, counts 0); None when the frame has no `e_minutes`. A NaN
+    raises: counted as 0 it would silently drop the player as a candidate (the floor)."""
     if E_MINUTES not in xp.columns:
         return None
     rows = xp[xp["horizon"].isin(list(horizons))]
-    minutes = (
-        pd.Series(
-            rows[E_MINUTES].astype("float64").fillna(0.0).to_numpy(), index=rows["player_key"]
-        )
-        .groupby(level=0)
-        .sum()
-    )
+    values = rows[E_MINUTES].astype("float64")
+    if values.isna().any():
+        bad = sorted(rows.loc[values.isna(), "player_key"].unique().tolist())[:10]
+        raise ValueError(f"NaN e_minutes in the xP frame, e.g. players {bad}")
+    minutes = pd.Series(values.to_numpy(), index=rows["player_key"]).groupby(level=0).sum()
     return minutes.reindex(keys).fillna(0.0).to_numpy(dtype="float64")

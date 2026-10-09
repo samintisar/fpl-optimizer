@@ -1,6 +1,8 @@
 """Bonus, saves, cards/own goals and their per-fixture rates (`fplopt.models.components`) on
 hand-made rows and the synthetic league."""
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -8,6 +10,7 @@ from scipy.stats import nbinom
 from synthetic_season import synthetic_tables
 
 from fplopt.features.store import DataStore
+from fplopt.models import components
 from fplopt.models.components import (
     BONUS_FEATURES,
     COMPONENT_COLUMNS,
@@ -311,12 +314,12 @@ def test_defcon_rates_shrink_current_season_rows_toward_the_position_mean(defcon
         assert means[position] == pytest.approx(expected)
     k = {2: 3.0, 3: 2.0, 4: 2.0}
     per_player = seen.groupby(["player_key", "element_type"])[["count", "e"]].sum()
-    assert set(players) == {key for key, _ in per_player.index}
+    assert set(players) == set(per_player.index)
     for (key, position), row in per_player.iterrows():
         expected = (row["count"] + k[position] * means[position]) / (row["e"] + k[position])
-        assert players[key] == pytest.approx(expected)
+        assert players[(key, position)] == pytest.approx(expected)
     goalkeepers = positions.loc[positions["element_type"] == 1, "player_key"]
-    assert not set(goalkeepers) & set(players)
+    assert not set(goalkeepers) & {key for key, _ in players}
 
 
 def test_defcon_rates_see_only_the_visible_current_season(defcon_tables):
@@ -357,7 +360,7 @@ def test_predicted_defcon_rates_by_position(defcon_tables):
     assert (out.loc[keeper, ["defcon_rate", "defcon_r"]] == 0).all().all()
     outfield = out[~keeper]
     expected = [
-        players.get(key, means[position])
+        players.get((key, position), means[position])
         for key, position in zip(outfield["player_key"], outfield["element_type"], strict=True)
     ]
     np.testing.assert_allclose(outfield["defcon_rate"], expected)
@@ -365,3 +368,25 @@ def test_predicted_defcon_rates_by_position(defcon_tables):
     np.testing.assert_array_equal(
         outfield["defcon_r"], outfield["element_type"].map(dict(fit.params.defcon_r))
     )
+
+
+def test_no_defcon_rates_where_the_rules_score_none(defcon_tables, monkeypatch):
+    # Develop/validate rules score no defcon: the rates are 0 and never computed.
+    view = view_at(defcon_tables, 2026, 5)
+    minutes = predict_minutes(view, fit_minutes(view, MINUTES))
+    team = team_lambdas(view, fit_team(view))
+    fit = fit_components(view)
+    shares = fit_shares(view)
+    rules = components.backtest_rules(2026)
+    monkeypatch.setattr(
+        components,
+        "backtest_rules",
+        lambda season: dataclasses.replace(rules, defcon_enabled=False),
+    )
+
+    def fail(*args):
+        raise AssertionError("defcon_rates called")
+
+    monkeypatch.setattr(components, "defcon_rates", fail)
+    out = predict_components(view, fit, minutes, team, shares)
+    assert (out["defcon_rate"] == 0).all()

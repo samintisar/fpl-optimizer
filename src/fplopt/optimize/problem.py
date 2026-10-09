@@ -20,7 +20,9 @@ context into plain, immutable data the MILP is built from:
 - bench weights: with `params.bench_from_minutes` and a frame that carries `p_play`
   (`v1`), per horizon GW from the incumbent squad's P(starter doesn't play)
   (`minutes.minutes_bench_weights`, `PlanInput.bench_weights`); otherwise None, and the
-  model uses the fixed `params.bench_weights` (the baseline models, unchanged).
+  model uses the fixed `params.bench_weights` (the baseline models, unchanged). Also None
+  at GW1, where unlimited transfers rebuild the squad (Wildcard and Free Hit GWs: the
+  model, `model._Model.bench_weights`).
 
 Pure: no I/O.
 """
@@ -195,7 +197,9 @@ class PlanInput:
                 )
             )
         bench_weights = None
-        if params.bench_from_minutes:
+        # GW1 (unlimited transfers) rebuilds the squad freely: the incumbent's minutes say
+        # little about the bench of the squad it builds, so the fixed weights apply.
+        if params.bench_from_minutes and state.gw_index != 1:
             squad = [(h.player_key, h.element_type) for h in state.holdings]
             bench_weights = minutes_bench_weights(squad, xp, horizons, rules, params.bench_weights)
         return cls(

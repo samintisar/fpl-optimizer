@@ -23,6 +23,7 @@ from optimize_fixtures import (  # noqa: E402
 
 from fplopt.optimize import OptimizerParams, PlanInput  # noqa: E402
 from fplopt.optimize.minutes import (  # noqa: E402
+    horizon_minutes,
     minutes_bench_weights,
     not_play_probabilities,
     poisson_binomial_tail,
@@ -215,11 +216,8 @@ def test_projected_xi_sums_a_double_gws_rows() -> None:
     )
     frame = pd.concat([frame[frame["player_key"] != benched], split], ignore_index=True)
     weights = minutes_bench_weights(squad, frame, [0], RULES, DEFAULT_BENCH_WEIGHTS)
-    (w,) = weights
-    if et[benched] == 1:
-        assert w[0] == pytest.approx(0.25)
-    else:
-        assert w[1] == pytest.approx(0.25)
+    # The benched outfielder now starts (q = 0.25); everyone else always plays.
+    assert weights == ((0.0, 0.25, 0.0, 0.0),)
 
 
 def test_weights_never_increase_down_the_bench_and_blanks_never_play() -> None:
@@ -336,6 +334,35 @@ def test_bench_boost_weights_stay_one() -> None:
     assert chip_extra(fixed, params, 1, "bboost") != pytest.approx(params.decay * expected)
 
 
+def test_rebuilt_squads_use_the_fixed_weights() -> None:
+    # GW1's unlimited transfers rebuild the squad: no minutes-based weights.
+    state, pool, xp = instance(6, n_gws=3, gw_index=1)
+    params = replace(EXACT, horizon=3)
+    assert PlanInput.from_context(state, pool, with_minutes(xp, 0.8), RULES, params).gw1
+    assert (
+        PlanInput.from_context(state, pool, with_minutes(xp, 0.8), RULES, params).bench_weights
+        is None
+    )
+    # A Free Hit's GW and every GW from a Wildcard on use the fixed weights; others the
+    # minutes-based ones.
+    state, pool, xp = instance(6, n_gws=3)
+    frame = with_minutes(xp, 0.8)
+    problem = PlanInput.from_context(state, pool, frame, RULES, params)
+    assert problem.bench_weights is not None
+
+    def bench_xp(plan, t, weights):
+        target = frame[frame["horizon"] == t]
+        values = dict(zip(target["player_key"], target["xp"], strict=True))
+        return sum(w * values[k] for w, k in zip(weights, plan.gws[t].bench, strict=True))
+
+    fixed = params.bench_weights
+    for chips, rebuilt in (({1: "freehit"}, {1}), ({1: "wildcard"}, {1, 2})):
+        plan = solve_plan(problem, params, chips=chips)
+        for t in range(3):
+            weights = fixed if t in rebuilt else problem.bench_weights[t]
+            assert plan.gws[t].bench_xp == pytest.approx(bench_xp(plan, t, weights)), (chips, t)
+
+
 # --- minutes floor ------------------------------------------------------------------------
 
 
@@ -390,6 +417,16 @@ def test_min_minutes_validation() -> None:
         with pytest.raises(ValueError, match="bench_from_minutes"):
             OptimizerParams(bench_from_minutes=bad)
     assert OptimizerParams().min_minutes == 180.0  # Task 8 benchmark
+
+
+def test_nan_expected_minutes_raise() -> None:
+    frame = pd.DataFrame(
+        {"player_key": [1, 2], "horizon": [0, 0], "xp": [1.0, 2.0], "e_minutes": [90.0, np.nan]}
+    )
+    with pytest.raises(ValueError, match="NaN e_minutes"):
+        horizon_minutes(frame, [0], np.array([1, 2]))
+    # A player without rows (left the game) counts 0.
+    np.testing.assert_allclose(horizon_minutes(frame.iloc[:1], [0], np.array([1, 2])), [90, 0])
 
 
 def test_floor_is_pro_rata_on_a_short_horizon() -> None:

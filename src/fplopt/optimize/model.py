@@ -48,7 +48,9 @@ Chips (one fixed `ChipScenario` per solve, `chips.py`):
   GW continues from the persistent squad and bank (the revert of `state.next_state`).
 - **Bench Boost** GW: every bench weight is 1 (all 15 count, no autosub weighting).
   Otherwise GW t's weights are `PlanInput.gw_bench_weights(t)`: from the minutes model
-  per GW (`minutes.minutes_bench_weights`) or the fixed `params.bench_weights`.
+  per GW (`minutes.minutes_bench_weights`) or the fixed `params.bench_weights`; the fixed
+  ones in a Free Hit GW and from a Wildcard on (the minutes-based weights describe the
+  incumbent squad, which those chips replace).
 - **Triple Captain** GW: the captain's xP counts 3× (2 extra instead of 1).
 
 Objective (maximised), with h_t the GW's horizon offset:
@@ -240,6 +242,12 @@ class _Model:
         if self.chips and rules.chip_week_ft not in CHIP_WEEK_FT:
             raise ValueError(f"chip_week_ft {rules.chip_week_ft!r} not in {CHIP_WEEK_FT}")
         self.fh = frozenset(t for t, c in self.chips.items() if c == "freehit")
+        # GWs whose squad a chip rebuilds: a Free Hit's GW, every GW from a Wildcard on.
+        # The minutes-based bench weights describe the incumbent squad, not a rebuilt one.
+        wildcard = min((t for t, c in self.chips.items() if c == "wildcard"), default=None)
+        self.rebuilt = self.fh | frozenset(
+            t for t in self.T if wildcard is not None and t >= wildcard
+        )
         self.cap = rules.max_free_transfers
         self.big_m = rules.squad_size + self.cap + sum(a for _, a in rules.ft_topups) + 1
         self._variables()
@@ -327,10 +335,13 @@ class _Model:
         return self.fh_squad[k, t] if t in self.fh else self.squad[k, t]
 
     def bench_weights(self, t: int) -> tuple[float, ...]:
-        """GW t's bench weights: 1 under Bench Boost, else the problem's (minutes-based
-        per GW, or the fixed `params.bench_weights`)."""
+        """GW t's bench weights: 1 under Bench Boost; the fixed `params.bench_weights` in a
+        GW a Wildcard or Free Hit rebuilds; else the problem's (minutes-based per GW, or
+        the fixed weights)."""
         if self.chips.get(t) == "bboost":
             return (1.0,) * len(self.params.bench_weights)
+        if t in self.rebuilt:
+            return self.params.bench_weights
         return self.problem.gw_bench_weights(t, self.params)
 
     def captain_extra(self, t: int) -> float:

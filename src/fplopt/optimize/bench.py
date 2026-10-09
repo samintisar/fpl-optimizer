@@ -227,28 +227,31 @@ def bench_case(
         )
     prune_rows: list[dict[str, Any]] = []
     if prune_study:
-        variants = dict(PRUNE_VARIANTS)
-        if "e_minutes" in xp.columns:
-            for floor in sorted({0.0, *(float(f) for f in floors)}):
-                variants[f"floor_{floor:g}"] = {"min_minutes": floor}
+        variants = prune_variants(floors) if "e_minutes" in xp.columns else dict(PRUNE_VARIANTS)
+        solved: list[tuple[OptimizerParams, dict[str, Any]]] = []
         for variant, overrides in variants.items():
             p = replace(params, mip_gap=PRUNE_GAP, **overrides)
+            # A floor equal to the default's (floor_180 = default) is the same solve: reuse it.
+            same = next((r for q, r in solved if q == p), None)
+            if same is not None:
+                prune_rows.append({**same, "variant": variant})
+                continue
             prob, input_s = _timed(lambda p=p: PlanInput.from_context(state, pool, xp, rules, p))
             sol = solve_plan(prob, p)
-            prune_rows.append(
-                {
-                    "case": case.name,
-                    "variant": variant,
-                    "n_candidates": len(prob.players),
-                    "input_s": input_s,
-                    "build_s": sol.build_seconds,
-                    "solve_s": sol.solve_seconds,
-                    "gap": sol.mip_gap,
-                    "status": sol.status,
-                    "objective": sol.total_objective,
-                    "bound": sol.bound,
-                }
-            )
+            measured = {
+                "case": case.name,
+                "variant": variant,
+                "n_candidates": len(prob.players),
+                "input_s": input_s,
+                "build_s": sol.build_seconds,
+                "solve_s": sol.solve_seconds,
+                "gap": sol.mip_gap,
+                "status": sol.status,
+                "objective": sol.total_objective,
+                "bound": sol.bound,
+            }
+            solved.append((p, measured))
+            prune_rows.append(measured)
         best = max(r["objective"] for r in prune_rows)
         no_floor = next((r["objective"] for r in prune_rows if r["variant"] == "floor_0"), None)
         for r in prune_rows:
@@ -256,6 +259,15 @@ def bench_case(
             if no_floor is not None and r["variant"].startswith("floor_"):
                 r["floor_loss"] = no_floor - r["objective"]
     return row, prune_rows
+
+
+def prune_variants(floors: Sequence[float] = FLOORS) -> dict[str, dict[str, Any]]:
+    """The pruning study's variants for an xP frame with `e_minutes`: `PRUNE_VARIANTS` plus
+    `floor_<m>` (the default pool after an expected-minutes floor of m; 0 always included)."""
+    variants = dict(PRUNE_VARIANTS)
+    for floor in sorted({0.0, *(float(f) for f in floors)}):
+        variants[f"floor_{floor:g}"] = {"min_minutes": floor}
+    return variants
 
 
 @dataclass(frozen=True)
@@ -349,7 +361,8 @@ def run_bench(
             "bench_from_minutes": params.bench_from_minutes,
             "min_minutes": params.min_minutes,
         },
-        "prune_variants": {k: _plain(v) for k, v in PRUNE_VARIANTS.items()},
+        # floor_<m> variants run only for frames with e_minutes (v1).
+        "prune_variants": {k: _plain(v) for k, v in prune_variants(floors).items()},
     }
     return BenchResult(pd.DataFrame(rows), pd.DataFrame(prune_rows), config)
 

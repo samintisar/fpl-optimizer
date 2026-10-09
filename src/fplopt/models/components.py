@@ -90,6 +90,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
+from fplopt.backtest.rules import backtest_rules
 from fplopt.features.baseline import player_pool
 from fplopt.features.store import AsOfView
 from fplopt.models.shares import SharesFit
@@ -481,7 +482,8 @@ def defcon_counts(rows: pd.DataFrame) -> np.ndarray:
 def defcon_rates(
     view: AsOfView, params: ComponentsParams
 ) -> tuple[dict[int, float], dict[int, float]]:
-    """(per element_type the position mean, per player_key the shrunk rate), counts per 90
+    """(per element_type the position mean, per (player_key, element_type) the shrunk
+    rate), counts per 90
     minutes on the pitch, from the played `player_match` rows of the deadline's season
     visible in `view` (module docstring). Positions outside `DEFCON_POSITIONS` are left out."""
     season, _ = view.gameweek_for_deadline()
@@ -517,7 +519,7 @@ def defcon_rates(
     for (key, position), row in sums.iterrows():
         k = shrink[int(position)]
         rate = (row["count"] + k * means[int(position)]) / (row["exposure"] + k)
-        players[int(key)] = float(rate)
+        players[(int(key), int(position))] = float(rate)
     return means, players
 
 
@@ -584,16 +586,22 @@ def predict_components(
         dtype="float64",
     ).reshape(len(frame), 3)
 
-    means, players = defcon_rates(view, fit.params)
+    # Defcon rates only where the deadline season's rules score defcon (the assembly
+    # multiplies them by 0 otherwise); a rate is the player's at this position, else the
+    # position mean (a rate counted as DEF CBIT never meets a MID threshold).
+    season, _ = view.gameweek_for_deadline()
     eligible = np.isin(element_type, DEFCON_POSITIONS)
-    defcon_rate = np.array(
-        [
-            players.get(int(k), means.get(int(e), 0.0))
-            for k, e in zip(frame["player_key"].to_numpy(), element_type, strict=True)
-        ],
-        dtype="float64",
-    )
-    defcon_rate = np.where(eligible, defcon_rate, 0.0)
+    defcon_rate = np.zeros(len(frame))
+    if backtest_rules(season).defcon_enabled:
+        means, players = defcon_rates(view, fit.params)
+        defcon_rate = np.array(
+            [
+                players.get((int(k), int(e)), means.get(int(e), 0.0))
+                for k, e in zip(frame["player_key"].to_numpy(), element_type, strict=True)
+            ],
+            dtype="float64",
+        )
+        defcon_rate = np.where(eligible, defcon_rate, 0.0)
     dispersion = dict(fit.params.defcon_r)
     defcon_r = np.array([dispersion.get(int(e), 0.0) for e in element_type], dtype="float64")
 
