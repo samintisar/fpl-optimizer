@@ -219,6 +219,8 @@ Phase 5 is done when (PLAN §9):
 
   The per-decision result (own continuation, B's states, k = 4) is reported but does not gate (two seasons are too few for it, Phase 4).
 
+**Procedure amendment (2026-10-09, user-approved, before any selection run):** the develop selection runs use `--no-per-decision`. Selection is decided on the full-run mean alone, which per-decision windows cannot change; the validate run keeps the per-decision report. The runs are split between the local machine and the server, on the same commit and an identical copy of `data/`, checked first on one case with identical results.
+
 ### Task 10: Defcon (5b, wave A)
 - [ ] #14: check that FPL-Core-Insights reproduces FPL CBIT/CBIRT on 2026/27 GW1–5, then set `k` and `r` once from its 2024/25 data (research use only, never shipped).
 - [ ] The defcon component, active only for 2025/26+ rules, so develop/validate xP is unchanged. Close #14.
