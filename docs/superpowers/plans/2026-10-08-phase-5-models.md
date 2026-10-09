@@ -226,7 +226,7 @@ Phase 5 is done when (PLAN §9):
 - [ ] The defcon component, active only for 2025/26+ rules, so develop/validate xP is unchanged. Close #14.
 
 ### Task 11: Criterion 2, review, PR 5b (lead)
-- [ ] Develop tuning runs, then the single validate confirmation. Results in PLAN §7 and §12, and the §9 row marked done.
+- [x] Develop tuning runs, then the single validate confirmation. Results in PLAN §7 and §12, and the §9 row marked done. (2026-10-09: criterion 2 not met as pre-registered; full run +0.74/GW, CI lower bound −0.85. PLAN §7 *Phase 5 results*.)
 - [ ] Review, PR, merge with the go-ahead, server update.
 
 ---

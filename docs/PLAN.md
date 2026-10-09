@@ -490,8 +490,8 @@ max Σ_t decay^t · [ Σ xP·lineup + xP·captain + Σ_k bench_xP_k + chip terms
 | Parameter | Start value |
 |---|---|
 | Horizon | 6 GWs |
-| Decay | 0.85 per GW |
-| Hits | `max_hits` 0: never (chosen conservatively, Phase 4 results; re-test with Phase 5 models); `hit_margin` (hits only if gain > 4 + margin) only applies with `max_hits` > 0 |
+| Decay | 0.85 per GW (with v1: 0.75, chosen on develop, §7 *Phase 5 results*; passed in the spec, the code default is unchanged) |
+| Hits | `max_hits` 0: never (chosen conservatively, Phase 4 results; with v1: `max_hits` 1, `hit_margin` 2, chosen on develop, §7 *Phase 5 results*); `hit_margin` (hits only if gain > 4 + margin) only applies with `max_hits` > 0 |
 | Money in the bank | `itb_value` 0 |
 | FT value | concave, see above |
 | Bench | P(needed)-weighted; fixed fallback above |
@@ -586,6 +586,41 @@ Horizon, decay and FT value are confounded — tune them jointly.
   - **Acceptance (PLAN §9 "beats greedy"): not met out of sample with the baseline xP.** With the Task 5 starts the full-run edge is a develop-season effect (validate ≈ 0, 2021/22 dominant, season-level p > 0.10, small after deflation); with another start set the split pattern flips (validate +2.66, develop +0.11), so the edge is not stable; per decision it is negative with the roll continuation and, with each arm's own continuation, positive but reference-dependent and not significant at the season level (p ≥ 0.22). Decision (2026-10-08, §12): merge Phase 4 (backtest end-to-end, open-fpl-solver match, solve times — the other three criteria — are met) and move "beats greedy" to Phase 5, tested with the real xP models: develop-selected, validate-confirmed, deflated.
   - **Review fixes after these runs** (Phase 4 review, 2026-10-08): deterministic solver limits (no wall-clock limit in backtests; node limit), the solver status recorded per GW, the tie-break ε, stricter parameter validation, a robust worker pool. The rows above were run before them; the own-continuation runs above after them.
   - Multiple testing: 8 optimizer-vs-greedy variants in Task 5 (3 hit variants, itb 0 and 0.08 on each xP model, the chip run) — the N used for the deflation above. The experiment log now counts variants per comparison family (`family` column, default `<B spec> <seasons>`; `backtest compare` prints the deflated mean with that family's N, which is smaller than 8 because the Task 5 variants span several baselines and season ranges). Rows logged before the family column keep their old `n_variants` (2 per compare); their family was backfilled from the command line.
+- **Phase 5 results: optimizer vs greedy with v1 xP** (Phase 5b Task 11, 2026-10-09; criterion 2 as pre-registered in §12; `results/p5b-*`, `results/experiments.csv`; no chips; starts `template@1,random:3@1,random:3@20`; full run per GW = mean over (season, GW) cells, 80% CI, one-sided p):
+  - **Greedy threshold** (develop 2017/18–2022/23, vs the default 1.0, full run only): 2.0 +0.09/GW, 0.5 −0.14/GW. **Greedy uses threshold 2.0.**
+  - **Optimizer selection** (develop, vs greedy(v1, t 2.0), full run only, `--no-per-decision`; 8 variants = horizon {4, 6} × decay {0.75, 0.85} × hits {`max_hits` 0, `max_hits` 1 + `hit_margin` 2}):
+
+    | horizon | decay | hits | full run / GW |
+    |---|---|---|---|
+    | **6** | **0.75** | **max 1, margin 2** | **+2.22 (chosen)** |
+    | 6 | 0.85 | max 1, margin 2 | +1.58 |
+    | 4 | 0.85 | max 1, margin 2 | +1.55 |
+    | 6 | 0.85 | 0 | +1.44 |
+    | 6 | 0.75 | 0 | +1.05 |
+    | 4 | 0.85 | 0 | +0.81 |
+    | 4 | 0.75 | max 1, margin 2 | +0.63 |
+    | 4 | 0.75 | 0 | +0.59 |
+
+    Every variant beats greedy on develop. Allowing one hit helps at horizon 6 (with the Phase 4 baselines it lost).
+  - **Validate** (one run, the pre-registered command; 2023/24–2024/25, `--continuation own --reference b`, 7 min at `--jobs 7`):
+
+    | | mean | 80% CI | p (bootstrap) | p (season t) |
+    |---|---|---|---|---|
+    | full run / GW, realized | +0.74 | −0.85 to +2.37 | 0.26 | 0.090 |
+    | full run / GW, xG-scored | +0.79 | −0.19 to +1.78 | 0.14 | 0.061 |
+    | per decision / 4-GW window, realized (reported only) | +7.28 | +3.40 to +11.56 | 0.007 | 0.026 |
+    | per decision / 4-GW window, xG-scored (reported only) | +5.29 | +3.01 to +7.69 | < 0.001 | 0.008 |
+
+    - Pre-registered conditions: (1) full-run CI lower bound > 0: **fails** (−0.85); (2) same sign on xG: passes; (3) deflated mean > 0 (N = 8: 0.74 − 1.26 · √(2 ln 8)): **fails** (≈ −1.82).
+    - Both seasons positive: +0.53/GW (2023/24) and +0.96/GW (2024/25), i.e. +20 and +36 points over 38 GWs. Per start and season the optimizer makes 6 more transfers and takes ~3 hits (13 points).
+    - GW1 starts end about level (2251 vs 2249 points; template 2241 vs 2190); the gain is mostly from the GW20 starts (1183 vs 1105).
+    - Optimizer's curse: slope 1.08 (greedy 1.27), against 0.2–0.5 with the Phase 4 baseline xP. v1's predicted transfer gains are about right on average, so hits can pay.
+  - **Supplementary check, designed after the validate result** (2026-10-09, informs the decision, does not change the verdict): leave-one-season-out over the 8 develop runs (no new runs). For each develop season, pick the best variant on the other five, then score that pick on the season left out. The pick is the chosen setting (h6, d 0.75, max 1 hit) in all 6 folds, so selection among the 8 is not what drives the develop edge.
+    - Held-out season means per GW: 2017/18 +3.90, 2018/19 −0.64, 2019/20 +1.74, 2020/21 +1.48, 2021/22 +2.58, 2022/23 +4.29 (mean +2.23; the median variant is positive in 5 of 6 too).
+    - With the two validate seasons: **7 of 8 seasons positive**, mean +1.85/GW, one-sided season t-test p 0.008, sign test p 0.035.
+    - Not fully out of sample: the develop seasons also set the v1 models (5a), the greedy threshold and the bench design. The edge shrinks from develop (+2.2/GW) to validate (+0.7/GW).
+  - **Acceptance (PLAN §9 criterion 2): not met as pre-registered.** The full-run edge is positive in both validate seasons, but two seasons are too few to clear the CI and deflation bars at this size (about 5× the data for the CI bound, ~12× for the deflated mean). The per-decision test, which is what the Phase 6 go-live gate uses, favours the optimizer clearly; the supplementary check finds a positive edge in 7 of 8 seasons. No further validate runs: the open question goes to the Phase 6 holdout.
+  - Code defaults (`OptimizerParams()`) are unchanged, so earlier specs keep their meaning. The v1 settings are passed explicitly: `optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2` and `greedy:v1:threshold=2.0`.
 
 ---
 
@@ -627,7 +662,7 @@ Horizon, decay and FT value are confounded — tune them jointly.
 | 2 | `as_of` layer + leakage tests | Corrupt-the-future test passes |
 | 3 | Backtester + baselines (rolling avg, `ep_next`) + greedy policy + paired evaluation | Simulated seasons from arbitrary states; baselines scored per §5 |
 | 4 | Optimizer (transfers, captain, bench, chip scenarios, top-3) | Backtest runs end-to-end; ~~beats greedy~~ (deferred to Phase 5, §12); matches open-fpl-solver on no-chip cases; solve times acceptable — **done 2026-10-08** |
-| 5 | Real models (market-implied team model, shares, minutes, components, calibration) | Beat both baselines on component metrics in validation (tested on xP and decision metrics, §6 *Phase 5 decisions*); **and the optimizer beats greedy with Phase 5 xP** (paired, same xP: chosen on develop, confirmed on validate, deflated for the variants tried; full run and the per-decision design fixed in §11) |
+| 5 | Real models (market-implied team model, shares, minutes, components, calibration) | Beat both baselines on component metrics in validation (tested on xP and decision metrics, §6 *Phase 5 decisions*); **and the optimizer beats greedy with Phase 5 xP** (paired, same xP: chosen on develop, confirmed on validate, deflated for the variants tried; full run and the per-decision design fixed in §11) — criterion 1 met (2026-10-08); criterion 2 not met as pre-registered (2026-10-09, §12) |
 | 6 | Holdout evaluation | Single pre-registered run on 2025/26; result recorded |
 | 7 | Telegram bot + go live | `/register`, `/plan`, alerts working for my team |
 | 8 | Distributions, sensitivity analysis, uncertain fixtures, polish | Each adopted only if it beats the current policy in paired validation |
@@ -712,4 +747,5 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-08 | Phase 5 criterion 1 met on validate (2023/24–2024/25). The "no worse in any predicted-xP band" condition is judged on identical rows (bands by each model's xP and by their mean), not on each model's own bands. | v1 MSE 3.47 vs 4.35 / 4.46 (p < 0.001 at every horizon), regrets no worse. Own-band MSE compares different players: v1's high bands hold real high scorers, whose outcomes vary more; on identical rows v1 is lower in every band under every banding. |
 | 2026-10-08 | Backtests use a deterministic node limit, no wall-clock limit (60 s only for `optimize plan`/`bench`); solver status recorded per GW; tie-break ε 1e-4 per buy; parallel units on a pipe-per-worker pool. | Results must not depend on machine load (solves took up to 306 s on a loaded machine); equal-xP GWs made arbitrary transfers; ProcessPoolExecutor's queue semaphores broke under load on Windows (Phase 4 review). |
 | 2026-10-08 | football-data odds of a season archived live (2026/27 →) are available from max(assumed collection time, first raw file holding the market's whole price set); backfilled seasons keep the assumed times. | `E0.csv` lists played matches only, so the assumed Friday/Tuesday time leaked: every 2026/27 pre-match price (700 rows, GW1–5) was visible before kickoff in a replay although we first archived it on 2026-10-06; it now becomes visible only after kickoff, and replays fall back to The Odds API for upcoming matches. |
+| 2026-10-09 | Phase 5 criterion 2 **not met as pre-registered**: optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2 vs greedy:v1:threshold=2.0 on validate, full run +0.74/GW (80% CI −0.85 to +2.37; xG +0.79; deflated with N = 8 ≈ −1.82). No further validate runs. | Positive in both validate seasons but under-powered for the CI and deflation bars. Reported only: per decision +7.28 per 4-GW window (+3.40 to +11.56, p 0.007; xG +5.29); a leave-one-season-out check over the develop runs, designed after the result, gives 7 of 8 seasons positive (season t p 0.008). The question goes to the Phase 6 holdout (§7 *Phase 5 results*). |
 | 2026-10-07 | Chip scenarios searched best-first by LP/derived upper bounds (same plan as solving all); bulk PuLP→highspy hand-over; club-aware dominance pruning; top-N 20/60/60/30. | #10 benchmark: 107–750 s → median 14 s per deadline; old dominance lost up to 6.6 pts, 10/30/30/15 up to 1.0. |
