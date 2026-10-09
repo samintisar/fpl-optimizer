@@ -48,7 +48,11 @@ split into "60+" (probability p_60, on the pitch m_sixty / 90 of the match) and 
   E[floor(S / 3)] as above), floored at 0;
 - yellow / red cards and own goals = their points · rate per 90 · e_minutes / 90;
 - penalty misses = penalties_missed · e_pen_goals · (1 − c) / c (c: the club's conversion);
-- defensive contributions: `components.DEFCON` (0; Phase 5b Task 10).
+- defensive contributions, only when `rules.defcon_enabled` (2025/26+; develop/validate rules
+  score none, so their xP is unchanged): points[pos] · P(defcon), P(defcon) = Σ_parts P(part)
+  · P(N ≥ threshold[pos]), N ~ NB(defcon rate per 90 · fraction of the match on the pitch,
+  dispersion r) (`components.negbin_tail`; rate and r from `predict_components`), 0 for
+  goalkeepers (no threshold) and without a rate. Also returned as `p_defcon`.
 xP = their sum.
 
 **Per GW** (`gw_frame`): every pool player × GW from the target GW to `HORIZON` later
@@ -83,11 +87,11 @@ from fplopt.models.calibration import Calibration, apply_isotonic, calibration_f
 from fplopt.models.calibration_table import CALIBRATION_PARAMS
 from fplopt.models.components import (
     BONUS_COLUMNS,
-    DEFCON,
     GOALKEEPER,
     ComponentsFit,
     ComponentsParams,
     fit_components,
+    negbin_tail,
     predict_components,
 )
 from fplopt.models.minutes import MinutesFit, MinutesParams, conditionals, fit_minutes
@@ -135,6 +139,8 @@ FIXTURE_COLUMNS = (
     "red_rate",
     "own_goal_rate",
     "pen_miss_ratio",
+    "defcon_rate",
+    "defcon_r",
     *BONUS_COLUMNS,
 )
 POINT_COLUMNS = (
@@ -333,9 +339,37 @@ def _by_position(element_type: np.ndarray, values: Mapping[int, int]) -> np.ndar
     return np.array([lookup.get(int(e), 0) for e in element_type], dtype="float64")
 
 
+def _p_defcon(
+    frame: pd.DataFrame,
+    rules: Rules,
+    p_60: np.ndarray,
+    f_long: np.ndarray,
+    p_short: np.ndarray,
+    f_short: np.ndarray,
+) -> np.ndarray:
+    """P(defcon threshold reached) per row over the minutes split; exactly 0 where the rules
+    score no defcon, for positions without a threshold and for rows without a rate."""
+    out = np.zeros(len(frame))
+    if not rules.defcon_enabled or not len(frame):
+        return out
+    et = frame["element_type"].to_numpy(dtype="int64")
+    thresholds = {e: t for e, t in rules.defcon_threshold.items() if t is not None}
+    threshold = np.array([thresholds.get(int(e), 0) for e in et], dtype="int64")
+    rate = frame["defcon_rate"].to_numpy(dtype="float64")
+    r = frame["defcon_r"].to_numpy(dtype="float64")
+    rows = (threshold > 0) & (rate > 0) & (r > 0)
+    if not rows.any():
+        return out
+    rate, r, threshold = rate[rows], r[rows], threshold[rows]
+    long = p_60[rows] * negbin_tail(rate * f_long[rows], r, threshold)
+    short = p_short[rows] * negbin_tail(rate * f_short[rows], r, threshold)
+    out[rows] = long + short
+    return out
+
+
 def fixture_points(frame: pd.DataFrame, rules: Rules) -> pd.DataFrame:
     """`frame` (`fixture_components`, possibly calibrated) plus `p_goal`, `e_goals`,
-    `e_bonus`, `e_saves`, the `POINT_COLUMNS` and `xp` (module docstring)."""
+    `e_bonus`, `e_saves`, `p_defcon`, the `POINT_COLUMNS` and `xp` (module docstring)."""
     et = frame["element_type"].to_numpy(dtype="int64")
     p_play = frame["p_play"].to_numpy(dtype="float64")
     p_60 = np.minimum(frame["p_60"].to_numpy(dtype="float64"), p_play)
@@ -382,6 +416,7 @@ def fixture_points(frame: pd.DataFrame, rules: Rules) -> pd.DataFrame:
     e_bonus = np.clip((features * beta).sum(axis=1), 0.0, None)
     saves_points = np.where(keeper, split_floor(saves_rate, rules.saves_per_point), 0.0)
     exposure = e_minutes / 90.0
+    p_defcon = _p_defcon(frame, rules, p_60, f_long, p_short, f_short)
 
     def per_90(column: str) -> np.ndarray:
         """Expected events of a per-90 rate column over the expected minutes."""
@@ -403,8 +438,7 @@ def fixture_points(frame: pd.DataFrame, rules: Rules) -> pd.DataFrame:
         "pts_pen_miss": rules.penalties_missed
         * e_pen
         * frame["pen_miss_ratio"].to_numpy(dtype="float64"),
-        # Defensive contributions: the Phase 5b hook (Task 10), 0 until then.
-        "pts_defcon": np.full(len(frame), DEFCON),
+        "pts_defcon": p_defcon * _by_position(et, rules.defensive_contribution),
     }
     xp = np.sum([points[name] for name in POINT_COLUMNS], axis=0) if len(frame) else np.zeros(0)
     return frame.assign(
@@ -412,6 +446,7 @@ def fixture_points(frame: pd.DataFrame, rules: Rules) -> pd.DataFrame:
         e_goals=e_goals,
         e_bonus=e_bonus,
         e_saves=np.where(keeper, saves_rate * exposure, 0.0),
+        p_defcon=p_defcon,
         **points,
         xp=np.asarray(xp, dtype="float64"),
     )

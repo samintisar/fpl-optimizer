@@ -30,6 +30,8 @@ mlruns/
 # Backtest outputs; the experiment log is the tracked audit trail (PLAN §5)
 /results/*
 !/results/experiments.csv
+# Third-party research data (FPL-Core-Insights, dev/README.md): never committed or shipped
+/research/
 
 # OS / editors
 .DS_Store
