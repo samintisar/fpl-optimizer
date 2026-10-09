@@ -266,7 +266,7 @@ def prune_variants(floors: Sequence[float] = FLOORS) -> dict[str, dict[str, Any]
     `floor_<m>` (the default pool after an expected-minutes floor of m; 0 always included)."""
     variants = dict(PRUNE_VARIANTS)
     for floor in sorted({0.0, *(float(f) for f in floors)}):
-        variants[f"floor_{floor:g}"] = {"min_minutes": floor}
+        variants[f"floor_{floor:.17g}"] = {"min_minutes": floor}  # distinct floors, distinct names
     return variants
 
 
