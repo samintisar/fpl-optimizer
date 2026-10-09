@@ -35,8 +35,9 @@ weights (the MILP puts the best outfield bench player in slot 1).
 **Minutes floor** (`horizon_minutes`, used by `problem.PlanInput.from_context` when
 `OptimizerParams.min_minutes` > 0 and the frame carries `e_minutes`): a non-owned player
 whose expected minutes summed (undecayed) over the horizon GWs are below the floor is not a
-candidate (`prune.prune`, before top-N and dominance pruning). Owned players are always
-candidates.
+candidate (`prune.prune`, before top-N and dominance pruning). The floor is for a full
+`params.horizon`-GW horizon, pro rata on a shorter one (the season's end). Owned players
+are always candidates.
 
 Pure: no I/O.
 """

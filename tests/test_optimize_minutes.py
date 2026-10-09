@@ -201,7 +201,7 @@ def test_without_p_play_the_fixed_weights_and_plans_are_unchanged() -> None:
     assert plan_summary(same) == plan_summary(plan)
     # A frame with minutes, with the minutes features off, plans as the baseline frame.
     minutes = with_minutes(xp, 0.5, e_minutes=0.0)
-    off = replace(params, bench_from_minutes=False)
+    off = replace(params, bench_from_minutes=False, min_minutes=0.0)
     ignored = solve_plan(PlanInput.from_context(state, pool, minutes, RULES, off), off)
     assert plan_summary(ignored) == plan_summary(plan)
     assert repr(plan.objective) == GOLDEN_OBJECTIVE
@@ -321,3 +321,18 @@ def test_min_minutes_validation() -> None:
     with pytest.raises(ValueError, match="min_minutes"):
         OptimizerParams(min_minutes=-1.0)
     assert OptimizerParams(bench_from_minutes=0).bench_from_minutes is False
+    assert OptimizerParams().min_minutes == 180.0  # Task 8 benchmark
+
+
+def test_floor_is_pro_rata_on_a_short_horizon() -> None:
+    """The floor is for a full horizon: with 2 of 6 GWs left, 180 becomes 60."""
+    state, pool, xp = instance(8, n_gws=2)
+    owned = {h.player_key for h in state.holdings}
+    others = sorted(set(pool["player_key"]) - owned)
+    # 25 or 35 expected minutes per GW: 50 / 70 over the 2 GWs left.
+    minutes = {k: [25.0, 25.0] if k in others[:4] else [35.0, 35.0] for k in pool["player_key"]}
+    frame = with_minutes(xp, 1.0, e_minutes=minutes)
+    params = replace(EXACT, horizon=6, min_minutes=180.0)
+    kept = {p.player_key for p in PlanInput.from_context(state, pool, frame, RULES, params).players}
+    assert not set(others[:4]) & kept
+    assert set(others[4:]) | owned <= kept

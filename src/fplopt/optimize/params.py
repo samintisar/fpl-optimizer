@@ -25,8 +25,13 @@ reference check (Phase 4 Task 4) compares like with like:
   without `p_play` (the baseline models) keep `bench_weights` exactly.
 - `min_minutes`: the expected-minutes floor (PLAN §7 *Pruning*): with an xP frame that
   carries `e_minutes` (`v1`), a non-owned player with fewer expected minutes summed over the
-  horizon is not a candidate (`prune.prune`). 0 = no floor; frames without `e_minutes`
-  are not floored.
+  horizon is not a candidate (`prune.prune`). The floor is for a full `horizon`-GW horizon
+  and scales pro rata when the horizon is shorter (near the season's end: 180 over 6 GWs is
+  30 over 1). 0 = no floor; frames without `e_minutes` are not floored. **Default 180**
+  (Phase 5b Task 8, `fplopt optimize bench --xp v1`, 24 cases at 2021/22-2022/23 and
+  2026/27 deadlines, gap 1e-4): floors 30-180 lost 0 points in every case vs no floor; they
+  remove at most 5 of ~200 candidates, because top-N and dominance pruning already drop
+  most low-minute players, so solve times are unchanged.
 - `decay`: GW t (horizon offset t, target GW t = 0) is weighted decay**t, as
   open-fpl-solver's `decay_base ** (w − next_gw)`.
 - Hits cost `rules.hit_cost + hit_margin` each, inside the decay (open-fpl-solver's
@@ -89,7 +94,7 @@ DEFAULT_CHIP_VALUE = MappingProxyType({"wildcard": 6.0, "freehit": 4.0, "bboost"
 DEFAULT_PRUNE_N = MappingProxyType({1: 20, 2: 60, 3: 60, 4: 30})
 DEFAULT_NODE_LIMIT = 20_000  # HiGHS mip_max_nodes: a deterministic safety net
 DEFAULT_TIE_EPSILON = 1e-4  # points per player bought (tie-break, module docstring)
-DEFAULT_MIN_MINUTES = 0.0  # expected-minutes floor over the horizon (module docstring)
+DEFAULT_MIN_MINUTES = 180.0  # expected minutes over a full horizon (module docstring)
 
 
 @dataclass(frozen=True)

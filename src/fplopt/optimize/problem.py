@@ -14,7 +14,9 @@ context into plain, immutable data the MILP is built from:
   season's end the horizon is shorter. Missing xP counts as 0 (NaN too);
 - candidates are pruned (`prune.prune`); owned players are always candidates. With a
   frame that carries `e_minutes` (`v1`) and `params.min_minutes` > 0, non-owned players
-  below the expected-minutes floor are dropped first (`minutes.horizon_minutes`);
+  below the expected-minutes floor are dropped first (`minutes.horizon_minutes`; the
+  floor is `min_minutes` × the horizon's GWs / `params.horizon`, pro rata near the
+  season's end);
 - bench weights: with `params.bench_from_minutes` and a frame that carries `p_play`
   (`v1`), per horizon GW from the incumbent squad's P(starter doesn't play)
   (`minutes.minutes_bench_weights`, `PlanInput.bench_weights`); otherwise None, and the
@@ -166,7 +168,8 @@ class PlanInput:
             prune_n=params.prune_n,
             dominated=params.prune_dominated,
             minutes=minutes,
-            min_minutes=params.min_minutes,
+            # The floor is for a full horizon: pro rata when it is shorter (season's end).
+            min_minutes=params.min_minutes * len(horizons) / params.horizon,
         )
         kept_set = set(kept.tolist())
 
