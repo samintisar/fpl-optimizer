@@ -16,25 +16,40 @@ see the future and statistics that can't be fooled by one lucky season.
 
 > **Status:** work in progress. Phases 0–4 of the nine phases (0–8) are done: a live data
 > archiver, a 10-season point-in-time data warehouse, leakage tests, a backtester with paired
-> statistical evaluation, and a MILP optimizer verified against open-fpl-solver. The real models
-> come next. No live
-> recommendations until a pre-registered holdout test passes ([roadmap](#roadmap)).
+> statistical evaluation, and a MILP planner checked against open-fpl-solver. Phase 5 is half
+> done: the `v1` xP model beats both baselines on the validation seasons, and the test of whether
+> the optimizer then beats a greedy policy is under way. No live recommendations until a
+> pre-registered holdout test passes ([roadmap](#roadmap)).
 
 ## Highlights
 
 - **Point-in-time data, enforced.** Every derived row carries `event_time` and `available_at`.
-  Features and the backtester read only through `DataStore(...).as_of(deadline)`, which keeps rows
-  with `available_at < deadline`. A static architecture test stops feature code from reading files
-  or keeping state any other way.
-- **Corrupt-the-future leakage check.** Randomize or truncate every row after a deadline, recompute
-  every feature, model and decision, and require byte-identical output. Runs in CI on synthetic
-  data and on the real warehouse at known edge cases (season starts, COVID-era GW39–47, GW18 of
-  2021/22 with 6 of 10 fixtures postponed).
+  Features, models and the backtester read only through `DataStore(...).as_of(deadline)`, which
+  keeps rows with `available_at < deadline`. A static architecture test stops feature and model
+  code from reading files or keeping state any other way.
+- **Corrupt-the-future leakage check.** Randomize or truncate every row after a deadline, refit and
+  recompute every feature, model and decision, and require byte-identical output. Runs in CI on
+  synthetic data and on the real warehouse at known edge cases (season starts, COVID-era GW39–47,
+  GW18 of 2021/22 with 6 of 10 fixtures postponed).
+- **Market where it's strong, structure elsewhere.** Team goal rates come from bookmaker odds
+  (de-vigged 1X2 and over/under fitted to a Dixon-Coles model), carried beyond the odds horizon by
+  attack/defence ratings with priors from our own Elo. Player goal and assist shares use
+  empirical-Bayes shrinkage, and minutes come from a deterministic LightGBM hurdle model with
+  injury-flag and ban adjustments. Every model is refit walk-forward and covered by the leakage
+  check.
+- **A real optimizer.** A multi-gameweek MILP (PuLP + HiGHS) plans transfers, captaincy, bench order
+  and chips over 6 GWs and returns the top 3 plans plus a "roll" baseline. On 24 real instances it
+  reaches the same optimum as [open-fpl-solver](https://github.com/solioanalytics/open-fpl-solver).
+  A bound-based chip search finds the exhaustive search's plan in 5–15 s instead of about 2–12
+  minutes.
 - **Honest evaluation.** Season totals swing ±80–100 points on luck alone, so policies are compared
   only in **paired** runs from identical start states, per decision and over full seasons, with a
-  **GW-block bootstrap** clustered by season. The test's size was measured by A/A placebo
-  simulation. That found overlapping evaluation windows rejected ~17% of the time at a nominal 10%,
-  so the windows were made non-overlapping.
+  **GW-block bootstrap**, season-level t-tests and a best-of-N deflation for every variant tried.
+  The test's size was measured by A/A placebo simulation: overlapping evaluation windows rejected
+  ~17% of the time at a nominal 10%, so they were made non-overlapping.
+- **Negative results kept.** The optimizer's early edge over greedy came from one season and did
+  not survive the validation split, so "optimizer beats greedy" was not claimed. It moved to
+  Phase 5, to be re-tested with the better xP (see [results](#results-so-far)).
 - **A second, lower-variance metric.** "xG-scored points" swaps goals, assists and clean sheets for
   their xG-based expectations. A result counts only if its sign agrees with realized points.
 - **Pre-registered go-live gate.** The 2025/26 season is held out and touched exactly once. The full
@@ -45,19 +60,40 @@ see the future and statistics that can't be fooled by one lucky season.
   and again in the 2 hours before each deadline (deadlines are read from the data, not hard-coded).
   A freshness check, a dead-man's-switch heartbeat and Telegram alerts catch silent failures.
 
-## Results so far (Phase 3 baselines)
+## Results so far
 
-Backtests over 2016/17–2024/25, GW1 starts, averaged over a template squad and 5 random squads.
-CIs are 80% two-sided (the lower bound is the one-sided α = 0.10 test). Full log:
-[`results/experiments.csv`](results/experiments.csv).
+Splits: develop 2016/17–2022/23 (tuning), validate 2023/24–2024/25 (confirmation), holdout 2025/26
+(untouched). CIs are 80% two-sided, so the lower bound is the one-sided α = 0.10 test. Every run is
+logged with its git sha, config and variant count in
+[`results/experiments.csv`](results/experiments.csv), and the full analysis is in
+[`docs/PLAN.md`](docs/PLAN.md).
+
+**xP model (Phase 5 criterion met on validate).** Walk-forward predictions at every deadline of
+2023/24–2024/25, in one run after all tuning was done on develop. MSE is per player-GW. Regrets are
+points lost per GW against the best captain or XI in hindsight, over a template and 3 random squads.
+
+| Model | MSE, next GW | MSE, GW+1 to +5 | Candidate MSE | XI regret | Captain regret |
+|---|---|---|---|---|---|
+| **`v1`** (this project) | **3.47** | **3.98** | **8.79** | **4.60** | **4.04** |
+| Rolling average | 4.35 | 4.80 | 11.20 | 5.29 | 4.63 |
+| FPL's own `ep_next` | 4.46 | 5.24 | 11.31 | 4.68 | 4.11 |
+
+`v1`'s MSE is 17–24% lower than both baselines' (one-sided Diebold-Mariano p < 0.001 at every
+horizon). It wins both validation seasons and is calibrated in every predicted-xP band, while the
+baselines overpredict above ~3 xP.
+
+**Decision policies (Phases 3–4).** Paired backtests, GW1 starts, template + 5 random squads.
 
 | Comparison | Seasons | Full run, pts/GW (80% CI) | Per decision, pts per 4-GW window (80% CI) |
 |---|---|---|---|
 | Greedy transfers vs never transferring, rolling-average xP | 2016/17–2024/25 | **+11.4** (+10.4 to +12.6), ≈ +431/season | **+9.3** (+7.6 to +11.1) |
-| Greedy on FPL's own `ep_next` vs greedy on rolling-average xP | 2021/22–2024/25 | −0.6 (−1.8 to +0.5) | −0.5 (−3.2 to +2.6) |
+| Greedy on FPL's `ep_next` vs greedy on rolling-average xP | 2021/22–2024/25 | −0.6 (−1.8 to +0.5) | −0.5 (−3.2 to +2.6) |
+| MILP optimizer vs greedy, rolling-average xP | 2016/17–2024/25 | +0.90 overall, but −0.03 (−0.95 to +0.88) on validate | −0.86 (−1.99 to +0.30) |
 
-The xG-scored metric agrees in sign for both. FPL's official projection is no better than a
-rolling average here, which sets a low but real bar the Phase 5 models must clear.
+The xG-scored metric agrees in sign with each row. With baseline xP the optimizer realizes only
+about a fifth of the transfer gain it predicts (the optimizer's curse), so it defaults to no hits
+and its edge over greedy waits on better xP. Chips add +4.3 pts/GW over never playing them, which
+shows they are worth using, not yet that they are played at the right time.
 
 ## How it works
 
@@ -67,7 +103,7 @@ flowchart LR
     A --> RAW[("raw/<br/>append-only")]
     RAW --> B["build/<br/>17 Parquet tables"]
     B --> DS["DataStore<br/>.as_of(deadline)"]
-    DS --> F[features/] --> M["models/<br/>xP"] --> P["policy<br/>greedy, MILP next"]
+    DS --> F[features/] --> M["models/<br/>v1 xP"] --> P["optimize/<br/>MILP planner"]
     P --> BT["backtest/<br/>paired eval"]
     DS --> BT
     P --> BOT[Telegram bot]
@@ -79,18 +115,26 @@ flowchart LR
    per-match stats, snapshots, odds, Elo ratings) in about 90 seconds. Players are keyed on a stable
    `player_key` across seasons (FPL ids reset every year) and mapped to Understat by per-fixture
    minutes and fuzzy names, with validation that every player with minutes maps.
-3. **Point in time.** `DataStore(data_dir).as_of(deadline)` is the only way features and the
-   backtester see data. Each table kind (static, schedule, event, snapshot) has its own visibility
-   rule, documented in [`docs/PLAN.md` §4](docs/PLAN.md#4-leakage-prevention).
-4. **Backtest.** The simulator replays a season from any squad state (squad, purchase prices, bank,
+3. **Point in time.** `DataStore(data_dir).as_of(deadline)` is the only way features, models and
+   the backtester see data. Each table kind (static, schedule, event, snapshot) has its own
+   visibility rule, documented in [`docs/PLAN.md` §4](docs/PLAN.md#4-leakage-prevention).
+4. **Model.** `v1` builds expected points per player and GW from components: market-implied team
+   goal rates, player goal and assist shares and penalties, a minutes model (P(start), P(60+), sub
+   minutes), clean sheets, saves, bonus, cards and goals conceded, with isotonic calibration of
+   P(start). It is refit every 4 GWs on the data visible at that point and keeps its components,
+   not just the total.
+5. **Optimize.** The MILP plans 6 GWs ahead under FPL's real constraints (budget with selling
+   prices, free-transfer banking, club limits, formations, autosub-weighted bench, chip windows),
+   prunes the player pool (at most 0.21 points lost on 40 real benchmark cases), and executes only
+   this GW's moves before re-solving next week.
+6. **Backtest.** The simulator replays a season from any squad state (squad, purchase prices, bank,
    free transfers, chips) under FPL's rules: selling prices, autosubs, captaincy, FT banking, hits.
-   Policies are pluggable.
-5. **Next:** a MILP planner on HiGHS (multi-GW horizon, chip scenarios, top-3 plans), then
-   market-implied team models (Dixon-Coles fitted to bookmaker odds), player shares with
-   empirical-Bayes shrinkage, and a LightGBM minutes model.
+   Policies (roll, greedy, optimizer) are pluggable and run in parallel over seasons and start
+   states.
 
 The full design, including every data-source caveat and decision, is in
-[`docs/PLAN.md`](docs/PLAN.md).
+[`docs/PLAN.md`](docs/PLAN.md). Model tuning scripts and their results are in
+[`dev/`](dev/README.md).
 
 ## Quickstart
 
@@ -100,7 +144,7 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.12.
 git clone https://github.com/samintisar/fpl-optimizer.git
 cd fpl-optimizer
 uv sync --all-extras
-uv run pytest            # ~900 tests on synthetic data, no network needed
+uv run pytest            # ~1,300 tests on synthetic data, no network needed
 ```
 
 To run backtests on real data, backfill history into `raw/` (about 1 GB, 20–30 minutes in total),
@@ -126,12 +170,14 @@ uv run fplopt backtest compare --a greedy:rolling --b roll:rolling --seasons 202
 | `fplopt check leakage` | Corrupt-the-future check of every feature, model and decision probe on real data |
 | `fplopt backtest run` | Replay one policy over seasons × start states; prints totals and captain/XI regret |
 | `fplopt backtest compare` | Paired comparison of two policies with bootstrap CIs, realized and xG-scored |
+| `fplopt models eval` | Walk-forward xP evaluation: MSE by horizon and xP band, captain/XI regret, Diebold-Mariano tests |
 | `fplopt optimize plan` | Top-3 plans plus the roll plan for a season, GW and start squad |
 | `fplopt optimize bench` | Optimizer solve-time and pruning benchmark on real deadlines |
 
-Policy specs look like `greedy:rolling:threshold=2.0`, `roll:ep_next` or `optimizer:ep_next:max_hits=0`. Every `run` and `compare`
-appends a row (git sha, config, metrics, variant count) to `results/experiments.csv`. Run
-`fplopt <group> --help` for all options.
+Policy specs are `name:xp[:key=value,...]`, e.g. `greedy:rolling:threshold=2.0`, `roll:ep_next` or
+`optimizer:v1:chips=1`. Every `run`, `compare` and `models eval` appends a row (git sha, config,
+metrics, variant count) to `results/experiments.csv`. Backtests and evaluations run in parallel
+with `--jobs N`. Run `fplopt <group> --help` for all options.
 
 ### Environment variables
 
@@ -158,8 +204,8 @@ Server setup (systemd user timers, alerts, heartbeat) is in [`deploy/README.md`]
 | 1 | Backfill + ID mapping + Parquet tables | ✅ 10 seasons, 17 tables, one-command rebuild |
 | 2 | `as_of` layer + leakage tests | ✅ In CI and `fplopt check leakage` |
 | 3 | Backtester + baselines + greedy policy | ✅ Paired full-run and per-decision evaluation with block bootstrap |
-| 4 | MILP optimizer (transfers, captain, bench, chips, top-3 plans) | ✅ Matches open-fpl-solver; "beats greedy" deferred to Phase 5 (not shown out of sample with baseline xP) |
-| 5 | Real models (market-implied team model, shares, minutes, calibration) | Next |
+| 4 | MILP optimizer (transfers, captain, bench, chips, top-3 plans) | ✅ Matches open-fpl-solver; "beats greedy" moved to Phase 5 (not shown out of sample with baseline xP) |
+| 5 | Real models (market-implied team model, shares, minutes, calibration) | 🔄 5a done: `v1` beats both baselines on validate. 5b in progress: optimizer vs greedy with `v1` xP |
 | 6 | Holdout evaluation on 2025/26 (single, pre-registered run) | |
 | 7 | Telegram bot + go live | |
 | 8 | Distributions, sensitivity analysis, uncertain fixtures | |
@@ -174,12 +220,14 @@ src/fplopt/
   ingest/     raw snapshot writers (daily/tick jobs), one-off historical backfills
   build/      raw -> Parquet tables (`fplopt build all`), ID mapping, Elo, rules export
   features/   point-in-time feature builders (each takes one as-of view) + leakage check
-  models/     xP models (rolling-average baseline today)
+  models/     xP models: baselines and v1 (team, shares, minutes, availability, calibration)
+  evaluate/   walk-forward xP metrics (`fplopt models eval`)
+  optimize/   MILP planner: model, pruning, chip search, top-k plans, bench weights, benchmark
   backtest/   simulator, FPL rules and scoring, policies, start states, paired evaluation
-  optimize/   MILP planner (Phase 4)
   bot/        Telegram bot (Phase 7)
 config/       scoring rules per season, teams.csv (club names per source), overrides.csv
 deploy/       systemd units + server runbook
+dev/          model-tuning and reference-check scripts (not in the package) and their results
 docs/PLAN.md  design doc and decision log (source of truth)
 results/      experiments.csv (tracked); run outputs (gitignored)
 tests/        unit, architecture and leakage tests; `-m realdata` runs on the real warehouse
@@ -220,7 +268,8 @@ that touch features or models should keep `fplopt check leakage` passing.
 - [football-data.co.uk](https://www.football-data.co.uk/): results and pre-match odds.
 - [The Odds API](https://the-odds-api.com/): live odds.
 - [open-fpl-solver](https://github.com/solioanalytics/open-fpl-solver) (Apache-2.0): the
-  reference the Phase 4 optimizer is checked against (identical plans on 24 real instances).
+  reference the optimizer is checked against (same optimum on 24 real instances). Its code is
+  never vendored or copied.
 
 Each source has its own terms. Raw snapshots and the Parquet tables built from them are not
 redistributed in this repository. The only data file tracked is
