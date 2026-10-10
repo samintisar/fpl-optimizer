@@ -10,7 +10,7 @@ history (`entry/{id}/transfers/`):
 - squad and bank: those of the last GW before the planned one; when that GW was a Free
   Hit, the GW before it (the Free Hit squad reverts);
 - purchase prices: a player's latest transfer in (`element_in_cost`), Free Hit GWs
-  excepted; a player held since the manager's first GW, his price at that GW's deadline
+  excepted; a player held since the manager's first GW, their price at that GW's deadline
   (the newest player snapshot before it: `initial_prices`);
 - free transfers: the season replayed with the backtester's own rule
   (`backtest.state.next_state`: transfers made and chips played per GW, top-ups and cap);
@@ -161,6 +161,11 @@ def squad_from_api(
         raise EntryError(
             f"the team has no finished GW before GW{gw}: there is no squad to import yet"
         )
+    if int(rows[-1]["event"]) != gw - 1:
+        raise EntryError(
+            f"GW{gw - 1}'s deadline hasn't passed (the history ends at GW{rows[-1]['event']}): "
+            f"plan GW{int(rows[-1]['event']) + 1}, or give the squad in a squad file"
+        )
     chips = {int(c["event"]): str(c["name"]) for c in history.get("chips", [])}
     unknown = sorted({n for n in chips.values()} - {c.name for c in rules.chips})
     if unknown:
@@ -179,6 +184,7 @@ def squad_from_api(
     if len(elements) != rules.squad_size:
         raise EntryError(f"GW{squad_event} picks hold {len(elements)} players")
 
+    free_transfers = replay_free_transfers(season, gw, rows, chips, rules, gw_index)
     freehits = {e for e, name in chips.items() if name == "freehit"}
     bought: dict[int, int] = {}
     for t in sorted(transfers, key=lambda t: (int(t["event"]), str(t.get("time", "")))):
@@ -207,7 +213,6 @@ def squad_from_api(
             "deadline (newest snapshot before it)"
         )
 
-    free_transfers = replay_free_transfers(season, gw, rows, chips, rules, gw_index)
     notes.append(
         f"free transfers {free_transfers}: replayed from the transfers and chips of "
         f"GW{first}-GW{rows[-1]['event']}"
@@ -417,7 +422,7 @@ def squad_state(
         if key not in by_key.index:
             raise EntryError(
                 f"element {p.element_id} ({p.name or key}) is not in the GW{spec.gw} player "
-                "pool (left the league?): sell him in the squad file"
+                "pool (left the league?): sell them in the squad file"
             )
         row = by_key.loc[key]
         holdings.append(

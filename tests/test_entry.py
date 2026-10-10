@@ -121,7 +121,7 @@ def test_free_hit_reverts_squad_and_bank_and_its_buys_set_no_price():
     assert any("Free Hit" in n for n in spec.notes)
 
 
-def test_a_late_starter_gets_one_free_transfer_after_his_first_gw():
+def test_a_late_starter_gets_one_free_transfer_after_their_first_gw():
     rows = [{"event": 3, "event_transfers": 0}, {"event": 4, "event_transfers": 0}]
     assert replay_free_transfers(2026, 5, rows, {}, RULES, GW_INDEX) == 2
     spec = imported(rows=[(3, 0, 0)], squads={3: ELEMENTS})
@@ -136,6 +136,19 @@ def test_free_transfers_cap_at_five():
 def test_import_errors():
     with pytest.raises(EntryError, match="no finished GW before GW1"):
         imported(rows=[(1, 0, 0)], squads={1: ELEMENTS}, gw=1)
+    with pytest.raises(EntryError, match="GW5's deadline hasn't passed.*plan GW5"):
+        imported(rows=[(1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 0, 0)], squads={4: ELEMENTS}, gw=6)
+    with pytest.raises(EntryError, match="GW9 is not in the season's schedule"):
+        squad_from_api(
+            season=2026,
+            gw=10,
+            history=history([(9, 0, 0)]),
+            picks=picks_for({9: ELEMENTS}),
+            transfers=[],
+            rules=RULES,
+            gw_index={g: g for g in range(1, 9)} | {10: 10},
+            initial_prices=lambda gw: START_PRICES,
+        )
     with pytest.raises(EntryError, match="hold 14 players"):
         imported(rows=[(1, 0, 0)], squads={1: ELEMENTS[:14]})
     with pytest.raises(EntryError, match="already used"):
