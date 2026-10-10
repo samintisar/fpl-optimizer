@@ -1227,7 +1227,7 @@ def plan_gw_index(store: DataStore, season: int, gw: int) -> int | None:
 
 def plan_params(args: argparse.Namespace) -> OptimizerParams:
     """`optimize plan`'s planner settings: --horizon (1..MAX_PLAN_HORIZON), --max-hits,
-    --hit-margin over `OptimizerParams()`, with the interactive wall-clock cap. ValueError
+    --hit-margin, --decay over `OptimizerParams()`, with the interactive wall-clock cap. ValueError
     on a value the planner rejects (main reports it as a usage error)."""
     from fplopt.optimize import OptimizerParams
 
@@ -1238,13 +1238,139 @@ def plan_params(args: argparse.Namespace) -> OptimizerParams:
         settings["max_hits"] = parse_max_hits(args.max_hits)
     if args.hit_margin is not None:
         settings["hit_margin"] = args.hit_margin
+    if getattr(args, "decay", None) is not None:
+        settings["decay"] = args.decay
     return OptimizerParams(**settings)
 
 
+def lineup_text(g: Any, names: dict[int, str]) -> str:
+    """A plan GW's lineup: the XI (captain C, vice V) and the bench in autosub order."""
+    marks = {g.captain: " (C)", g.vice: " (V)"}
+    xi = ", ".join(f"{names[k]}{marks.get(k, '')}" for k in g.starters)
+    bench = ", ".join(names[k] for k in g.bench)
+    chip = f", chip {g.chip}" if g.chip else ""
+    return f"Plan #1 lineup for GW{g.gw}{chip}:\n  XI: {xi}\n  Bench (in order): {bench}"
+
+
+@dataclass(frozen=True)
+class RealSquad:
+    """A real squad for `optimize plan` / `optimize squad`: the spec (`fplopt.entry`), its
+    `SquadState` and element_id -> web name."""
+
+    spec: Any
+    state: Any
+    names: dict[int, str]
+
+
+def _real_squad(
+    c: Context, store: DataStore, view: Any, season: int, gw: int, rules: Any
+) -> RealSquad:
+    """--entry (import from FPL's public API) and/or --squad-file (overrides), as a state
+    at GW `gw`'s deadline (`fplopt.entry`; EntryError when the squad is not usable)."""
+    from fplopt.backtest.simulator import FAR_FUTURE, season_schedule
+    from fplopt.entry import (
+        EntryError,
+        apply_overrides,
+        import_squad,
+        read_squad_file,
+        squad_state,
+    )
+    from fplopt.features.baseline import player_pool
+
+    args = c.args
+    gameweeks = store.as_of(FAR_FUTURE).table("gameweek", columns=["season", "gw", "gw_index"])
+    gameweeks = gameweeks[gameweeks["season"] == season]
+    gw_index = dict(
+        zip(gameweeks["gw"].astype(int), gameweeks["gw_index"].astype(int), strict=True)
+    )
+    players = view.table(
+        "player_season", columns=["player_key", "season", "element_id", "web_name"]
+    )
+    players = players[players["season"] == season].drop_duplicates("element_id", keep="last")
+    element_keys = {
+        int(e): int(k) for e, k in zip(players["element_id"], players["player_key"], strict=True)
+    }
+    names = {
+        int(e): str(n) for e, n in zip(players["element_id"], players["web_name"], strict=True)
+    }
+    key_elements = {k: e for e, k in element_keys.items()}
+
+    def initial_prices(first_gw: int) -> dict[int, int]:
+        deadline = season_schedule(store, season, gw_index[first_gw])["deadline_time"].iloc[0]
+        pool = player_pool(store.as_of(deadline))
+        return {
+            key_elements[int(k)]: int(p)
+            for k, p in zip(pool["player_key"], pool["price"], strict=True)
+            if int(k) in key_elements
+        }
+
+    def resolve(name: str) -> int:
+        hits = players[players["web_name"].str.casefold() == name.casefold()]
+        if len(hits) != 1:
+            found = "no player" if hits.empty else f"{len(hits)} players"
+            raise EntryError(f"squad file: {found} named {name!r} in {season_label(season)}")
+        return int(hits["element_id"].iloc[0])
+
+    spec = None
+    if args.entry is not None:
+        try:
+            spec = import_squad(c.fpl, args.entry, season, gw, rules, gw_index, initial_prices)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise EntryError(f"FPL has no team with ID {args.entry}") from None
+            raise
+    if args.squad_file is not None:
+        spec = apply_overrides(spec, read_squad_file(args.squad_file), season, gw, resolve)
+    if spec is None:
+        raise EntryError("give --entry and/or --squad-file")
+    state = squad_state(spec, player_pool(view), element_keys, rules, gw_index)
+    return RealSquad(spec, state, names)
+
+
+def _squad_errors(job: Job) -> Job:
+    """The job with `fplopt.entry.EntryError` (a bad team ID, squad file or squad) reported
+    as a usage error (exit 2, no traceback or admin alert)."""
+
+    def run(c: Context) -> object:
+        from fplopt.entry import EntryError
+
+        try:
+            return job(c)
+        except EntryError as exc:
+            print(f"error: {exc}", file=sys.stderr, flush=True)
+            raise SystemExit(2) from None
+
+    return run
+
+
+def _optimize_squad(c: Context) -> object:
+    """`fplopt optimize squad`: import --entry's squad before --season/--gw (with
+    --squad-file's overrides, if any), check it, and write it as a squad file to --out
+    (to edit, then plan with `optimize plan --squad-file`)."""
+    from fplopt.backtest.rules import backtest_rules
+    from fplopt.backtest.simulator import season_schedule
+    from fplopt.entry import write_squad_file
+
+    args = c.args
+    (season,) = args.season
+    store = _backtest_store(c)
+    gw_index = plan_gw_index(store, season, args.gw)
+    if gw_index is None:
+        raise ValueError(f"{season_label(season)} has no GW{args.gw}")
+    view = store.as_of(season_schedule(store, season, gw_index)["deadline_time"].iloc[0])
+    real = _real_squad(c, store, view, season, args.gw, backtest_rules(season))
+    out = Path(args.out)
+    write_squad_file(real.spec, out, real.names)
+    print(out.read_text(encoding="utf-8"), flush=True)
+    print(f"Written to {out}", flush=True)
+    return real
+
+
 def _optimize_plan(c: Context) -> object:
-    """`fplopt optimize plan`: the start state (template or random squad) at the deadline
-    of --season/--gw, the --xp frame, and `optimize` (top --top-k plans, the roll plan,
-    chips unless --no-chips); prints `plan_text`."""
+    """`fplopt optimize plan`: the start state at the deadline of --season/--gw (template
+    or random squad, or a real one: --entry and/or --squad-file, `fplopt.entry`), the --xp
+    frame, and `optimize` (top --top-k plans, the roll plan, chips unless --no-chips);
+    prints `plan_text` and plan #1's lineup for the GW."""
     from fplopt.backtest.rules import backtest_rules
     from fplopt.backtest.simulator import season_schedule
     from fplopt.backtest.start_states import random_state, template_state
@@ -1261,10 +1387,15 @@ def _optimize_plan(c: Context) -> object:
     schedule = season_schedule(store, season, gw_index)
     view = store.as_of(schedule["deadline_time"].iloc[0])
     rules = backtest_rules(season)
-    if args.start == "template":
-        state = template_state(view, rules)
+    notes: tuple[str, ...] = ()
+    if args.entry is not None or args.squad_file is not None:
+        real = _real_squad(c, store, view, season, args.gw, rules)
+        state, notes = real.state, real.spec.notes
+        start = f"team {args.entry}" if args.entry is not None else "squad-file"
+    elif args.start in (None, "template"):
+        state, start = template_state(view, rules), "template"
     else:
-        state = random_state(view, rules, int(args.start.split(":", 1)[1]))
+        state, start = random_state(view, rules, int(args.start.split(":", 1)[1])), args.start
     params = plan_params(args)
     began = time.perf_counter()
     pool = player_pool(view)
@@ -1283,18 +1414,25 @@ def _optimize_plan(c: Context) -> object:
             g.vice,
         )
     ]
-    names = _player_names(view, [*keys, *problem.state.player_keys])
+    first = plans.plans[0].gws[0] if plans.plans else None
+    lineup_keys = [] if first is None else [*first.starters, *first.bench]
+    names = _player_names(view, [*keys, *lineup_keys, *problem.state.player_keys])
     squad = ", ".join(names[k] for k in problem.state.player_keys)
+    used = ", ".join(f"{cid}@{g}" for cid, g in state.chips_used) or "none"
     print(
-        f"{season_label(season)} GW{args.gw} (gw_index {state.gw_index}), {args.start} "
-        f"squad, xP {args.xp}, horizon {len(problem.gws)} GW(s), "
+        f"{season_label(season)} GW{args.gw} (gw_index {state.gw_index}), {start} "
+        f"squad, xP {args.xp}, horizon {len(problem.gws)} GW(s), decay {params.decay}, "
         f"{'chips' if args.chips else 'no chips'}, max_hits "
         f"{'none' if params.max_hits is None else params.max_hits}, hit_margin "
-        f"{params.hit_margin}; bank {state.bank / 10:.1f}, FT {state.free_transfers}; "
-        f"{len(problem.players)} candidates ({runtime:.1f}s)\nSquad: {squad}\n\n"
-        f"{plan_text(plans, names)}",
+        f"{params.hit_margin}; bank {state.bank / 10:.1f}, FT {state.free_transfers}, "
+        f"chips used (id@gw_index) {used}; {len(problem.players)} candidates "
+        f"({runtime:.1f}s)\nSquad: {squad}\n"
+        + "".join(f"  note: {n}\n" for n in notes)
+        + f"\n{plan_text(plans, names)}",
         flush=True,
     )
+    if first is not None:
+        print(f"\n{lineup_text(first, names)}", flush=True)
     if args.chips:
         solved = ", ".join(f"{k} {v:.2f}" for k, v in plans.scenario_objectives.items())
         print(f"\nChip scenarios solved (total objective): {solved}", flush=True)
@@ -1321,7 +1459,8 @@ JOBS: dict[str, Job] = {
     "backtest run": _backtest_run,
     "backtest compare": _backtest_compare,
     "optimize bench": _optimize_bench,
-    "optimize plan": _optimize_plan,
+    "optimize plan": _squad_errors(_optimize_plan),
+    "optimize squad": _squad_errors(_optimize_squad),
     "models eval": _models_eval,
 }
 
@@ -1481,8 +1620,13 @@ def _add_optimize_parsers(groups: Any) -> None:
     plan.add_argument(
         "--start",
         type=_plan_start,
-        default="template",
-        help="template (most-owned squad) or random:SEED (default template)",
+        default=None,
+        help="template (most-owned squad) or random:SEED (default template; not with "
+        "--entry/--squad-file)",
+    )
+    _add_squad_arguments(plan)
+    plan.add_argument(
+        "--decay", type=float, default=None, help="per-GW weight of later GWs' xP (0.85)"
     )
     plan.add_argument("--xp", choices=list(XP_MODELS), default="ep_next", help="xP model")
     plan.add_argument(
@@ -1497,6 +1641,32 @@ def _add_optimize_parsers(groups: Any) -> None:
     plan.add_argument("--hit-margin", type=float, default=None, help="extra cost per hit")
     plan.add_argument("--horizon", type=int, default=6, help="planning horizon in GWs (6)")
     plan.add_argument("--top-k", type=int, default=3, help="plans to show besides roll (3)")
+    squad = commands.add_parser("squad", help="import an FPL team as a squad file to check or edit")
+    squad.set_defaults(subparser=squad)
+    squad.add_argument(
+        "--season", type=parse_seasons, required=True, help="the season, e.g. 2026 or 2026-27"
+    )
+    squad.add_argument("--gw", type=int, required=True, help="the GW to plan (FPL GW number)")
+    _add_squad_arguments(squad, entry_required=True)
+    squad.add_argument("--out", default="squad.toml", help="squad file to write (squad.toml)")
+
+
+def _add_squad_arguments(parser: argparse.ArgumentParser, entry_required: bool = False) -> None:
+    parser.add_argument(
+        "--entry",
+        type=int,
+        default=None,
+        required=entry_required,
+        help="an FPL team ID (the number in fantasy.premierleague.com/entry/<ID>/...): import "
+        "its squad, bank, free transfers and chips from FPL's public API",
+    )
+    parser.add_argument(
+        "--squad-file",
+        type=Path,
+        default=None,
+        help="a squad file (TOML, see `fplopt optimize squad`); with --entry its values "
+        "override the import's",
+    )
 
 
 def _add_backtest_parsers(groups: Any) -> None:
@@ -1684,6 +1854,9 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
         load_dotenv(Path.cwd() / ".env")
         settings = Settings.from_env()
     configure_logging()
+    for stream in (sys.stdout, sys.stderr):  # player names (ć, ß) on a cp1252 console
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     if args.group == "backtest":
         # Usage errors (exit 2, no alert); needs the data to check which seasons exist.
         args.store = open_data_store(settings.data_dir)
@@ -1705,9 +1878,16 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
         early = [s for s in args.seasons if s < EP_NEXT_FIRST_SEASON]
         for xp in args.xp:
             _refuse_early_ep_next(args.subparser, xp, f"--xp {xp}", early)
-    elif name == "optimize plan":
+    elif name in ("optimize plan", "optimize squad"):
         if len(args.season) != 1:
             args.subparser.error("--season: give one season")
+        if args.squad_file is not None and not args.squad_file.is_file():
+            args.subparser.error(f"--squad-file: no file {args.squad_file}")
+        if args.entry is not None and args.entry < 1:
+            args.subparser.error("--entry: an FPL team ID is a positive number")
+    if name == "optimize plan":
+        if args.start is not None and (args.entry is not None or args.squad_file is not None):
+            args.subparser.error("--start: not with --entry/--squad-file (the squad is yours)")
         early = [s for s in args.season if s < EP_NEXT_FIRST_SEASON]
         _refuse_early_ep_next(args.subparser, args.xp, f"--xp {args.xp}", early)
         if args.max_hits is not None:
@@ -1721,6 +1901,7 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
             plan_params(args)
         except ValueError as exc:
             args.subparser.error(str(exc))
+    if name in ("optimize plan", "optimize squad"):
         args.store = open_data_store(settings.data_dir)
         (season,) = args.season
         try:

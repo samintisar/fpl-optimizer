@@ -164,6 +164,7 @@ def test_every_parsed_command_has_a_job():
         "backtest run": ["--seasons", "2023"],
         "backtest compare": ["--seasons", "2023", "--a", "greedy:rolling", "--b", "roll:rolling"],
         "optimize plan": ["--season", "2023", "--gw", "5"],
+        "optimize squad": ["--season", "2026", "--gw", "6", "--entry", "1"],
         "models eval": ["--models", "rolling", "--seasons", "2023"],
     }
     for name in cli.JOBS:
@@ -927,6 +928,9 @@ def test_optimize_plan_prints_the_top_plans_and_the_roll_plan(plan, capsys):
         (["--season", "2023", "--gw", "3", "--top-k", "0"], "--top-k must be >= 1"),
         (["--season", "2023", "--gw", "3", "--hit-margin", "-1"], "hit_margin must be"),
         (["--season", "2023", "--gw", "40", "--xp", "rolling"], "--gw: 2023-24 has no GW40"),
+        (["--season", "2023", "--gw", "3", "--entry", "1", "--start", "template"], "--start: not"),
+        (["--season", "2023", "--gw", "3", "--entry", "0"], "a positive number"),
+        (["--season", "2023", "--gw", "3", "--squad-file", "missing.toml"], "--squad-file: no"),
     ],
 )
 def test_optimize_plan_usage_errors(plan, capsys, argv, message):
@@ -935,6 +939,90 @@ def test_optimize_plan_usage_errors(plan, capsys, argv, message):
     assert info.value.code == 2
     assert message in capsys.readouterr().err
     assert plan.alerts == []
+
+
+class FakeFpl:
+    """FPL's public entry endpoints for team 7 on the synthetic league: the GW6 template
+    squad held since GW1, no transfers or chips, £0.5m in the bank."""
+
+    elements: list[int] = []
+
+    def __init__(self, http):
+        pass
+
+    def entry_history(self, entry_id):
+        if entry_id != 7:
+            request = httpx.Request("GET", "https://fpl.test/")
+            raise httpx.HTTPStatusError(
+                "404", request=request, response=httpx.Response(404, request=request)
+            )
+        rows = [{"event": e, "bank": 5, "event_transfers": 0} for e in range(1, 6)]
+        return json.dumps({"current": rows, "chips": []}).encode()
+
+    def entry_picks(self, entry_id, gw):
+        return json.dumps({"picks": [{"element": e} for e in self.elements]}).encode()
+
+    def entry_transfers(self, entry_id):
+        return b"[]"
+
+
+@pytest.fixture
+def fake_fpl(monkeypatch, league):
+    from fplopt.backtest.rules import backtest_rules
+    from fplopt.backtest.simulator import season_schedule
+    from fplopt.backtest.start_states import template_state
+
+    deadline = season_schedule(league, 2023, 6)["deadline_time"].iloc[0]
+    view = league.as_of(deadline)
+    state = template_state(view, backtest_rules(2023))
+    players = view.table("player_season", columns=["player_key", "season", "element_id"])
+    players = players[players["season"] == 2023]
+    elements = dict(zip(players["player_key"], players["element_id"], strict=True))
+    monkeypatch.setattr(FakeFpl, "elements", [int(elements[k]) for k in state.player_keys])
+    monkeypatch.setattr(cli, "FplClient", FakeFpl)
+    return state
+
+
+def test_optimize_squad_writes_the_imported_squad(tmp_path, monkeypatch, league, fake_fpl, capsys):
+    from fplopt.backtest.rules import backtest_rules
+
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+    out = tmp_path / "squad.toml"
+    argv = ["optimize", "squad", "--season", "2023", "--gw", "6", "--entry", "7"]
+    assert cli.main([*argv, "--out", str(out)], settings=make_settings(tmp_path)) == 0
+    text = out.read_text(encoding="utf-8")
+    assert 'season = "2023-24"' in text and "gw = 6" in text and "bank = 0.5" in text
+    expected_ft = min(5, backtest_rules(2023).max_free_transfers)
+    assert f"free_transfers = {expected_ft}" in text
+    assert text.count("[[players]]") == 15 and "  # P" in text  # web names as comments
+    assert f"Written to {out}" in capsys.readouterr().out
+    # A team FPL doesn't know: a usage error, not an alert.
+    with pytest.raises(SystemExit) as info:
+        cli.main([*argv[:-1], "8", "--out", str(out)], settings=make_settings(tmp_path))
+    assert info.value.code == 2
+    assert "FPL has no team with ID 8" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="needs the optimize extra")
+def test_optimize_plan_from_an_entry_and_a_squad_file(plan, tmp_path, fake_fpl, capsys):
+    argv = ["--season", "2023", "--gw", "6", "--xp", "rolling", "--no-chips", "--horizon", "1"]
+    code, alerts = plan(*argv, "--entry", "7")
+    assert code == 0 and alerts == []
+    printed = capsys.readouterr().out
+    assert "team 7 squad" in printed and "bank 0.5" in printed
+    assert "note: free transfers" in printed and "Plan #1 lineup for GW6" in printed
+    squad_file = tmp_path / "override.toml"
+    squad_file.write_text("bank = 2.0\nfree_transfers = 1\n", encoding="utf-8")
+    code, alerts = plan(*argv, "--entry", "7", "--squad-file", str(squad_file))
+    assert code == 0 and alerts == []
+    printed = capsys.readouterr().out
+    assert "bank 2.0, FT 1" in printed
+    assert "note: from the squad file: bank, free_transfers" in printed
+    # The file alone needs the whole squad.
+    with pytest.raises(SystemExit) as info:
+        plan(*argv, "--squad-file", str(squad_file))
+    assert info.value.code == 2
+    assert "without --entry the squad file needs players" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
