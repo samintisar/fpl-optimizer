@@ -206,6 +206,10 @@ def test_file_errors(tmp_path):
         )
     with pytest.raises(EntryError, match="for gw 7"):
         apply_overrides(spec_of(), read_squad_file(write(tmp_path, "gw = 7\n")), 2026, 6, int)
+    bad = tmp_path / "latin1.toml"
+    bad.write_bytes(b"bank = 1.0  # Gro\xdf\n")  # latin-1, not UTF-8
+    with pytest.raises(EntryError, match="latin1.toml"):
+        read_squad_file(bad)
     with pytest.raises(EntryError, match="unknown key"):
         read_squad_file(write(tmp_path, "free_transfer = 1\n"))
     with pytest.raises(EntryError, match="steps of 0.1"):

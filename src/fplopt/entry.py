@@ -284,7 +284,7 @@ def read_squad_file(path: Path) -> dict[str, Any]:
     back as dicts with `element_id` or `name`, and `purchase_price`."""
     try:
         raw = tomllib.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise EntryError(f"squad file {path}: {exc}") from None
     known = {"season", "gw", "bank", "free_transfers", "chips_used", "players"}
     extra = sorted(set(raw) - known)
