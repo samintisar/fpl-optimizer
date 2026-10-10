@@ -28,3 +28,13 @@ class FplClient:
 
     def event_live(self, gw: int) -> bytes:
         return self._get(f"event/{gw}/live/")
+
+    # A manager's team (public, no login; `fplopt.entry`).
+    def entry_history(self, entry_id: int) -> bytes:
+        return self._get(f"entry/{entry_id}/history/")
+
+    def entry_picks(self, entry_id: int, gw: int) -> bytes:
+        return self._get(f"entry/{entry_id}/event/{gw}/picks/")
+
+    def entry_transfers(self, entry_id: int) -> bytes:
+        return self._get(f"entry/{entry_id}/transfers/")

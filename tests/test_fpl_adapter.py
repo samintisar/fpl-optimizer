@@ -21,11 +21,17 @@ def test_endpoints_hit_expected_urls():
     fpl.fixtures()
     fpl.element_summary(17)
     fpl.event_live(5)
+    fpl.entry_history(42)
+    fpl.entry_picks(42, 5)
+    fpl.entry_transfers(42)
     assert seen == [
         "https://fantasy.premierleague.com/api/bootstrap-static/",
         "https://fantasy.premierleague.com/api/fixtures/",
         "https://fantasy.premierleague.com/api/element-summary/17/",
         "https://fantasy.premierleague.com/api/event/5/live/",
+        "https://fantasy.premierleague.com/api/entry/42/history/",
+        "https://fantasy.premierleague.com/api/entry/42/event/5/picks/",
+        "https://fantasy.premierleague.com/api/entry/42/transfers/",
     ]
 
 

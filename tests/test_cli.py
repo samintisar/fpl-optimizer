@@ -164,6 +164,7 @@ def test_every_parsed_command_has_a_job():
         "backtest run": ["--seasons", "2023"],
         "backtest compare": ["--seasons", "2023", "--a", "greedy:rolling", "--b", "roll:rolling"],
         "optimize plan": ["--season", "2023", "--gw", "5"],
+        "optimize squad": ["--season", "2026", "--gw", "6", "--entry", "1"],
         "models eval": ["--models", "rolling", "--seasons", "2023"],
     }
     for name in cli.JOBS:
