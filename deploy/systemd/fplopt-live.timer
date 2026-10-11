@@ -1,0 +1,12 @@
+[Unit]
+Description=fpl-optimizer deadline alerts every 15 minutes, 5 minutes after the archiver tick
+
+[Timer]
+# :05/:20/:35/:50, so a pre-deadline snapshot the tick takes at :00/:15/:30/:45 is archived
+# first. No timezone needed: the schedule is the same in UTC and UK time.
+OnCalendar=*:05/15
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

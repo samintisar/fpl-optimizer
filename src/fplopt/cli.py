@@ -1584,6 +1584,111 @@ def _optimize_plan(c: Context) -> object:
     return plans
 
 
+def _bot_service(c: Context) -> Any:
+    """The bot's command logic on the server's state directory (`fplopt.bot`)."""
+    from fplopt.bot.context import ContextStore
+    from fplopt.bot.service import BotService
+    from fplopt.bot.store import UserStore
+
+    admin = c.settings.telegram_admin_chat_id
+    state = c.settings.state_dir
+    return BotService(
+        UserStore(state / "bot.sqlite"),
+        ContextStore(state / "context"),
+        c.fpl,
+        int(admin) if admin else None,
+    )
+
+
+def _build_subprocess(settings: Settings) -> Callable[[], None]:
+    """`fplopt build all` in its own process, so its memory (~1.7 GB) is freed before the
+    model runs (Phase 7 plan, *Measured on botbox*)."""
+    import subprocess
+
+    def build() -> None:
+        env = {
+            **os.environ,
+            "FPLOPT_RAW_DIR": str(settings.raw_dir),
+            "FPLOPT_DATA_DIR": str(settings.data_dir),
+        }
+        subprocess.run([sys.executable, "-m", "fplopt.cli", "build", "all"], env=env, check=True)
+
+    return build
+
+
+def _live(c: Context, *, tick: bool) -> object:
+    """`fplopt live tick` (the alert job, `fplopt.bot.live.live_tick`) or `live prepare`
+    (rebuild data/ and the plan context now)."""
+    from fplopt.bot.context import git_sha
+    from fplopt.bot.live import live_tick, refresh_context
+    from fplopt.bot.sender import telegram_sender
+
+    service = _bot_service(c)
+    build = _build_subprocess(c.settings)
+    sha = git_sha()
+    if not tick:
+        context, _ = refresh_context(
+            raw=c.store,
+            data=lambda: open_data_store(c.settings.data_dir),
+            contexts=service.contexts,
+            build=build,
+            sha=sha,
+            now=jobs.utc_now,
+            force=True,
+        )
+        if context is None:
+            print("no deadline ahead in the data: no plan context", flush=True)
+        else:
+            print(
+                f"plan context {context.context_id}: {season_label(context.season)} "
+                f"GW{context.gw}, deadline {context.deadline.isoformat()}, "
+                f"{len(context.pool)} players",
+                flush=True,
+            )
+        return context
+    token = c.settings.telegram_bot_token
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set: alerts can't be sent")
+    result = live_tick(
+        raw=c.store,
+        data=lambda: open_data_store(c.settings.data_dir),
+        users=service.users,
+        contexts=service.contexts,
+        service=service,
+        fpl=c.fpl,
+        send=telegram_sender(c.http, token),
+        build=build,
+        sha=sha,
+        now=jobs.utc_now,
+    )
+    log.info(
+        "live tick: due %s, context %s (rebuilt %s), sent %s, silent %s",
+        result.due,
+        result.context_id,
+        result.rebuilt,
+        result.sent,
+        result.silent,
+    )
+    return result
+
+
+def _bot_run(c: Context) -> object:
+    """`fplopt bot run`: the Telegram bot, long polling until stopped (`fplopt.bot.app`)."""
+    from fplopt.bot.app import build_application
+
+    token = c.settings.telegram_bot_token
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+    application = build_application(
+        token,
+        _bot_service(c),
+        admin_token=token,
+        admin_chat_id=c.settings.telegram_admin_chat_id,
+    )
+    application.run_polling(drop_pending_updates=False, stop_signals=None)
+    return None
+
+
 JOBS: dict[str, Job] = {
     "snapshot daily": lambda c: jobs.run_daily(
         c.store, c.fpl, c.odds, football_data=FootballDataClient(c.http)
@@ -1608,6 +1713,9 @@ JOBS: dict[str, Job] = {
     "optimize squad": _squad_errors(_optimize_squad),
     "models eval": _models_eval,
     "holdout check": _holdout_check,
+    "live tick": lambda c: _live(c, tick=True),
+    "live prepare": lambda c: _live(c, tick=False),
+    "bot run": lambda c: _bot_run(c),
     "holdout run": _holdout_run,
 }
 
@@ -1659,7 +1767,20 @@ def build_parser() -> argparse.ArgumentParser:
     _add_optimize_parsers(groups)
     _add_models_parsers(groups)
     _add_holdout_parsers(groups)
+    _add_bot_parsers(groups)
     return parser
+
+
+def _add_bot_parsers(groups: Any) -> None:
+    live = groups.add_parser("live", help="go-live jobs: plan contexts and deadline alerts")
+    live.add_argument(
+        "command",
+        choices=["tick", "prepare"],
+        help="tick: the 15-minute alert job (fplopt.bot.live); prepare: rebuild data/ and the "
+        "plan context for the next deadline now",
+    )
+    bot = groups.add_parser("bot", help="the Telegram bot")
+    bot.add_argument("command", choices=["run"], help="run: long polling until stopped")
 
 
 def _add_holdout_parsers(groups: Any) -> None:

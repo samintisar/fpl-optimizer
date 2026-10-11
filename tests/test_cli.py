@@ -1220,3 +1220,49 @@ def test_holdout_check_prints_the_inputs(tmp_path, monkeypatch, league, capsys):
     printed = capsys.readouterr().out
     assert "2023-24 inputs per deadline" in printed
     assert (code == 0) == (alerts == []) and ("No problems" in printed) == (code == 0)
+
+
+# --- the bot (Phase 7) ------------------------------------------------------------------------
+
+
+def test_settings_state_dir():
+    assert Settings.from_env({}).state_dir == Path("state").resolve()
+    assert Settings.from_env({"FPLOPT_STATE_DIR": "/srv/st"}).state_dir == Path("/srv/st").resolve()
+
+
+def test_live_prepare_writes_a_plan_context(tmp_path, monkeypatch, league, capsys):
+    from fplopt.backtest.simulator import season_schedule
+    from fplopt.bot.context import ContextStore
+
+    deadline = season_schedule(league, 2023, 5)["deadline_time"].iloc[0].to_pydatetime()
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+    monkeypatch.setattr(cli.jobs, "utc_now", lambda: deadline + timedelta(hours=1))
+    builds = []
+    monkeypatch.setattr(cli, "_build_subprocess", lambda settings: lambda: builds.append(1))
+    settings = replace(make_settings(tmp_path), state_dir=tmp_path / "state")
+    assert cli.main(["live", "prepare"], settings=settings) == 0
+    assert builds == [1]
+    assert "2023-24 GW6, deadline " in capsys.readouterr().out
+    meta = ContextStore(tmp_path / "state" / "context").meta()
+    assert (meta["season"], meta["gw"], meta["xp_model"]) == (2023, 6, "v1")
+
+
+@pytest.mark.parametrize("argv", [["live", "tick"], ["bot", "run"]])
+def test_bot_jobs_need_the_token(tmp_path, monkeypatch, argv):
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    settings = replace(make_settings(tmp_path), telegram_bot_token=None, state_dir=tmp_path)
+    assert cli.main(argv, settings=settings) == 1
+    assert "TELEGRAM_BOT_TOKEN is not set" in alerts[0]
+
+
+def test_build_subprocess_runs_build_all_with_the_settings_dirs(tmp_path, monkeypatch):
+    import subprocess
+
+    seen = {}
+    monkeypatch.setattr(subprocess, "run", lambda cmd, env, check: seen.update(cmd=cmd, env=env))
+    settings = replace(make_settings(tmp_path), data_dir=tmp_path / "d")
+    cli._build_subprocess(settings)()
+    assert seen["cmd"][1:] == ["-m", "fplopt.cli", "build", "all"]
+    assert seen["env"]["FPLOPT_RAW_DIR"] == str(tmp_path)
+    assert seen["env"]["FPLOPT_DATA_DIR"] == str(tmp_path / "d")

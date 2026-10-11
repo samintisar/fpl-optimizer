@@ -12,7 +12,7 @@ your own in `~/.ssh/config` or substitute `user@host`.
    git clone https://github.com/samintisar/fpl-optimizer.git ~/fpl-optimizer
    curl -LsSf https://astral.sh/uv/install.sh | sh
    source "$HOME/.local/bin/env"   # put uv on PATH in this shell
-   cd ~/fpl-optimizer && uv sync --locked
+   cd ~/fpl-optimizer && uv sync --locked --all-extras
    ```
    A server cloned earlier over SSH with a read-only deploy key keeps pulling as before.
 2. Telegram alerts: create a bot with @BotFather, send it any message, then read your chat id from
@@ -58,7 +58,7 @@ your own in `~/.ssh/config` or substitute `user@host`.
 - Timers: `systemctl --user list-timers 'fplopt-*'`
 - Logs: `journalctl --user -u fplopt-daily.service -u fplopt-tick.service -u fplopt-freshness.service --since today`
 - Archive age by hand: `.venv/bin/fplopt check freshness` (logs the newest bootstrap's age; exit 1 and an alert if over 36 h)
-- Update: `cd ~/fpl-optimizer && git pull && uv sync --locked` (re-copy units if `deploy/systemd/` changed, then `systemctl --user daemon-reload`)
+- Update: `cd ~/fpl-optimizer && git pull && uv sync --locked --all-extras` (re-copy units if `deploy/systemd/` changed, then `systemctl --user daemon-reload`). Keep `--all-extras`: a plain `uv sync --locked` uninstalls the model, optimizer and bot packages the [Telegram bot](#telegram-bot-phase-7) needs.
 - **Units changed in Phase 1a:** `fplopt-daily.service` now has `TimeoutStartSec=40min` (was 20min). On a server set up before that, re-copy the units and reload when deploying:
   ```bash
   cp deploy/systemd/* ~/.config/systemd/user/ && systemctl --user daemon-reload
@@ -110,6 +110,49 @@ With [healthchecks.io](https://healthchecks.io) (free tier is plenty):
 5. Check it: `.venv/bin/fplopt snapshot tick` should log `heartbeat ping sent`, and the check
    turns green on healthchecks.io. No unit change or restart is needed: each run reads `.env`.
 
+## Telegram bot (Phase 7)
+
+The bot uses the same `TELEGRAM_BOT_TOKEN` as the failure alerts. Its design is in `docs/superpowers/plans/2026-10-11-phase-7-bot.md`. It has two parts:
+- **`fplopt-bot.service`**: long polling (no public URL). It answers `/register`, `/plan`, `/setft`, `/alerts`, `/help`, plus the admin's `/allow`, `/block` and `/users`.
+- **`fplopt-live.timer`** (`fplopt live tick`): every 15 minutes, 5 minutes after the archiver tick. It does three things:
+  - rebuilds `data/` and the **plan context** (the v1 xP for the next deadline, shared by every user) whenever something new was archived;
+  - sends the full recommendation **24 hours before each deadline**, after taking a fresh FPL snapshot;
+  - re-runs after the archiver's **pre-deadline snapshot**, and messages a user only if their plan changed.
+
+State lives in `~/fpl-optimizer/state/` (gitignored; `FPLOPT_STATE_DIR` to move it):
+- `bot.sqlite`: users, settings, `/setft` overrides, imported squads and every recommendation (the live log);
+- `context/`: one directory per plan context. Each holds xP, pool and prices as Parquet, plus `meta.json` with the snapshot, git sha and deadline.
+
+### Setup
+
+1. LightGBM (the v1 minutes model) needs the OpenMP runtime, a system package. As an admin user:
+   ```bash
+   sudo apt install libgomp1
+   ```
+2. Install the extras and build the first context (about 4 minutes: `build all` then v1):
+   ```bash
+   cd ~/fpl-optimizer && git pull && ~/.local/bin/uv sync --locked --all-extras
+   .venv/bin/fplopt live prepare
+   ```
+3. Install and start the units:
+   ```bash
+   cp deploy/systemd/* ~/.config/systemd/user/ && systemctl --user daemon-reload
+   systemctl --user enable --now fplopt-bot.service fplopt-live.timer
+   ```
+4. In Telegram, send the bot `/start`. The admin chat (`TELEGRAM_ADMIN_CHAT_ID`) is active straight away. Anyone else is `pending` until the admin answers the request the bot forwards with `/allow <chat id>`. Then `/register <team ID>` and `/plan`.
+
+### Operating
+
+- Logs: `journalctl --user -u fplopt-bot.service -u fplopt-live.service --since today`
+- Contexts: `ls state/context`. The newest is the one in use, and the 12 newest are kept.
+- Memory: botbox has 3.8 GB and no swap.
+  - `build all` peaks at ~1.7 GB, and the live job runs it in a subprocess.
+  - v1 peaks at ~2.0 GB.
+  - Only the live job runs these. The bot only reads contexts, and a `/plan` (import + solve) takes ~20 s and a few hundred MB.
+- After an update (`git pull && uv sync --locked --all-extras`):
+  - `systemctl --user restart fplopt-bot.service`;
+  - the next live tick rebuilds the context, because a new git sha makes it stale.
+
 ## Historical backfills (one-off, Phase 1a)
 
 Run these on the server as transient user units, so they survive SSH disconnects and send the usual failure alert. Lingering is already on (setup step 6).
@@ -117,7 +160,7 @@ Run these on the server as transient user units, so they survive SSH disconnects
 > Verified on the server (systemd 255) on 2026-10-06: the `OnFailure=` property is accepted on transient units. `systemd-run` doesn't expand `%h`/`%n` on its command line, so these commands use `$HOME` and literal unit names. `fplopt-failure@<instance>.service` reads the instance (`%i`) as the name of the failed unit and passes it to `journalctl -u`.
 
 ```bash
-cd ~/fpl-optimizer && git pull && ~/.local/bin/uv sync --locked
+cd ~/fpl-optimizer && git pull && ~/.local/bin/uv sync --locked --all-extras
 
 systemd-run --user --unit=fplopt-bf-football-data --working-directory="$HOME/fpl-optimizer" \
   -p OnFailure=fplopt-failure@fplopt-bf-football-data.service \
