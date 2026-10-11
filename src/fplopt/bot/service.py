@@ -17,10 +17,12 @@ from datetime import UTC, datetime
 import httpx
 
 from fplopt.bot.context import ContextStore, PlanContext
-from fplopt.bot.messages import recommendation_text, squad_text, uk_time
+from fplopt.bot.messages import chips_text, recommendation_text, squad_text, uk_time
 from fplopt.bot.planner import (
+    ChipOptions,
     UnknownTeam,
     UserPlan,
+    chip_options,
     decision_summary,
     import_user_squad,
     plan_user,
@@ -40,6 +42,7 @@ HELP = "\n".join(
         "",
         "/register &lt;team ID&gt; · your FPL team (the number in your team's URL)",
         "/plan · plans for the next deadline",
+        "/chips · what the (untested) chip planner would do: information only",
         "/setft &lt;n&gt; · correct the free transfers for the next GW (/setft clear to undo)",
         "/alerts on|off · the message 24 hours before each deadline (and a re-run about 2 "
         "hours before, only if the plan changes)",
@@ -80,6 +83,7 @@ class BotService:
         *,
         now: Callable[[], datetime] = _utc_now,
         planner: Callable[..., UserPlan] = plan_user,
+        chip_planner: Callable[..., ChipOptions] = chip_options,
     ) -> None:
         self.users = users
         self.contexts = contexts
@@ -87,6 +91,7 @@ class BotService:
         self.admin_chat_id = admin_chat_id
         self.now = now
         self.planner = planner
+        self.chip_planner = chip_planner
 
     # --- access ---------------------------------------------------------------------------
 
@@ -261,6 +266,32 @@ class BotService:
         except EntryError as exc:
             return [Reply(chat_id, f"Can't plan team {user.entry_id}: {_e(exc)}")]
         return [Reply(chat_id, recommendation_text(result))]
+
+    def chips(self, chat_id: int) -> list[Reply]:
+        """`/chips`: the chip scenario search on the user's squad, as information (the bot's
+        plans don't play chips until a chip policy passes its own test)."""
+        user, replies = self._active(chat_id)
+        if user is None:
+            return replies
+        if user.entry_id is None:
+            return [Reply(chat_id, "Register your team first: /register &lt;team ID&gt;")]
+        context = self._context()
+        if context is None:
+            return [Reply(chat_id, NOT_READY)]
+        ft = self.users.free_transfers(user.user_id, context.season, context.gw)
+        try:
+            options = self.chip_planner(self.fpl, user.entry_id, context, ft)
+        except EntryError as exc:
+            return [Reply(chat_id, f"Can't plan team {user.entry_id}: {_e(exc)}")]
+        self.users.record_chip_check(
+            user.user_id,
+            context.season,
+            context.gw,
+            context_id=context.context_id,
+            best=options.plans.best.scenario,
+            scenarios=options.plans.scenario_objectives,
+        )
+        return [Reply(chat_id, chips_text(options))]
 
     def make_plan(self, user: User, context: PlanContext, kind: str) -> UserPlan:
         """Plan the user's team on `context` and log it (`kind`; EntryError is logged as

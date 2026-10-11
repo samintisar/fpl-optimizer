@@ -11,13 +11,14 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fplopt.bot.planner import UserPlan, chips_left, ranked
+from fplopt.bot.planner import CHIP_LABELS, ChipOptions, UserPlan, chips_left, ranked
 from fplopt.seasons import season_label
 
 __all__ = (
     "MAX_MESSAGE",
     "UK",
     "changes_text",
+    "chips_text",
     "recommendation_text",
     "split_message",
     "squad_text",
@@ -175,6 +176,80 @@ def squad_text(plan_context: Any, spec: Any, entry_id: int) -> str:
             f"Chips played: {_e(used)}",
         ]
     )
+
+
+def scenario_label(label: str) -> str:
+    """`bboost@gw9+freehit@gw11` -> 'Bench Boost GW9 + Free Hit GW11'; `none` -> 'no chip'."""
+    if label == "none":
+        return "no chip"
+    parts = []
+    for part in label.split("+"):
+        name, _, gw = part.partition("@gw")
+        parts.append(f"{CHIP_LABELS.get(name, name)} GW{gw}")
+    return " + ".join(parts)
+
+
+def chips_text(options: ChipOptions, shown: int = 6) -> str:
+    """`/chips` (information only): the chips still unused, the best chip plan over the
+    horizon and the solved scenarios against holding every chip."""
+    context, rules, params = options.context, options.rules, options.params
+    gw_of = {i: g for g, i in context.gw_index_map.items()}
+    used = {cid for cid, _ in options.state.chips_used}
+    unused = [
+        f"{CHIP_LABELS.get(w.name, w.name)} (until GW{gw_of.get(w.stop, w.stop)})"
+        for w in sorted(rules.chips, key=lambda w: (w.start, w.chip_id))
+        if w.chip_id not in used and w.stop >= context.gw_index
+    ]
+    objectives = dict(options.plans.scenario_objectives)
+    base = objectives.get("none", 0.0)
+    best = options.plans.best
+    horizon = len(best.gws)
+    last = best.gws[-1].gw
+    lines = [
+        f"<b>GW{context.gw} chips</b> · information only",
+        "The chip planner isn't tested yet: weigh this against your own judgement.",
+        f"Unused chips: {_e(', '.join(unused) or 'none')}",
+        "",
+        f"<b>Best over the next {horizon} GWs:</b> {_e(scenario_label(best.scenario))}"
+        + (
+            ""
+            if best.scenario == "none"
+            else f", {best.total_objective - base:+.1f} xP vs holding every chip"
+        ),
+    ]
+    if best.scenario != "none" and best.first.chip is not None:
+        names = context.names
+        lines.append(
+            f"This GW with it: {_moves(best.first, names, rules.hit_cost)}; captain "
+            f"{_e(names[best.first.captain])}"
+        )
+    if options.singles:
+        lines += ["", "Each chip on its own, in its most promising GW (xP vs no chip):"]
+        for name in CHIP_LABELS:
+            if name in options.singles:
+                label, value = options.singles[name]
+                lines.append(f"· {_e(scenario_label(label))}: {value - base:+.1f}")
+    ranked_scenarios = sorted(objectives.items(), key=lambda kv: -kv[1])
+    lines += ["", "Options the solver checked (xP vs no chip):"]
+    for label, value in ranked_scenarios[:shown]:
+        lines.append(f"· {_e(scenario_label(label))}: {value - base:+.1f}")
+    skipped = len(options.plans.scenario_bounds) - len(objectives)
+    if len(ranked_scenarios) > shown:
+        lines.append(f"· … {len(ranked_scenarios) - shown} more, all lower")
+    if skipped > 0:
+        lines.append(f"{skipped} other options were ruled out: provably no better than the best.")
+    values = ", ".join(
+        f"{CHIP_LABELS[name]} {params.chip_value.get(name, 0.0):g}"
+        for name in CHIP_LABELS
+        if name in params.chip_value
+    )
+    lines += [
+        "",
+        f"How to read it: a chip still held after GW{last} counts as worth a guessed "
+        f"value ({values} xP); a chip whose window ends sooner is worth nothing if held. "
+        "So a chip wins only if it beats that guess. The bot's plans don't play chips.",
+    ]
+    return "\n".join(lines)
 
 
 def split_message(text: str, limit: int = MAX_MESSAGE) -> list[str]:

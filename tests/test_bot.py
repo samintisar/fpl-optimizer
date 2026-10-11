@@ -863,3 +863,58 @@ def test_send_replies_skips_chats_that_refuse():
     bot = Bot()
     asyncio.run(send_replies(bot, [Reply(1, "a"), Reply(2, "b"), Reply(3, "c")]))
     assert bot.sent == [1, 3]
+
+
+# --- /chips (information only) ----------------------------------------------------------------
+
+
+def chip_planner(fpl, entry_id, context, ft=None):
+    from fplopt.bot.planner import chip_options
+
+    return chip_options(fpl, entry_id, context, ft, params=TEST_PARAMS)
+
+
+def test_scenario_label():
+    from fplopt.bot.messages import scenario_label
+
+    assert scenario_label("none") == "no chip"
+    assert scenario_label("bboost@gw9") == "Bench Boost GW9"
+    assert scenario_label("wildcard@gw5+3xc@gw9") == "Wildcard GW5 + Triple Captain GW9"
+
+
+def test_chip_options_and_text(entries, context):
+    from fplopt.bot.messages import chips_text
+
+    options = chip_planner(entries, TEAM, context)
+    objectives = options.plans.scenario_objectives
+    assert "none" in objectives and options.plans.best.scenario in objectives
+    available = {"bboost", "3xc", "freehit", "wildcard"} & {
+        c.name for c in options.rules.chips if c.start <= GW <= c.stop
+    }
+    assert set(options.singles) <= available and options.singles
+    for name, (label, value) in options.singles.items():
+        assert label == f"{name}@gw{GW}"  # a 1-GW horizon: the only GW
+        assert value <= options.plans.best.total_objective + 1e-6
+    text = chips_text(options)
+    assert text.startswith(f"<b>GW{GW} chips</b> · information only")
+    assert "Each chip on its own" in text and "Best over the next 1 GWs" in text
+    assert "Unused chips: " in text and "The bot's plans don't play chips." in text
+    assert len(text) < 4096
+
+
+def test_chips_command(users, contexts, entries, context, member):
+    service = BotService(
+        users,
+        contexts,
+        entries,
+        ADMIN,
+        now=lambda: context.deadline - timedelta(hours=20),
+        chip_planner=chip_planner,
+    )
+    assert texts(service.chips(member))[0].startswith("Register your team first")
+    users.set_entry(users.user(member).user_id, TEAM)
+    text = texts(service.chips(member))[0]
+    assert text.startswith(f"<b>GW{GW} chips</b>")
+    (check,) = users.chip_checks(users.user(member).user_id)
+    assert check["gw"] == GW and "none" in check["scenarios"] and check["best"]
+    assert texts(service.chips(6)) == ["Send /start first."]
