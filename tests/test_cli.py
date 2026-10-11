@@ -1147,6 +1147,7 @@ def holdout_run(tmp_path, monkeypatch, league):
     monkeypatch.setattr(holdout, "FALLBACK", "greedy:rolling:threshold=2.0")
     monkeypatch.setattr(holdout, "N_BOOT", 50)
     monkeypatch.setattr(holdout, "dirty_checkout", lambda root=None: [])
+    monkeypatch.setattr(holdout, "tagged_head", lambda root=None: True)
     alerts = []
     monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
     monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
@@ -1194,6 +1195,11 @@ def test_holdout_run_refuses_a_dirty_checkout_or_used_out(
         holdout_run("--out", str(tmp_path / "a"))
     assert "uncommitted changes" in capsys.readouterr().err
     monkeypatch.setattr(holdout, "dirty_checkout", lambda root=None: [])
+    monkeypatch.setattr(holdout, "tagged_head", lambda root=None: False)
+    with pytest.raises(SystemExit):
+        holdout_run("--out", str(tmp_path / "b"))
+    assert "is not the commit tagged 'phase6-holdout'" in capsys.readouterr().err
+    monkeypatch.setattr(holdout, "tagged_head", lambda root=None: True)
     used = tmp_path / "used"
     used.mkdir()
     (used / "x").write_text("", encoding="utf-8")

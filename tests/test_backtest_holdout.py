@@ -86,6 +86,21 @@ def test_dirty_checkout_ignores_only_the_experiment_log(tmp_path):
     assert sorted(line[3:] for line in holdout.dirty_checkout(tmp_path)) == ["code.py", "new.py"]
 
 
+def test_tagged_head(tmp_path):
+    git(tmp_path, "init", "-q")
+    (tmp_path / "code.py").write_text("x = 1\n", encoding="utf-8")
+    git(tmp_path, "add", ".")
+    commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q"]
+    git(tmp_path, *commit, "-m", "one")
+    assert not holdout.tagged_head(tmp_path)
+    git(tmp_path, "tag", holdout.TAG)
+    assert holdout.tagged_head(tmp_path)
+    git(tmp_path, *commit, "--allow-empty", "-m", "two")  # the tag stays on the first
+    assert not holdout.tagged_head(tmp_path)
+    git(tmp_path, "tag", f"{holdout.TAG}-old")  # a different tag is not the tag
+    assert not holdout.tagged_head(tmp_path)
+
+
 def test_dirty_checkout_without_git(tmp_path, monkeypatch):
     def no_git(*args, **kwargs):
         raise OSError("git not found")
@@ -93,6 +108,8 @@ def test_dirty_checkout_without_git(tmp_path, monkeypatch):
     monkeypatch.setattr(holdout.subprocess, "run", no_git)
     with pytest.raises(RuntimeError, match="can't check the checkout"):
         holdout.dirty_checkout(tmp_path)
+    with pytest.raises(RuntimeError, match="can't check the checkout"):
+        holdout.tagged_head(tmp_path)
 
 
 def test_preflight_lists_every_deadline():

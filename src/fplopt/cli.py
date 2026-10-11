@@ -2071,12 +2071,18 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
             )
         try:
             dirty = holdout.dirty_checkout()
+            tagged = holdout.tagged_head()
         except RuntimeError as exc:
             args.subparser.error(str(exc))
         if dirty:
             args.subparser.error(
                 "the checkout has uncommitted changes (run from a clean checkout of the tagged "
                 "commit): " + "; ".join(dirty[:5])
+            )
+        if not tagged:
+            args.subparser.error(
+                f"HEAD is not the commit tagged {holdout.TAG!r} (git fetch --tags; git checkout "
+                f"{holdout.TAG})"
             )
         if Path(args.out).exists() and any(Path(args.out).iterdir()):
             args.subparser.error(f"--out {args.out} is not empty")

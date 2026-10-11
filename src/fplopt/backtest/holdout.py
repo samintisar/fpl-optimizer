@@ -13,8 +13,9 @@ so `fplopt holdout run` has nothing to vary, and it runs once.
 - **Reported, not gating**: the block-bootstrap CIs, full-run differences, season totals.
 
 `already_run` refuses a second run (the experiment log holds `FAMILY`); `dirty_checkout`
-refuses a run from uncommitted code. `preflight` checks the 2025/26 inputs (schedule, player
-pool, `ep_next`) at every deadline without reading any result.
+and `tagged_head` refuse a run from uncommitted code or from a commit without `TAG`.
+`preflight` checks the 2025/26 inputs (schedule, player pool, `ep_next`) at every deadline
+without reading any result.
 """
 
 from __future__ import annotations
@@ -45,12 +46,14 @@ __all__ = (
     "SEASON",
     "STARTS",
     "SYSTEM",
+    "TAG",
     "already_run",
     "comparisons_table",
     "dirty_checkout",
     "gate",
     "gate_table",
     "preflight",
+    "tagged_head",
 )
 
 SEASON = 2025
@@ -69,6 +72,7 @@ N_BOOT = 2000
 SEED = 0
 CI = 0.8
 FAMILY = "phase6 holdout"
+TAG = "phase6-holdout"  # the commit the run is made from
 # Tracked files a run itself appends to: not "uncommitted code".
 LOG_FILES = ("results/experiments.csv",)
 
@@ -148,6 +152,23 @@ def dirty_checkout(root: Path | None = None) -> list[str]:
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(f"can't check the checkout at {root} with git: {exc}") from None
     return [line for line in out.splitlines() if line[3:].strip() not in LOG_FILES]
+
+
+def tagged_head(root: Path | None = None) -> bool:
+    """Whether the code's checkout HEAD carries the `TAG` the run is made from (fetch tags
+    first: `git fetch --tags`). RuntimeError if git can't tell."""
+    root = Path(__file__).resolve().parents[3] if root is None else root
+    try:
+        out = subprocess.run(
+            ["git", "tag", "--points-at", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(f"can't check the checkout at {root} with git: {exc}") from None
+    return TAG in out.split()
 
 
 def preflight(store: DataStore, season: int = SEASON) -> tuple[pd.DataFrame, list[str]]:
