@@ -166,6 +166,8 @@ def test_every_parsed_command_has_a_job():
         "optimize plan": ["--season", "2023", "--gw", "5"],
         "optimize squad": ["--season", "2026", "--gw", "6", "--entry", "1"],
         "models eval": ["--models", "rolling", "--seasons", "2023"],
+        "chips values": ["--gains", "results/x"],
+        "chips size": ["--paired", "results/x/paired.parquet"],
     }
     for name in cli.JOBS:
         args = parser.parse_args(name.split() + extras.get(name, []))
@@ -527,8 +529,13 @@ def test_cli_policy_and_model_names_match_the_backtester():
     assert set(cli.POLICY_PARAMS["greedy"]) == greedy
     from fplopt.optimize import OptimizerParams
 
-    optimizer = set(cli.POLICY_PARAMS["optimizer"]) - {"chips"}
+    optimizer = set(cli.POLICY_PARAMS["optimizer"]) - {"chips", "chip_shrink"}
     assert optimizer <= {f.name for f in fields(OptimizerParams)}
+    from fplopt.backtest.policies import ChipRulePolicy
+
+    rule_keys = {f.name for f in fields(ChipRulePolicy)} - {"xp_model", "params"}
+    assert set(cli.POLICY_PARAMS["chiprules"]) == optimizer | rule_keys
+    assert set(cli.POLICY_PARAMS["chipgains"]) == optimizer
     assert cli.EP_NEXT_MODELS <= set(MODELS)
     from fplopt.models import MAX_HORIZON
 
