@@ -1,0 +1,14 @@
+[Unit]
+Description=fpl-optimizer plan context and deadline alerts (Telegram bot)
+After=network-online.target
+OnFailure=fplopt-failure@%n.service
+
+[Service]
+Type=oneshot
+# A context rebuild (build all + the v1 model, ~4 min on botbox) plus every user's plan.
+TimeoutStartSec=20min
+WorkingDirectory=%h/fpl-optimizer
+# After=network-online.target does nothing for user units: wait up to ~2 min for DNS at boot,
+# then start regardless (if the network never came up, the job fails and alerts as usual).
+ExecStartPre=/bin/sh -c 'for i in $$(seq 24); do getent hosts fantasy.premierleague.com >/dev/null && exit 0; sleep 5; done; echo "fantasy.premierleague.com still not resolving after 2 minutes; starting anyway" >&2; exit 0'
+ExecStart=%h/fpl-optimizer/.venv/bin/fplopt live tick
