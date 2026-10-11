@@ -652,6 +652,13 @@ Horizon, decay and FT value are confounded — tune them jointly.
 - Score a **shadow policy** that follows its own state from GW1 of logging, separately from my real team.
 - Run the same optimizer on FPL's `ep_next` for comparison.
 
+### Live findings (2026/27; candidates for Phase 8, not changed before Phase 6 — the holdout system is fixed, §12)
+First live plan, GW6 (real squad via `optimize plan --entry`, v1 + the Phase 6 optimizer):
+- **One missed match weighs too much in minutes.** João Pedro missed GW5 (knee, flag cleared to 100%, expected to start) and v1 gave him P(start) 0.60. Test: weight a single absence less when the flag is back to 100%.
+- **Fresh flags.** N.Williams' new 50% illness flag became P(plays) 0.77. Check the flag mapping's calibration on flags set in the last few days, separately from older ones.
+- **Defcon drives some picks.** Silva and Thiaw were recommended mainly on defcon xP, the least-validated component (live check: GW2–5 at horizon 0 only). Track defcon's share of the predicted transfer gain in the live log, and its realized hit rate.
+- **Top-k order is within the MIP gap.** Plans #1–#3 differed by less than the solver gap (0.29–0.47%); #1 had a lower objective than #3. Show such plans as ties, or solve the top-k to a tighter gap.
+
 ---
 
 ## 9. Build phases
