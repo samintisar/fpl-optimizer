@@ -25,7 +25,9 @@ CALIBRATION_PARAMS = (
     '=SharesParams(prior_minutes=1920.0, season_weights=(2.0, 2.0, 1.0, 1.0), club_change_wei'
     'ght=0.5, goals_weight=0.5, price_prior_all=True, pen_team_prior=38.0, conversion_prior=2'
     '0.0, taker_prior=1.0), components=ComponentsParams(seasons=4, season_decay=0.7, keeper_p'
-    'rior=30.0, yellow_prior=10.0, red_prior=60.0, own_goal_prior=60.0), calibrate=True)'
+    'rior=30.0, yellow_prior=10.0, red_prior=60.0, own_goal_prior=60.0, defcon_k=((2, 3.49), '
+    '(3, 1.94), (4, 1.94)), defcon_r=((2, 13.2), (3, 15.2), (4, 15.2)), defcon_prior_mean=((2'
+    ', 6.57), (3, 7.73), (4, 4.07))), calibrate=True)'
 )
 
 CALIBRATION_TABLE: tuple = (

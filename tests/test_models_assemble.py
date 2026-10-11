@@ -6,6 +6,7 @@ import math
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.stats import nbinom
 from synthetic_season import synthetic_tables
 
 import fplopt.models.assemble as assemble
@@ -17,6 +18,7 @@ from fplopt.models import MODELS
 from fplopt.models.assemble import (
     FIXTURE_COLUMNS,
     GW_COMPONENTS,
+    GW_EXTRAS,
     POINT_COLUMNS,
     V1Params,
     calibrate_inputs,
@@ -211,6 +213,96 @@ def test_nobody_scores_without_minutes():
     assert out["xp"] == 0.0 and out["p_goal"] == 0.0
 
 
+# --- defensive contributions --------------------------------------------------------------------
+
+NATIVE = backtest_rules(2026)  # the live rules: 2 pts at DEF CBIT >= 10, MID/FWD CBIRT >= 12
+
+
+def nb_tail(mean: float, r: float, k: int) -> float:
+    return float(nbinom.sf(k - 1, r, r / (r + mean))) if mean > 0 else 0.0
+
+
+def test_defcon_points_of_a_defender_by_hand():
+    # 60+ minutes (all 90) w.p. 0.6, 1-59 w.p. 0.3 (30 minutes on average): CBIT 7 per 90.
+    row = fixture_row(
+        element_type=2,
+        season=2026,
+        p_play=0.9,
+        p_60=0.6,
+        e_minutes=0.6 * 90 + 0.3 * 30,
+        defcon_rate=7.0,
+        defcon_r=13.2,
+    )
+    out = fixture_points(frame(row), NATIVE).iloc[0]
+    p = 0.6 * nb_tail(7.0, 13.2, 10) + 0.3 * nb_tail(7.0 / 3, 13.2, 10)
+    assert out["p_defcon"] == pytest.approx(p, rel=1e-9)
+    assert out["pts_defcon"] == pytest.approx(2 * p, rel=1e-9)
+    assert out["xp"] == pytest.approx(out[list(POINT_COLUMNS)].sum())
+    assert out["xp"] == pytest.approx(0.9 + 0.6 + 2 * p)
+
+
+def test_defcon_points_of_a_midfielder_by_hand():
+    # Always 60+, 75 minutes on average (m_sixty): CBIRT 11 per 90, threshold 12.
+    row = fixture_row(
+        element_type=3,
+        season=2026,
+        p_play=1.0,
+        p_60=1.0,
+        e_minutes=75.0,
+        m_sixty=75.0,
+        defcon_rate=11.0,
+        defcon_r=15.2,
+    )
+    out = fixture_points(frame(row), NATIVE).iloc[0]
+    p = nb_tail(11.0 * 75 / 90, 15.2, 12)
+    assert out["p_defcon"] == pytest.approx(p, rel=1e-9)
+    assert out["pts_defcon"] == pytest.approx(2 * p, rel=1e-9)
+    assert out["xp"] == pytest.approx(2 + 2 * p)
+
+
+def test_defcon_is_zero_for_goalkeepers_and_without_a_rate():
+    rows = [
+        fixture_row(element_type=1, season=2026, p_play=1.0, p_60=1.0, e_minutes=90.0),
+        fixture_row(element_type=4, season=2026, p_play=1.0, p_60=1.0, e_minutes=90.0),
+    ]
+    rows[0].update(defcon_rate=20.0, defcon_r=15.2, player_key=1)
+    rows[1].update(defcon_rate=0.0, defcon_r=15.2, player_key=2)
+    out = fixture_points(frame(*rows), NATIVE)
+    assert (out["pts_defcon"] == 0.0).all() and (out["p_defcon"] == 0.0).all()
+
+
+def test_rules_without_defcon_leave_xp_byte_identical():
+    """Develop/validate rules score no defcon: pts_defcon is exactly 0 and xp is the sum of
+    the other components, bit for bit, whatever the defcon inputs."""
+    rows = [
+        fixture_row(
+            element_type=position,
+            player_key=position,
+            p_play=0.9,
+            p_60=0.7,
+            e_minutes=70.0,
+            e_np_goals=0.2,
+            e_assists=0.1,
+            p_cs=0.3,
+            lambda_against=1.3,
+            saves_rate=3.0 if position == 1 else 0.0,
+            defcon_rate=9.0,
+            defcon_r=13.2,
+            **bonus(play=0.1, cs=0.5),
+        )
+        for position in (1, 2, 3, 4)
+    ]
+    out = fixture_points(frame(*rows), RULES)
+    assert (out["pts_defcon"].to_numpy() == 0.0).all() and (out["p_defcon"] == 0.0).all()
+    without = fixture_points(frame(*rows).assign(defcon_rate=0.0, defcon_r=0.0), RULES)
+    assert np.array_equal(out["xp"].to_numpy(), without["xp"].to_numpy())
+    others = [name for name in POINT_COLUMNS if name != "pts_defcon"]
+    before = np.sum([out[name].to_numpy() for name in others] + [np.zeros(len(out))], axis=0)
+    assert np.array_equal(out["xp"].to_numpy(), before)
+    # The same rows under the live rules do score it.
+    assert (fixture_points(frame(*rows), NATIVE)["pts_defcon"].iloc[1:] > 0).all()
+
+
 # --- calibration ----------------------------------------------------------------------------
 
 
@@ -314,10 +406,10 @@ def test_v1_frame_schema_doubles_and_blanks(league):
     fixtures = predict_fixtures(view, fit)
     out = gw_frame(view, fixtures)
     base = [name for name, _ in XP_DTYPES]
-    assert list(out.columns) == [*base, *GW_COMPONENTS]
+    assert list(out.columns) == [*base, *GW_COMPONENTS, *GW_EXTRAS]
     assert dict(out.dtypes) == {
         **{name: np.dtype(dtype) for name, dtype in XP_DTYPES},
-        **{name: np.dtype("float64") for name in GW_COMPONENTS},
+        **{name: np.dtype("float64") for name in (*GW_COMPONENTS, *GW_EXTRAS)},
     }
     assert out.index.equals(pd.RangeIndex(len(out)))
     pool = player_pool(view)
@@ -338,12 +430,37 @@ def test_v1_frame_schema_doubles_and_blanks(league):
     np.testing.assert_allclose(double["xp"], sums.loc[double["player_key"], "xp"])
     np.testing.assert_allclose(double["e_minutes"], sums.loc[double["player_key"], "e_minutes"])
     assert double["p_start"].isna().all() and double["p_cs"].isna().all()
+    # P(plays in at least one fixture): independent fixtures in a double, p_play in a
+    # single GW, 0 in a blank.
+    neither = (1.0 - in_double["p_play"]).groupby(in_double["player_key"]).prod()
+    np.testing.assert_allclose(
+        double["p_play_gw"], 1.0 - neither.loc[double["player_key"]].to_numpy()
+    )
+    assert (blank["p_play_gw"] == 0).all()
     single = out[(out["gw"] == 6)].merge(
         fixtures[fixtures["gw"] == 6], on="player_key", suffixes=("", "_fixture")
     )
     np.testing.assert_allclose(single["p_cs"], single["p_60_fixture"] * single["p_cs_fixture"])
     np.testing.assert_allclose(single["p_min_0"] + single["p_min_1_59"] + single["p_min_60"], 1.0)
+    np.testing.assert_allclose(single["p_play_gw"], single["p_play"])
     assert (out["xp"].abs() < 20).all() and out["xp"].notna().all()
+
+
+def test_unknown_p_play_in_a_fixture_leaves_p_play_gw_unknown(league):
+    # prod() skips NaN: without the guard a NaN P(play) would read as certain absence.
+    view = view_at(league, 4)
+    fixtures = predict_fixtures(view, fit_v1(view, FAST))
+    pool = player_pool(view)
+    club = pool.loc[pool["team_key"] == 1, "player_key"]  # plays twice in GW 7
+    in_double = fixtures[(fixtures["gw"] == 7) & fixtures["player_key"].isin(club)]
+    player = int(in_double["player_key"].iloc[0])
+    row = in_double.index[0]
+    fixtures.loc[row, "p_play"] = np.nan
+    out = gw_frame(view, fixtures)
+    mine = out[(out["player_key"] == player) & (out["gw"] == 7)]
+    assert mine["p_play_gw"].isna().all()
+    others = out[(out["player_key"] != player) & (out["gw"] == 7)]
+    assert others["p_play_gw"].notna().all()
 
 
 def test_fixture_components_cover_the_minutes_rows(league):
@@ -447,3 +564,37 @@ def test_a_player_dropped_upstream_is_not_a_blank(league):
     dropped = fixtures[fixtures["player_key"] != fixtures["player_key"].iloc[0]]
     with pytest.raises(ValueError, match="have no per-fixture rows"):
         gw_frame(view, dropped)
+
+
+def with_defcon_counts(tables: dict) -> dict:
+    out = {name: frame.copy() for name, frame in tables.items()}
+    matches = out["player_match"]
+    count = np.random.default_rng(1).poisson(8.0, len(matches)) * (matches["minutes"] > 0)
+    matches["defensive_contribution"] = pd.array(count, dtype="Int64")
+    return out
+
+
+def test_v1_scores_defcon_only_under_rules_with_it(league):
+    # A develop season (2023): no defcon even with counts in the data; xp unchanged.
+    tables = with_defcon_counts(league)
+    view = view_at(tables, 4)
+    fit = fit_v1(view, FAST)
+    develop = predict_fixtures(view, fit)
+    assert (develop["pts_defcon"] == 0.0).all()
+    pd.testing.assert_frame_equal(
+        develop.drop(columns=["defcon_rate", "defcon_r"]),
+        predict_fixtures(view_at(league, 4), fit_v1(view_at(league, 4), FAST)).drop(
+            columns=["defcon_rate", "defcon_r"]
+        ),
+        check_exact=True,
+    )
+    # The live season (2026): outfield players score it, goalkeepers never.
+    live = with_defcon_counts(synthetic_tables(seasons=(2025, 2026), n_clubs=6, seed=3))
+    view = view_at(live, 4, season=2026)
+    out = predict_fixtures(view, fit_v1(view, FAST))
+    keeper = out["element_type"] == 1
+    assert (out.loc[keeper, "pts_defcon"] == 0).all()
+    playing = ~keeper & (out["p_play"] > 0.05)
+    assert (out.loc[playing, "pts_defcon"] > 0).all()
+    np.testing.assert_allclose(out["pts_defcon"], 2 * out["p_defcon"])
+    np.testing.assert_allclose(out["xp"], out[list(POINT_COLUMNS)].sum(axis=1))

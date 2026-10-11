@@ -130,6 +130,10 @@ def _check_leakage(c: Context) -> object:
 BACKTEST_SEASONS = range(2016, 2027)  # seasons with built tables and backtest rules
 EP_NEXT_FIRST_SEASON = 2021  # FPL's ep_next is in the snapshots from 2020/21 GW32 on
 XP_MODELS = ("rolling", "ep_next", "ep_next_fade", "v1")  # fplopt.models.MODELS keys
+# xP models whose frames carry `p_play` / `e_minutes`; the optimizer's minutes keys do
+# nothing on the others (and would only add a variant to the comparison family).
+MINUTES_XP_MODELS = ("v1",)
+MINUTES_KEYS = ("bench_from_minutes", "min_minutes")
 EP_NEXT_MODELS = frozenset({"ep_next", "ep_next_fade"})  # need FPL snapshots (2021/22+)
 # Planner horizons are capped at the xP frames' GWs (fplopt.models.MAX_HORIZON; a test
 # checks they agree): a longer one would silently plan over fewer GWs.
@@ -169,6 +173,8 @@ POLICY_PARAMS: dict[str, dict[str, Callable[[str], Any]]] = {
         "hit_margin": float,
         "max_hits": parse_max_hits,
         "itb_value": float,
+        "bench_from_minutes": parse_flag,
+        "min_minutes": float,
         "chips": parse_flag,
     },
 }
@@ -296,6 +302,13 @@ def make_policy_spec(name: str, xp: str, params: dict[str, str]) -> PolicySpec:
         )
     if name == "greedy" and given.get("max_transfers", 0) < 0:
         raise argparse.ArgumentTypeError(f"bad policy {spec}: need max_transfers >= 0")
+    if name == "optimizer" and xp not in MINUTES_XP_MODELS:
+        ignored = [key for key in MINUTES_KEYS if key in given]
+        if ignored:
+            raise argparse.ArgumentTypeError(
+                f"bad policy {spec}: {', '.join(ignored)} only apply to xP models with "
+                f"minutes ({', '.join(MINUTES_XP_MODELS)})"
+            )
     if name == "optimizer" and not 0 < given.get("decay", 0.5) <= 1:
         raise argparse.ArgumentTypeError(f"bad policy {spec}: need 0 < decay <= 1")
     try:  # whatever else the policy rejects (e.g. a negative hit_margin or itb_value)
@@ -924,6 +937,151 @@ def _backtest_compare(c: Context) -> object:
     return summary
 
 
+# --- the Phase 6 holdout run -----------------------------------------------------------------
+
+
+def _holdout_check(c: Context) -> object:
+    """`fplopt holdout check`: the 2025/26 inputs at every deadline (`holdout.preflight`:
+    player pool, `ep_next`, clubs without players), no results read. Fails (and alerts) on
+    any problem, which must be settled before `holdout run`."""
+    from fplopt.backtest.holdout import SEASON, preflight
+
+    table, problems = preflight(_backtest_store(c), SEASON)
+    shown = table.assign(clubs_without_players=table["clubs_without_players"].map(len))
+    print(f"{season_label(SEASON)} inputs per deadline\n{shown.to_string(index=False)}", flush=True)
+    if problems:
+        raise RuntimeError(f"{len(problems)} problem(s): " + "; ".join(problems))
+    print("\nNo problems: the holdout inputs are complete.", flush=True)
+    return table
+
+
+def _holdout_run(c: Context) -> object:
+    """`fplopt holdout run`: the pre-registered Phase 6 run (`fplopt.backtest.holdout`, every
+    setting fixed there). The system, both baselines and the fallback from the same 2025/26
+    start states (full runs), the per-decision comparisons of the system and the fallback
+    against each baseline, the gate (window t-test + xG sign) and the verdict. Writes
+    gws.parquet, paired.parquet, per_decision.parquet and summary.json to --out and logs
+    the run (family `holdout.FAMILY`) *before* printing any result, so a crash before the
+    verdict leaves no result seen."""
+    import pandas as pd
+
+    from fplopt.backtest import holdout as h
+    from fplopt.backtest.evaluate import (
+        OWN,
+        log_experiment,
+        paired_full_run,
+        parse_start_specs,
+        per_decision,
+        run_grid,
+        summarize,
+    )
+    from fplopt.backtest.simulator import Caches
+
+    args = c.args
+    store = _backtest_store(c)
+    out = Path(args.out)
+    system = parse_policy_spec(h.SYSTEM).build()
+    fallback = parse_policy_spec(h.FALLBACK).build()
+    baselines = [(label, parse_policy_spec(spec).build()) for label, spec in h.BASELINES]
+    policies = [system, *(b for _, b in baselines), fallback]
+    caches = Caches()
+    began = time.perf_counter()
+    results = run_grid(
+        store, [h.SEASON], h.STARTS, policies, caches=caches, jobs=args.jobs, allow_holdout=True
+    )
+    if results.empty:
+        raise RuntimeError("no start state could be built")
+    pairs = [(cand, base, label) for cand in (system, fallback) for label, base in baselines]
+    frames = [
+        per_decision(
+            store,
+            [h.SEASON],
+            h.STARTS,
+            cand,
+            base,
+            OWN,
+            k=h.K,
+            stride=h.K,
+            reference=h.REFERENCE,
+            caches=caches,
+            jobs=args.jobs,
+            allow_holdout=True,
+        )
+        for cand, base, _ in pairs
+    ]
+    decisions = pd.concat(frames, ignore_index=True)
+    summary = summarize(
+        results,
+        [(cand, base) for cand, base, _ in pairs],
+        decisions,
+        block_length=h.BLOCK_LENGTH,
+        n_boot=h.N_BOOT,
+        seed=h.SEED,
+        ci=h.CI,
+    )
+    gates = [h.gate(decisions, cand.name, base.name, label) for cand, base, label in pairs]
+    system_gates = [g for g in gates if g.candidate == system.name]
+    passed = all(g.passed for g in system_gates)
+    runtime = time.perf_counter() - began
+    config = {
+        "season": h.SEASON,
+        "starts": h.STARTS,
+        "system": h.SYSTEM,
+        "baselines": dict(h.BASELINES),
+        "fallback": h.FALLBACK,
+        "k": h.K,
+        "stride": h.K,
+        "continuation": OWN,
+        "reference": h.REFERENCE,
+        "alpha": h.ALPHA,
+        "block_length": h.BLOCK_LENGTH,
+        "n_boot": h.N_BOOT,
+        "seed": h.SEED,
+        "ci": h.CI,
+        "jobs": args.jobs,
+        "out": str(out),
+    }
+    out.mkdir(parents=True, exist_ok=True)
+    results.to_parquet(out / "gws.parquet", index=False)
+    pd.concat(
+        [paired_full_run(results, cand, base) for cand, base, _ in pairs], ignore_index=True
+    ).to_parquet(out / "paired.parquet", index=False)
+    decisions.to_parquet(out / "per_decision.parquet", index=False)
+    payload = {
+        "command": args.command_line,
+        "config": config,
+        "runtime_seconds": round(runtime, 1),
+        "verdict": "pass" if passed else "fail",
+        "gates": [g.to_dict() for g in gates],
+        "summary": summary.to_dict(),
+    }
+    _write_json(out / "summary.json", payload)
+    metrics = _experiment_metrics(summary) | _jsonable(
+        {"verdict": payload["verdict"], "gates": payload["gates"]}
+    )
+    log_experiment(args.experiments, args.command_line, config, metrics, 1, h.FAMILY)
+    totals = season_totals_by_start(results, parse_start_specs(h.STARTS))
+    print(
+        f"Phase 6 holdout run, {season_label(h.SEASON)}, starts {h.STARTS} ({runtime:.0f}s)\n"
+        f"System {system.name}; baselines "
+        + ", ".join(f"({label}) {base.name}" for label, base in baselines)
+        + f"; fallback {fallback.name} (reported only)\n\n"
+        f"{TOTALS_TITLE}\n{season_table(totals)}\n\n"
+        f"Paired differences candidate - baseline, all comparisons (full run per GW; "
+        f"per-decision per {h.K}-GW window, own continuation, states from the baseline's "
+        f"run; {h.CI:.0%} block-bootstrap CIs, reported only)\n"
+        f"{h.comparisons_table(summary.comparisons)}\n\n"
+        f"Gate (per-decision windows; pass = one-sided window t-test p < {h.ALPHA:.2f} on "
+        "realized points and a positive xG-scored mean)\n"
+        f"{h.gate_table(gates)}\n\n"
+        f"VERDICT: the system {'PASSES' if passed else 'FAILS'} the go-live gate "
+        f"({sum(g.passed for g in system_gates)} of {len(system_gates)} baselines beaten). "
+        f"Logged to {args.experiments} (family '{h.FAMILY}'); written to {out}.",
+        flush=True,
+    )
+    return gates
+
+
 # --- model evaluation -------------------------------------------------------------------------
 
 
@@ -1136,6 +1294,9 @@ def _optimize_bench(c: Context) -> object:
         ),
         all_chips=args.all_chips,
         prune_study=args.prune_study,
+        seasons=args.seasons,
+        xp_models=args.xp,
+        floors=args.floors,
         progress=lambda line: print(line, flush=True),
     )
     summary = summarize(result)
@@ -1211,7 +1372,7 @@ def plan_gw_index(store: DataStore, season: int, gw: int) -> int | None:
 
 def plan_params(args: argparse.Namespace) -> OptimizerParams:
     """`optimize plan`'s planner settings: --horizon (1..MAX_PLAN_HORIZON), --max-hits,
-    --hit-margin over `OptimizerParams()`, with the interactive wall-clock cap. ValueError
+    --hit-margin, --decay over `OptimizerParams()`, with the interactive wall-clock cap. ValueError
     on a value the planner rejects (main reports it as a usage error)."""
     from fplopt.optimize import OptimizerParams
 
@@ -1222,13 +1383,139 @@ def plan_params(args: argparse.Namespace) -> OptimizerParams:
         settings["max_hits"] = parse_max_hits(args.max_hits)
     if args.hit_margin is not None:
         settings["hit_margin"] = args.hit_margin
+    if getattr(args, "decay", None) is not None:
+        settings["decay"] = args.decay
     return OptimizerParams(**settings)
 
 
+def lineup_text(g: Any, names: dict[int, str]) -> str:
+    """A plan GW's lineup: the XI (captain C, vice V) and the bench in autosub order."""
+    marks = {g.captain: " (C)", g.vice: " (V)"}
+    xi = ", ".join(f"{names[k]}{marks.get(k, '')}" for k in g.starters)
+    bench = ", ".join(names[k] for k in g.bench)
+    chip = f", chip {g.chip}" if g.chip else ""
+    return f"Plan #1 lineup for GW{g.gw}{chip}:\n  XI: {xi}\n  Bench (in order): {bench}"
+
+
+@dataclass(frozen=True)
+class RealSquad:
+    """A real squad for `optimize plan` / `optimize squad`: the spec (`fplopt.entry`), its
+    `SquadState` and element_id -> web name."""
+
+    spec: Any
+    state: Any
+    names: dict[int, str]
+
+
+def _real_squad(
+    c: Context, store: DataStore, view: Any, season: int, gw: int, rules: Any
+) -> RealSquad:
+    """--entry (import from FPL's public API) and/or --squad-file (overrides), as a state
+    at GW `gw`'s deadline (`fplopt.entry`; EntryError when the squad is not usable)."""
+    from fplopt.backtest.simulator import FAR_FUTURE, season_schedule
+    from fplopt.entry import (
+        EntryError,
+        apply_overrides,
+        import_squad,
+        read_squad_file,
+        squad_state,
+    )
+    from fplopt.features.baseline import player_pool
+
+    args = c.args
+    gameweeks = store.as_of(FAR_FUTURE).table("gameweek", columns=["season", "gw", "gw_index"])
+    gameweeks = gameweeks[gameweeks["season"] == season]
+    gw_index = dict(
+        zip(gameweeks["gw"].astype(int), gameweeks["gw_index"].astype(int), strict=True)
+    )
+    players = view.table(
+        "player_season", columns=["player_key", "season", "element_id", "web_name"]
+    )
+    players = players[players["season"] == season].drop_duplicates("element_id", keep="last")
+    element_keys = {
+        int(e): int(k) for e, k in zip(players["element_id"], players["player_key"], strict=True)
+    }
+    names = {
+        int(e): str(n) for e, n in zip(players["element_id"], players["web_name"], strict=True)
+    }
+    key_elements = {k: e for e, k in element_keys.items()}
+
+    def initial_prices(first_gw: int) -> dict[int, int]:
+        deadline = season_schedule(store, season, gw_index[first_gw])["deadline_time"].iloc[0]
+        pool = player_pool(store.as_of(deadline))
+        return {
+            key_elements[int(k)]: int(p)
+            for k, p in zip(pool["player_key"], pool["price"], strict=True)
+            if int(k) in key_elements
+        }
+
+    def resolve(name: str) -> int:
+        hits = players[players["web_name"].str.casefold() == name.casefold()]
+        if len(hits) != 1:
+            found = "no player" if hits.empty else f"{len(hits)} players"
+            raise EntryError(f"squad file: {found} named {name!r} in {season_label(season)}")
+        return int(hits["element_id"].iloc[0])
+
+    spec = None
+    if args.entry is not None:
+        try:
+            spec = import_squad(c.fpl, args.entry, season, gw, rules, gw_index, initial_prices)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise EntryError(f"FPL has no team with ID {args.entry}") from None
+            raise
+    if args.squad_file is not None:
+        spec = apply_overrides(spec, read_squad_file(args.squad_file), season, gw, resolve)
+    if spec is None:
+        raise EntryError("give --entry and/or --squad-file")
+    state = squad_state(spec, player_pool(view), element_keys, rules, gw_index)
+    return RealSquad(spec, state, names)
+
+
+def _squad_errors(job: Job) -> Job:
+    """The job with `fplopt.entry.EntryError` (a bad team ID, squad file or squad) reported
+    as a usage error (exit 2, no traceback or admin alert)."""
+
+    def run(c: Context) -> object:
+        from fplopt.entry import EntryError
+
+        try:
+            return job(c)
+        except EntryError as exc:
+            print(f"error: {exc}", file=sys.stderr, flush=True)
+            raise SystemExit(2) from None
+
+    return run
+
+
+def _optimize_squad(c: Context) -> object:
+    """`fplopt optimize squad`: import --entry's squad before --season/--gw (with
+    --squad-file's overrides, if any), check it, and write it as a squad file to --out
+    (to edit, then plan with `optimize plan --squad-file`)."""
+    from fplopt.backtest.rules import backtest_rules
+    from fplopt.backtest.simulator import season_schedule
+    from fplopt.entry import write_squad_file
+
+    args = c.args
+    (season,) = args.season
+    store = _backtest_store(c)
+    gw_index = plan_gw_index(store, season, args.gw)
+    if gw_index is None:
+        raise ValueError(f"{season_label(season)} has no GW{args.gw}")
+    view = store.as_of(season_schedule(store, season, gw_index)["deadline_time"].iloc[0])
+    real = _real_squad(c, store, view, season, args.gw, backtest_rules(season))
+    out = Path(args.out)
+    write_squad_file(real.spec, out, real.names)
+    print(out.read_text(encoding="utf-8"), flush=True)
+    print(f"Written to {out}", flush=True)
+    return real
+
+
 def _optimize_plan(c: Context) -> object:
-    """`fplopt optimize plan`: the start state (template or random squad) at the deadline
-    of --season/--gw, the --xp frame, and `optimize` (top --top-k plans, the roll plan,
-    chips unless --no-chips); prints `plan_text`."""
+    """`fplopt optimize plan`: the start state at the deadline of --season/--gw (template
+    or random squad, or a real one: --entry and/or --squad-file, `fplopt.entry`), the --xp
+    frame, and `optimize` (top --top-k plans, the roll plan, chips unless --no-chips);
+    prints `plan_text` and plan #1's lineup for the GW."""
     from fplopt.backtest.rules import backtest_rules
     from fplopt.backtest.simulator import season_schedule
     from fplopt.backtest.start_states import random_state, template_state
@@ -1245,10 +1532,15 @@ def _optimize_plan(c: Context) -> object:
     schedule = season_schedule(store, season, gw_index)
     view = store.as_of(schedule["deadline_time"].iloc[0])
     rules = backtest_rules(season)
-    if args.start == "template":
-        state = template_state(view, rules)
+    notes: tuple[str, ...] = ()
+    if args.entry is not None or args.squad_file is not None:
+        real = _real_squad(c, store, view, season, args.gw, rules)
+        state, notes = real.state, real.spec.notes
+        start = f"team {args.entry}" if args.entry is not None else "squad-file"
+    elif args.start in (None, "template"):
+        state, start = template_state(view, rules), "template"
     else:
-        state = random_state(view, rules, int(args.start.split(":", 1)[1]))
+        state, start = random_state(view, rules, int(args.start.split(":", 1)[1])), args.start
     params = plan_params(args)
     began = time.perf_counter()
     pool = player_pool(view)
@@ -1267,22 +1559,134 @@ def _optimize_plan(c: Context) -> object:
             g.vice,
         )
     ]
-    names = _player_names(view, [*keys, *problem.state.player_keys])
+    first = plans.plans[0].gws[0] if plans.plans else None
+    lineup_keys = [] if first is None else [*first.starters, *first.bench]
+    names = _player_names(view, [*keys, *lineup_keys, *problem.state.player_keys])
     squad = ", ".join(names[k] for k in problem.state.player_keys)
+    used = ", ".join(f"{cid}@{g}" for cid, g in state.chips_used) or "none"
     print(
-        f"{season_label(season)} GW{args.gw} (gw_index {state.gw_index}), {args.start} "
-        f"squad, xP {args.xp}, horizon {len(problem.gws)} GW(s), "
+        f"{season_label(season)} GW{args.gw} (gw_index {state.gw_index}), {start} "
+        f"squad, xP {args.xp}, horizon {len(problem.gws)} GW(s), decay {params.decay}, "
         f"{'chips' if args.chips else 'no chips'}, max_hits "
         f"{'none' if params.max_hits is None else params.max_hits}, hit_margin "
-        f"{params.hit_margin}; bank {state.bank / 10:.1f}, FT {state.free_transfers}; "
-        f"{len(problem.players)} candidates ({runtime:.1f}s)\nSquad: {squad}\n\n"
-        f"{plan_text(plans, names)}",
+        f"{params.hit_margin}; bank {state.bank / 10:.1f}, FT {state.free_transfers}, "
+        f"chips used (id@gw_index) {used}; {len(problem.players)} candidates "
+        f"({runtime:.1f}s)\nSquad: {squad}\n"
+        + "".join(f"  note: {n}\n" for n in notes)
+        + f"\n{plan_text(plans, names)}",
         flush=True,
     )
+    if first is not None:
+        print(f"\n{lineup_text(first, names)}", flush=True)
     if args.chips:
         solved = ", ".join(f"{k} {v:.2f}" for k, v in plans.scenario_objectives.items())
         print(f"\nChip scenarios solved (total objective): {solved}", flush=True)
     return plans
+
+
+def _bot_service(c: Context) -> Any:
+    """The bot's command logic on the server's state directory (`fplopt.bot`)."""
+    from fplopt.bot.context import ContextStore
+    from fplopt.bot.service import BotService
+    from fplopt.bot.store import UserStore
+
+    admin = c.settings.telegram_admin_chat_id
+    state = c.settings.state_dir
+    return BotService(
+        UserStore(state / "bot.sqlite"),
+        ContextStore(state / "context"),
+        c.fpl,
+        int(admin) if admin else None,
+    )
+
+
+def _build_subprocess(settings: Settings) -> Callable[[], None]:
+    """`fplopt build all` in its own process, so its memory (~1.7 GB) is freed before the
+    model runs (Phase 7 plan, *Measured on botbox*)."""
+    import subprocess
+
+    def build() -> None:
+        env = {
+            **os.environ,
+            "FPLOPT_RAW_DIR": str(settings.raw_dir),
+            "FPLOPT_DATA_DIR": str(settings.data_dir),
+        }
+        subprocess.run([sys.executable, "-m", "fplopt.cli", "build", "all"], env=env, check=True)
+
+    return build
+
+
+def _live(c: Context, *, tick: bool) -> object:
+    """`fplopt live tick` (the alert job, `fplopt.bot.live.live_tick`) or `live prepare`
+    (rebuild data/ and the plan context now)."""
+    from fplopt.bot.context import git_sha
+    from fplopt.bot.live import live_tick, refresh_context
+    from fplopt.bot.sender import telegram_sender
+
+    service = _bot_service(c)
+    build = _build_subprocess(c.settings)
+    sha = git_sha()
+    if not tick:
+        context, _ = refresh_context(
+            raw=c.store,
+            data=lambda: open_data_store(c.settings.data_dir),
+            contexts=service.contexts,
+            build=build,
+            sha=sha,
+            now=jobs.utc_now,
+            force=True,
+        )
+        if context is None:
+            print("no deadline ahead in the data: no plan context", flush=True)
+        else:
+            print(
+                f"plan context {context.context_id}: {season_label(context.season)} "
+                f"GW{context.gw}, deadline {context.deadline.isoformat()}, "
+                f"{len(context.pool)} players",
+                flush=True,
+            )
+        return context
+    token = c.settings.telegram_bot_token
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set: alerts can't be sent")
+    result = live_tick(
+        raw=c.store,
+        data=lambda: open_data_store(c.settings.data_dir),
+        users=service.users,
+        contexts=service.contexts,
+        service=service,
+        fpl=c.fpl,
+        send=telegram_sender(c.http, token),
+        build=build,
+        sha=sha,
+        now=jobs.utc_now,
+    )
+    log.info(
+        "live tick: due %s, context %s (rebuilt %s), sent %s, silent %s",
+        result.due,
+        result.context_id,
+        result.rebuilt,
+        result.sent,
+        result.silent,
+    )
+    return result
+
+
+def _bot_run(c: Context) -> object:
+    """`fplopt bot run`: the Telegram bot, long polling until stopped (`fplopt.bot.app`)."""
+    from fplopt.bot.app import build_application
+
+    token = c.settings.telegram_bot_token
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+    application = build_application(
+        token,
+        _bot_service(c),
+        admin_token=token,
+        admin_chat_id=c.settings.telegram_admin_chat_id,
+    )
+    application.run_polling(drop_pending_updates=False, stop_signals=None)
+    return None
 
 
 JOBS: dict[str, Job] = {
@@ -1305,8 +1709,14 @@ JOBS: dict[str, Job] = {
     "backtest run": _backtest_run,
     "backtest compare": _backtest_compare,
     "optimize bench": _optimize_bench,
-    "optimize plan": _optimize_plan,
+    "optimize plan": _squad_errors(_optimize_plan),
+    "optimize squad": _squad_errors(_optimize_squad),
     "models eval": _models_eval,
+    "holdout check": _holdout_check,
+    "live tick": lambda c: _live(c, tick=True),
+    "live prepare": lambda c: _live(c, tick=False),
+    "bot run": lambda c: _bot_run(c),
+    "holdout run": _holdout_run,
 }
 
 
@@ -1356,7 +1766,54 @@ def build_parser() -> argparse.ArgumentParser:
     _add_backtest_parsers(groups)
     _add_optimize_parsers(groups)
     _add_models_parsers(groups)
+    _add_holdout_parsers(groups)
+    _add_bot_parsers(groups)
     return parser
+
+
+def _add_bot_parsers(groups: Any) -> None:
+    live = groups.add_parser("live", help="go-live jobs: plan contexts and deadline alerts")
+    live.add_argument(
+        "command",
+        choices=["tick", "prepare"],
+        help="tick: the 15-minute alert job (fplopt.bot.live); prepare: rebuild data/ and the "
+        "plan context for the next deadline now",
+    )
+    bot = groups.add_parser("bot", help="the Telegram bot")
+    bot.add_argument("command", choices=["run"], help="run: long polling until stopped")
+
+
+def _add_holdout_parsers(groups: Any) -> None:
+    holdout = groups.add_parser(
+        "holdout", help="the pre-registered Phase 6 run on 2025/26 (settings fixed in code)"
+    )
+    commands = holdout.add_subparsers(dest="command", required=True)
+    check = commands.add_parser(
+        "check", help="check the 2025/26 inputs at every deadline (no results read)"
+    )
+    check.set_defaults(subparser=check)
+    run = commands.add_parser(
+        "run", help="the Phase 6 run: once, from a clean checkout; prints the go-live verdict"
+    )
+    run.set_defaults(subparser=run)
+    run.add_argument(
+        "--out",
+        default="results/phase6-holdout",
+        help="output directory (default results/phase6-holdout)",
+    )
+    run.add_argument(
+        "--experiments",
+        type=Path,
+        default=DEFAULT_EXPERIMENTS,
+        help=f"experiment log (default {DEFAULT_EXPERIMENTS.as_posix()}); a Phase 6 run "
+        "already in it refuses this one",
+    )
+    run.add_argument(
+        "--jobs",
+        type=int,
+        default=default_jobs(),
+        help="worker processes over start states (default: CPUs - 1); results equal --jobs 1",
+    )
 
 
 def _prune_n(text: str) -> dict[int, int]:
@@ -1368,6 +1825,28 @@ def _prune_n(text: str) -> dict[int, int]:
     if len(values) != 4 or min(values) < 0:
         raise argparse.ArgumentTypeError(f"--prune-n: expected 4 counts >= 0, got {text!r}")
     return dict(zip((1, 2, 3, 4), values, strict=True))
+
+
+def _xp_models(text: str) -> tuple[str, ...]:
+    """`v1,rolling` -> ('v1', 'rolling') (each a known xP model, no duplicates)."""
+    models = tuple(m.strip() for m in text.split(","))
+    unknown = [m for m in models if m not in XP_MODELS]
+    if unknown or len(set(models)) != len(models) or not models:
+        raise argparse.ArgumentTypeError(
+            f"--xp: expected distinct models from {', '.join(XP_MODELS)}, got {text!r}"
+        )
+    return models
+
+
+def _floors(text: str) -> tuple[float, ...]:
+    """`0,30,60` -> (0.0, 30.0, 60.0) (finite, >= 0)."""
+    try:
+        values = tuple(float(v) for v in text.split(","))
+    except ValueError:
+        values = ()
+    if not values or not all(math.isfinite(v) and v >= 0 for v in values):
+        raise argparse.ArgumentTypeError(f"--floors: expected minutes >= 0, got {text!r}")
+    return values
 
 
 def _plan_start(text: str) -> str:
@@ -1411,6 +1890,27 @@ def _add_optimize_parsers(groups: Any) -> None:
         help="solve every pruning variant at a tight gap (default on)",
     )
     bench.add_argument(
+        "--seasons",
+        type=parse_seasons,
+        default=None,
+        help="seasons to sample deadlines from (default 2021-2024,2026)",
+    )
+    bench.add_argument(
+        "--xp",
+        type=_xp_models,
+        default=None,
+        metavar="MODEL[,MODEL...]",
+        help="xP models (default ep_next,rolling)",
+    )
+    bench.add_argument(
+        "--floors",
+        type=_floors,
+        default=None,
+        metavar="M[,M...]",
+        help="expected-minutes floors over the horizon in the pruning study, for xP frames "
+        "with minutes (v1; default 0,30,60,90,135,180)",
+    )
+    bench.add_argument(
         "--out", default=None, help="output directory (default results/<UTC time>-bench)"
     )
     plan = commands.add_parser("plan", help="top plans and the roll plan at a real deadline")
@@ -1422,8 +1922,13 @@ def _add_optimize_parsers(groups: Any) -> None:
     plan.add_argument(
         "--start",
         type=_plan_start,
-        default="template",
-        help="template (most-owned squad) or random:SEED (default template)",
+        default=None,
+        help="template (most-owned squad) or random:SEED (default template; not with "
+        "--entry/--squad-file)",
+    )
+    _add_squad_arguments(plan)
+    plan.add_argument(
+        "--decay", type=float, default=None, help="per-GW weight of later GWs' xP (0.85)"
     )
     plan.add_argument("--xp", choices=list(XP_MODELS), default="ep_next", help="xP model")
     plan.add_argument(
@@ -1438,6 +1943,32 @@ def _add_optimize_parsers(groups: Any) -> None:
     plan.add_argument("--hit-margin", type=float, default=None, help="extra cost per hit")
     plan.add_argument("--horizon", type=int, default=6, help="planning horizon in GWs (6)")
     plan.add_argument("--top-k", type=int, default=3, help="plans to show besides roll (3)")
+    squad = commands.add_parser("squad", help="import an FPL team as a squad file to check or edit")
+    squad.set_defaults(subparser=squad)
+    squad.add_argument(
+        "--season", type=parse_seasons, required=True, help="the season, e.g. 2026 or 2026-27"
+    )
+    squad.add_argument("--gw", type=int, required=True, help="the GW to plan (FPL GW number)")
+    _add_squad_arguments(squad, entry_required=True)
+    squad.add_argument("--out", default="squad.toml", help="squad file to write (squad.toml)")
+
+
+def _add_squad_arguments(parser: argparse.ArgumentParser, entry_required: bool = False) -> None:
+    parser.add_argument(
+        "--entry",
+        type=int,
+        default=None,
+        required=entry_required,
+        help="an FPL team ID (the number in fantasy.premierleague.com/entry/<ID>/...): import "
+        "its squad, bank, free transfers and chips from FPL's public API",
+    )
+    parser.add_argument(
+        "--squad-file",
+        type=Path,
+        default=None,
+        help="a squad file (TOML, see `fplopt optimize squad`); with --entry its values "
+        "override the import's",
+    )
 
 
 def _add_backtest_parsers(groups: Any) -> None:
@@ -1625,6 +2156,9 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
         load_dotenv(Path.cwd() / ".env")
         settings = Settings.from_env()
     configure_logging()
+    for stream in (sys.stdout, sys.stderr):  # player names (ć, ß) on a cp1252 console
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     if args.group == "backtest":
         # Usage errors (exit 2, no alert); needs the data to check which seasons exist.
         args.store = open_data_store(settings.data_dir)
@@ -1637,9 +2171,52 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
             args.subparser.error("--deadlines must be >= 1 and --all-chips >= 0")
         if not 1 <= args.horizon <= MAX_PLAN_HORIZON:
             args.subparser.error(f"--horizon must be in 1..{MAX_PLAN_HORIZON} (the xP frames' GWs)")
-    elif name == "optimize plan":
+        from fplopt.optimize.bench import BENCH_SEASONS, FLOORS
+        from fplopt.optimize.bench import XP_MODELS as BENCH_XP_MODELS
+
+        args.seasons = BENCH_SEASONS if args.seasons is None else args.seasons
+        args.xp = BENCH_XP_MODELS if args.xp is None else args.xp
+        args.floors = FLOORS if args.floors is None else args.floors
+        early = [s for s in args.seasons if s < EP_NEXT_FIRST_SEASON]
+        for xp in args.xp:
+            _refuse_early_ep_next(args.subparser, xp, f"--xp {xp}", early)
+    elif name == "holdout run":
+        from fplopt.backtest import holdout
+
+        if args.jobs < 1:
+            args.subparser.error("--jobs must be >= 1")
+        if holdout.already_run(args.experiments):
+            args.subparser.error(
+                f"{args.experiments} already holds a Phase 6 run (family '{holdout.FAMILY}'): "
+                "the holdout runs once"
+            )
+        try:
+            dirty = holdout.dirty_checkout()
+            tagged = holdout.tagged_head()
+        except RuntimeError as exc:
+            args.subparser.error(str(exc))
+        if dirty:
+            args.subparser.error(
+                "the checkout has uncommitted changes (run from a clean checkout of the tagged "
+                "commit): " + "; ".join(dirty[:5])
+            )
+        if not tagged:
+            args.subparser.error(
+                f"HEAD is not the commit tagged {holdout.TAG!r} (git fetch --tags; git checkout "
+                f"{holdout.TAG})"
+            )
+        if Path(args.out).exists() and any(Path(args.out).iterdir()):
+            args.subparser.error(f"--out {args.out} is not empty")
+    elif name in ("optimize plan", "optimize squad"):
         if len(args.season) != 1:
             args.subparser.error("--season: give one season")
+        if args.squad_file is not None and not args.squad_file.is_file():
+            args.subparser.error(f"--squad-file: no file {args.squad_file}")
+        if args.entry is not None and args.entry < 1:
+            args.subparser.error("--entry: an FPL team ID is a positive number")
+    if name == "optimize plan":
+        if args.start is not None and (args.entry is not None or args.squad_file is not None):
+            args.subparser.error("--start: not with --entry/--squad-file (the squad is yours)")
         early = [s for s in args.season if s < EP_NEXT_FIRST_SEASON]
         _refuse_early_ep_next(args.subparser, args.xp, f"--xp {args.xp}", early)
         if args.max_hits is not None:
@@ -1653,6 +2230,7 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
             plan_params(args)
         except ValueError as exc:
             args.subparser.error(str(exc))
+    if name in ("optimize plan", "optimize squad"):
         args.store = open_data_store(settings.data_dir)
         (season,) = args.season
         try:

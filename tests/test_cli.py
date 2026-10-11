@@ -164,6 +164,7 @@ def test_every_parsed_command_has_a_job():
         "backtest run": ["--seasons", "2023"],
         "backtest compare": ["--seasons", "2023", "--a", "greedy:rolling", "--b", "roll:rolling"],
         "optimize plan": ["--season", "2023", "--gw", "5"],
+        "optimize squad": ["--season", "2026", "--gw", "6", "--entry", "1"],
         "models eval": ["--models", "rolling", "--seasons", "2023"],
     }
     for name in cli.JOBS:
@@ -452,6 +453,32 @@ def test_parse_optimizer_policy_spec():
     assert unlimited.build().name == "optimizer(rolling,mh=inf,m=0.0,h=4,d=0.9)"
     itb = cli.parse_policy_spec("optimizer:rolling:itb_value=0.08,chips=0").build()
     assert itb.name == "optimizer(rolling,mh=0,m=0.0,itb=0.08)" and not itb.chips
+
+
+def test_parse_optimizer_minutes_keys():
+    """Phase 5b Task 8: the minutes-based bench weights can be switched off and the
+    expected-minutes floor set from a spec; the defaults keep the name unchanged."""
+    spec = cli.parse_policy_spec("optimizer:v1:bench_from_minutes=0,min_minutes=45")
+    assert spec.params == (("bench_from_minutes", 0), ("min_minutes", 45.0))
+    assert cli.parse_policy_spec(str(spec)) == spec
+    policy = spec.build()
+    assert policy.params.bench_from_minutes is False and policy.params.min_minutes == 45.0
+    assert policy.name == "optimizer(v1,mh=0,m=0.0,bfm=0,minm=45.0)"
+    default = cli.parse_policy_spec("optimizer:v1").build()
+    assert default.params.bench_from_minutes is True
+    assert default.name == "optimizer(v1,mh=0,m=0.0)"
+    on = cli.parse_policy_spec("optimizer:v1:bench_from_minutes=1").build()
+    assert on.name == default.name
+    with pytest.raises(argparse.ArgumentTypeError, match="not a valid 0/1 flag"):
+        cli.parse_policy_spec("optimizer:v1:bench_from_minutes=2")
+    with pytest.raises(argparse.ArgumentTypeError, match="min_minutes must be"):
+        cli.parse_policy_spec("optimizer:v1:min_minutes=-1")
+    with pytest.raises(argparse.ArgumentTypeError, match="no parameter 'bench_from_minutes'"):
+        cli.parse_policy_spec("greedy:v1:bench_from_minutes=0")
+    # On a model without minutes the keys would change nothing but the variant count.
+    for text in ("optimizer:rolling:min_minutes=90", "optimizer:ep_next:bench_from_minutes=0"):
+        with pytest.raises(argparse.ArgumentTypeError, match="only apply to xP models"):
+            cli.parse_policy_spec(text)
 
 
 @pytest.mark.parametrize(
@@ -901,6 +928,9 @@ def test_optimize_plan_prints_the_top_plans_and_the_roll_plan(plan, capsys):
         (["--season", "2023", "--gw", "3", "--top-k", "0"], "--top-k must be >= 1"),
         (["--season", "2023", "--gw", "3", "--hit-margin", "-1"], "hit_margin must be"),
         (["--season", "2023", "--gw", "40", "--xp", "rolling"], "--gw: 2023-24 has no GW40"),
+        (["--season", "2023", "--gw", "3", "--entry", "1", "--start", "template"], "--start: not"),
+        (["--season", "2023", "--gw", "3", "--entry", "0"], "a positive number"),
+        (["--season", "2023", "--gw", "3", "--squad-file", "missing.toml"], "--squad-file: no"),
     ],
 )
 def test_optimize_plan_usage_errors(plan, capsys, argv, message):
@@ -909,6 +939,90 @@ def test_optimize_plan_usage_errors(plan, capsys, argv, message):
     assert info.value.code == 2
     assert message in capsys.readouterr().err
     assert plan.alerts == []
+
+
+class FakeFpl:
+    """FPL's public entry endpoints for team 7 on the synthetic league: the GW6 template
+    squad held since GW1, no transfers or chips, £0.5m in the bank."""
+
+    elements: list[int] = []
+
+    def __init__(self, http):
+        pass
+
+    def entry_history(self, entry_id):
+        if entry_id != 7:
+            request = httpx.Request("GET", "https://fpl.test/")
+            raise httpx.HTTPStatusError(
+                "404", request=request, response=httpx.Response(404, request=request)
+            )
+        rows = [{"event": e, "bank": 5, "event_transfers": 0} for e in range(1, 6)]
+        return json.dumps({"current": rows, "chips": []}).encode()
+
+    def entry_picks(self, entry_id, gw):
+        return json.dumps({"picks": [{"element": e} for e in self.elements]}).encode()
+
+    def entry_transfers(self, entry_id):
+        return b"[]"
+
+
+@pytest.fixture
+def fake_fpl(monkeypatch, league):
+    from fplopt.backtest.rules import backtest_rules
+    from fplopt.backtest.simulator import season_schedule
+    from fplopt.backtest.start_states import template_state
+
+    deadline = season_schedule(league, 2023, 6)["deadline_time"].iloc[0]
+    view = league.as_of(deadline)
+    state = template_state(view, backtest_rules(2023))
+    players = view.table("player_season", columns=["player_key", "season", "element_id"])
+    players = players[players["season"] == 2023]
+    elements = dict(zip(players["player_key"], players["element_id"], strict=True))
+    monkeypatch.setattr(FakeFpl, "elements", [int(elements[k]) for k in state.player_keys])
+    monkeypatch.setattr(cli, "FplClient", FakeFpl)
+    return state
+
+
+def test_optimize_squad_writes_the_imported_squad(tmp_path, monkeypatch, league, fake_fpl, capsys):
+    from fplopt.backtest.rules import backtest_rules
+
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+    out = tmp_path / "squad.toml"
+    argv = ["optimize", "squad", "--season", "2023", "--gw", "6", "--entry", "7"]
+    assert cli.main([*argv, "--out", str(out)], settings=make_settings(tmp_path)) == 0
+    text = out.read_text(encoding="utf-8")
+    assert 'season = "2023-24"' in text and "gw = 6" in text and "bank = 0.5" in text
+    expected_ft = min(5, backtest_rules(2023).max_free_transfers)
+    assert f"free_transfers = {expected_ft}" in text
+    assert text.count("[[players]]") == 15 and "  # P" in text  # web names as comments
+    assert f"Written to {out}" in capsys.readouterr().out
+    # A team FPL doesn't know: a usage error, not an alert.
+    with pytest.raises(SystemExit) as info:
+        cli.main([*argv[:-1], "8", "--out", str(out)], settings=make_settings(tmp_path))
+    assert info.value.code == 2
+    assert "FPL has no team with ID 8" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="needs the optimize extra")
+def test_optimize_plan_from_an_entry_and_a_squad_file(plan, tmp_path, fake_fpl, capsys):
+    argv = ["--season", "2023", "--gw", "6", "--xp", "rolling", "--no-chips", "--horizon", "1"]
+    code, alerts = plan(*argv, "--entry", "7")
+    assert code == 0 and alerts == []
+    printed = capsys.readouterr().out
+    assert "team 7 squad" in printed and "bank 0.5" in printed
+    assert "note: free transfers" in printed and "Plan #1 lineup for GW6" in printed
+    squad_file = tmp_path / "override.toml"
+    squad_file.write_text("bank = 2.0\nfree_transfers = 1\n", encoding="utf-8")
+    code, alerts = plan(*argv, "--entry", "7", "--squad-file", str(squad_file))
+    assert code == 0 and alerts == []
+    printed = capsys.readouterr().out
+    assert "bank 2.0, FT 1" in printed
+    assert "note: from the squad file: bank, free_transfers" in printed
+    # The file alone needs the whole squad.
+    with pytest.raises(SystemExit) as info:
+        plan(*argv, "--squad-file", str(squad_file))
+    assert info.value.code == 2
+    assert "without --entry the squad file needs players" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -1015,3 +1129,140 @@ def test_models_eval_default_out_dir(models_eval, tmp_path, monkeypatch):
     assert code == 0
     (run_dir,) = (tmp_path / "results").glob("*-eval")
     assert (run_dir / "predictions.parquet").exists() and (run_dir / "metrics.json").exists()
+
+
+# --- the Phase 6 holdout run ------------------------------------------------------------------
+
+
+@pytest.fixture
+def holdout_run(tmp_path, monkeypatch, league):
+    """`fplopt holdout run` on the synthetic league: 2023/24 stands in for the holdout,
+    with cheap greedy/roll policies in place of the pre-registered ones."""
+    from fplopt.backtest import holdout
+
+    monkeypatch.setattr(holdout, "SEASON", 2023)
+    monkeypatch.setattr(holdout, "STARTS", "template@1,random@10")
+    monkeypatch.setattr(holdout, "SYSTEM", "greedy:rolling:threshold=0.5")
+    monkeypatch.setattr(holdout, "BASELINES", (("a", "greedy:rolling"), ("b", "roll:rolling")))
+    monkeypatch.setattr(holdout, "FALLBACK", "greedy:rolling:threshold=2.0")
+    monkeypatch.setattr(holdout, "N_BOOT", 50)
+    monkeypatch.setattr(holdout, "dirty_checkout", lambda root=None: [])
+    monkeypatch.setattr(holdout, "tagged_head", lambda root=None: True)
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+    log = tmp_path / "experiments.csv"
+
+    def run(*argv):
+        argv = ["holdout", "run", "--experiments", str(log), "--jobs", "1", *argv]
+        return cli.main(argv, settings=make_settings(tmp_path)), alerts
+
+    run.log = log
+    return run
+
+
+def test_holdout_run_end_to_end_and_only_once(holdout_run, tmp_path, capsys):
+    out = tmp_path / "phase6"
+    code, alerts = holdout_run("--out", str(out))
+    assert code == 0 and alerts == []
+    printed = capsys.readouterr().out
+    assert "Phase 6 holdout run, 2023-24" in printed and "VERDICT: the system" in printed
+    assert printed.count("PASS") + printed.count("fail") >= 4  # 4 gate rows
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["verdict"] in ("pass", "fail")
+    assert len(summary["gates"]) == 4  # system and fallback vs (a) and (b)
+    assert {g["label"] for g in summary["gates"]} == {"a", "b"}
+    assert summary["config"]["reference"] == "b" and summary["config"]["continuation"] == "own"
+    for name in ("gws.parquet", "paired.parquet", "per_decision.parquet"):
+        assert (out / name).exists()
+    (logged,) = _experiments(holdout_run.log)
+    assert logged["family"] == "phase6 holdout"
+    assert json.loads(logged["metrics"])["verdict"] == summary["verdict"]
+    # The holdout runs once: a second run is a usage error (exit 2, no alert).
+    with pytest.raises(SystemExit) as info:
+        holdout_run("--out", str(tmp_path / "again"))
+    assert info.value.code == 2
+    assert "already holds a Phase 6 run" in capsys.readouterr().err
+
+
+def test_holdout_run_refuses_a_dirty_checkout_or_used_out(
+    holdout_run, tmp_path, monkeypatch, capsys
+):
+    from fplopt.backtest import holdout
+
+    monkeypatch.setattr(holdout, "dirty_checkout", lambda root=None: [" M src/x.py"])
+    with pytest.raises(SystemExit):
+        holdout_run("--out", str(tmp_path / "a"))
+    assert "uncommitted changes" in capsys.readouterr().err
+    monkeypatch.setattr(holdout, "dirty_checkout", lambda root=None: [])
+    monkeypatch.setattr(holdout, "tagged_head", lambda root=None: False)
+    with pytest.raises(SystemExit):
+        holdout_run("--out", str(tmp_path / "b"))
+    assert "is not the commit tagged 'phase6-holdout'" in capsys.readouterr().err
+    monkeypatch.setattr(holdout, "tagged_head", lambda root=None: True)
+    used = tmp_path / "used"
+    used.mkdir()
+    (used / "x").write_text("", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        holdout_run("--out", str(used))
+    assert "is not empty" in capsys.readouterr().err
+    assert not holdout_run.log.exists()
+
+
+def test_holdout_check_prints_the_inputs(tmp_path, monkeypatch, league, capsys):
+    from fplopt.backtest import holdout
+
+    monkeypatch.setattr(holdout, "SEASON", 2023)
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    code = cli.main(["holdout", "check"], settings=make_settings(tmp_path))
+    printed = capsys.readouterr().out
+    assert "2023-24 inputs per deadline" in printed
+    assert (code == 0) == (alerts == []) and ("No problems" in printed) == (code == 0)
+
+
+# --- the bot (Phase 7) ------------------------------------------------------------------------
+
+
+def test_settings_state_dir():
+    assert Settings.from_env({}).state_dir == Path("state").resolve()
+    assert Settings.from_env({"FPLOPT_STATE_DIR": "/srv/st"}).state_dir == Path("/srv/st").resolve()
+
+
+def test_live_prepare_writes_a_plan_context(tmp_path, monkeypatch, league, capsys):
+    from fplopt.backtest.simulator import season_schedule
+    from fplopt.bot.context import ContextStore
+
+    deadline = season_schedule(league, 2023, 5)["deadline_time"].iloc[0].to_pydatetime()
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+    monkeypatch.setattr(cli.jobs, "utc_now", lambda: deadline + timedelta(hours=1))
+    builds = []
+    monkeypatch.setattr(cli, "_build_subprocess", lambda settings: lambda: builds.append(1))
+    settings = replace(make_settings(tmp_path), state_dir=tmp_path / "state")
+    assert cli.main(["live", "prepare"], settings=settings) == 0
+    assert builds == [1]
+    assert "2023-24 GW6, deadline " in capsys.readouterr().out
+    meta = ContextStore(tmp_path / "state" / "context").meta()
+    assert (meta["season"], meta["gw"], meta["xp_model"]) == (2023, 6, "v1")
+
+
+@pytest.mark.parametrize("argv", [["live", "tick"], ["bot", "run"]])
+def test_bot_jobs_need_the_token(tmp_path, monkeypatch, argv):
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    settings = replace(make_settings(tmp_path), telegram_bot_token=None, state_dir=tmp_path)
+    assert cli.main(argv, settings=settings) == 1
+    assert "TELEGRAM_BOT_TOKEN is not set" in alerts[0]
+
+
+def test_build_subprocess_runs_build_all_with_the_settings_dirs(tmp_path, monkeypatch):
+    import subprocess
+
+    seen = {}
+    monkeypatch.setattr(subprocess, "run", lambda cmd, env, check: seen.update(cmd=cmd, env=env))
+    settings = replace(make_settings(tmp_path), data_dir=tmp_path / "d")
+    cli._build_subprocess(settings)()
+    assert seen["cmd"][1:] == ["-m", "fplopt.cli", "build", "all"]
+    assert seen["env"]["FPLOPT_RAW_DIR"] == str(tmp_path)
+    assert seen["env"]["FPLOPT_DATA_DIR"] == str(tmp_path / "d")

@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -98,6 +99,27 @@ class Rules:
     chip_week_ft: str
     freehit_consecutive: bool
     ft_topups: tuple[tuple[int, int], ...]
+
+
+def best_xi(order: Sequence[tuple[int, int]], rules: Rules) -> list[tuple[int, int]]:
+    """The starters from `order` ((player_key, element_type), best first): each position's
+    `play_min` first in `order`, then the rest in order while their position is under
+    `play_max`, up to `squad_play` (fewer when the players can't field them). Optimal for
+    any ranking, since the only constraints are per-position lower and upper bounds on a
+    fixed-size selection (`backtest.policies.best_lineup`, `optimize.minutes.projected_xi`)."""
+    starters: list[tuple[int, int]] = []
+    counts: Counter[int] = Counter()
+    for et, n in sorted(rules.play_min.items()):
+        picked = [p for p in order if p[1] == et][:n]
+        starters += picked
+        counts[et] += len(picked)
+    for player in order:
+        if len(starters) >= rules.squad_play:
+            break
+        if player not in starters and counts[player[1]] < rules.play_max[player[1]]:
+            starters.append(player)
+            counts[player[1]] += 1
+    return starters
 
 
 def _get(mapping: Any, key: str, where: str) -> Any:

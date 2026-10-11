@@ -16,6 +16,8 @@ class Settings:
     telegram_admin_chat_id: str | None
     data_dir: Path = Path("data")
     healthcheck_ping_url: str | None = None
+    # The bot's SQLite user state and plan contexts (fplopt.bot; gitignored).
+    state_dir: Path = Path("state")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -27,6 +29,7 @@ class Settings:
             telegram_admin_chat_id=_get(env, "TELEGRAM_ADMIN_CHAT_ID"),
             data_dir=Path(_get(env, "FPLOPT_DATA_DIR") or "data").expanduser().resolve(),
             healthcheck_ping_url=_get(env, "HEALTHCHECK_PING_URL"),
+            state_dir=Path(_get(env, "FPLOPT_STATE_DIR") or "state").expanduser().resolve(),
         )
 
 

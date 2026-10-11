@@ -1,22 +1,30 @@
 """Bonus, saves, cards/own goals and their per-fixture rates (`fplopt.models.components`) on
 hand-made rows and the synthetic league."""
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.stats import nbinom
 from synthetic_season import synthetic_tables
 
 from fplopt.features.store import DataStore
+from fplopt.models import components
 from fplopt.models.components import (
     BONUS_FEATURES,
     COMPONENT_COLUMNS,
+    DEFCON_PRIOR_MEAN,
     MIN_BONUS_ROWS,
     ComponentsParams,
     bonus_features,
+    defcon_counts,
+    defcon_rates,
     fit_bonus,
     fit_components,
     fit_rates,
     fit_saves,
+    negbin_tail,
     predict_components,
     training_rows,
 )
@@ -168,6 +176,10 @@ def test_card_rates_are_shrunk_toward_the_position():
 def test_params_validate():
     with pytest.raises(ValueError):
         ComponentsParams(seasons=0)
+    with pytest.raises(ValueError, match="defcon_k"):
+        ComponentsParams(defcon_k=((2, 3.0), (3, 2.0)))  # FWD missing
+    with pytest.raises(ValueError, match="defcon_r"):
+        ComponentsParams(defcon_r=((2, 0.0), (3, 15.0), (4, 15.0)))
     with pytest.raises(ValueError):
         ComponentsParams(season_decay=0.0)
 
@@ -219,3 +231,162 @@ def test_predicted_rates_schema_and_goalkeeper_only_saves(league):
         assert np.all(values == np.array(coefficients))
     again = predict_components(view, fit_components(view), minutes, team, shares_fit)
     pd.testing.assert_frame_equal(out, again)
+
+
+# --- defensive contributions ----------------------------------------------------------------
+
+
+def test_negbin_tail_matches_scipy():
+    means = np.array([0.5, 3.0, 7.5, 12.0, 20.0])
+    for r in (0.5, 2.0, 13.2, 100.0):
+        for k in (1, 2, 10, 12):
+            expected = nbinom.sf(k - 1, r, r / (r + means))
+            np.testing.assert_allclose(negbin_tail(means, r, k), expected, rtol=1e-9, atol=1e-13)
+    # Elementwise mean, r and threshold; mean 0 never reaches k >= 1; k <= 0 always does.
+    out = negbin_tail(
+        np.array([0.0, 6.0, 6.0]), np.array([13.2, 15.2, 15.2]), np.array([10, 0, 12])
+    )
+    assert out[0] == 0.0 and out[1] == 1.0
+    assert out[2] == pytest.approx(nbinom.sf(11, 15.2, 15.2 / 21.2), rel=1e-9)
+    with pytest.raises(ValueError):
+        negbin_tail(np.array([1.0]), np.array([0.0]), np.array([10]))
+
+
+def test_defcon_counts_prefer_fpl_and_fall_back_to_the_position_stats():
+    frame = pd.DataFrame(
+        {
+            "element_type": [2, 2, 3, 4, 3, 1, 1],
+            "defensive_contribution": pd.array([7, None, None, None, None, 5, None], "Int64"),
+            "clearances_blocks_interceptions": pd.array([1, 6, 3, 1, 3, 2, 2], "Int64"),
+            "tackles": pd.array([1, 2, 2, 1, None, 0, 0], "Int64"),
+            "recoveries": pd.array([9, 9, 5, 4, 5, 1, 1], "Int64"),
+        }
+    )
+    count = defcon_counts(frame)
+    # FPL's count; DEF CBIT (no recoveries); MID/FWD CBIRT; a null component: unknown;
+    # goalkeepers only through FPL's count.
+    np.testing.assert_array_equal(count[:4], [7.0, 8.0, 10.0, 6.0])
+    assert np.isnan(count[4]) and count[5] == 5.0 and np.isnan(count[6])
+
+
+def planted(tables: dict, seed: int = 0) -> dict:
+    """The tables with an FPL defcon count on every played player_match row."""
+    out = {name: frame.copy() for name, frame in tables.items()}
+    matches = out["player_match"]
+    rng = np.random.default_rng(seed)
+    count = rng.poisson(7.0, len(matches)) * (matches["minutes"].to_numpy() > 0)
+    matches["defensive_contribution"] = pd.array(count, dtype="Int64")
+    return out
+
+
+@pytest.fixture(scope="module")
+def defcon_tables():
+    return planted(synthetic_tables(seasons=(2025, 2026), n_clubs=6, seed=3))
+
+
+def view_at(tables: dict, season: int, gw: int):
+    gameweeks = tables["gameweek"]
+    row = gameweeks[(gameweeks["season"] == season) & (gameweeks["gw"] == gw)]
+    return DataStore(tables=tables).as_of(row["deadline_time"].iloc[0])
+
+
+def test_defcon_rates_shrink_current_season_rows_toward_the_position_mean(defcon_tables):
+    view = view_at(defcon_tables, 2026, 5)
+    params = ComponentsParams(defcon_k=((2, 3.0), (3, 2.0), (4, 2.0)))
+    means, players = defcon_rates(view, params)
+    matches = defcon_tables["player_match"]
+    seen = matches[
+        (matches["season"] == 2026)
+        & (matches["available_at"] < view.deadline)
+        & (matches["minutes"] > 0)
+    ]
+    assert set(seen["gw"]) == {1, 2, 3, 4}
+    positions = defcon_tables["player_season"]
+    positions = positions[positions["season"] == 2026][["player_key", "element_type"]]
+    seen = seen.merge(positions, on="player_key")
+    seen = seen[seen["element_type"] > 1]
+    seen = seen.assign(
+        count=seen["defensive_contribution"].astype("float64"), e=seen["minutes"] / 90.0
+    )
+    totals = seen.groupby("element_type")[["count", "e"]].sum()
+    for position in (2, 3, 4):
+        expected = totals.loc[position, "count"] / totals.loc[position, "e"]
+        assert means[position] == pytest.approx(expected)
+    k = {2: 3.0, 3: 2.0, 4: 2.0}
+    per_player = seen.groupby(["player_key", "element_type"])[["count", "e"]].sum()
+    assert set(players) == set(per_player.index)
+    for (key, position), row in per_player.iterrows():
+        expected = (row["count"] + k[position] * means[position]) / (row["e"] + k[position])
+        assert players[(key, position)] == pytest.approx(expected)
+    goalkeepers = positions.loc[positions["element_type"] == 1, "player_key"]
+    assert not set(goalkeepers) & {key for key, _ in players}
+
+
+def test_defcon_rates_see_only_the_visible_current_season(defcon_tables):
+    view = view_at(defcon_tables, 2026, 5)
+    before = defcon_rates(view, ComponentsParams())
+    changed = {name: frame.copy() for name, frame in defcon_tables.items()}
+    matches = changed["player_match"]
+    future = (matches["season"] == 2026) & (matches["available_at"] >= view.deadline)
+    earlier = matches["season"] == 2025
+    assert future.any() and earlier.any()
+    matches.loc[future | earlier, "defensive_contribution"] = 99
+    # A planted future row of a player without visible rows changes nothing either.
+    extra = matches[future].iloc[[0]].assign(player_key=999999, defensive_contribution=99)
+    changed["player_match"] = pd.concat([matches, extra], ignore_index=True)
+    after = defcon_rates(view_at(changed, 2026, 5), ComponentsParams())
+    assert after == before
+
+
+def test_defcon_rates_before_any_row_use_the_prior_means(defcon_tables):
+    means, players = defcon_rates(view_at(defcon_tables, 2026, 1), ComponentsParams())
+    assert means == dict(DEFCON_PRIOR_MEAN)
+    assert players == {}
+    # Seasons without a known count (2019/20-2024/25: all null) behave the same.
+    unknown = synthetic_tables(seasons=(2025, 2026), n_clubs=6, seed=3)
+    means, players = defcon_rates(view_at(unknown, 2026, 5), ComponentsParams())
+    assert means == dict(DEFCON_PRIOR_MEAN) and players == {}
+
+
+def test_predicted_defcon_rates_by_position(defcon_tables):
+    view = view_at(defcon_tables, 2026, 5)
+    minutes = predict_minutes(view, fit_minutes(view, MINUTES))
+    team = team_lambdas(view, fit_team(view))
+    fit = fit_components(view)
+    out = predict_components(view, fit, minutes, team, fit_shares(view))
+    means, players = defcon_rates(view, fit.params)
+    keeper = out["element_type"] == 1
+    assert keeper.any()
+    assert (out.loc[keeper, ["defcon_rate", "defcon_r"]] == 0).all().all()
+    outfield = out[~keeper]
+    expected = [
+        players.get((key, position), means[position])
+        for key, position in zip(outfield["player_key"], outfield["element_type"], strict=True)
+    ]
+    np.testing.assert_allclose(outfield["defcon_rate"], expected)
+    assert (outfield["defcon_rate"] > 0).all()
+    np.testing.assert_array_equal(
+        outfield["defcon_r"], outfield["element_type"].map(dict(fit.params.defcon_r))
+    )
+
+
+def test_no_defcon_rates_where_the_rules_score_none(defcon_tables, monkeypatch):
+    # Develop/validate rules score no defcon: the rates are 0 and never computed.
+    view = view_at(defcon_tables, 2026, 5)
+    minutes = predict_minutes(view, fit_minutes(view, MINUTES))
+    team = team_lambdas(view, fit_team(view))
+    fit = fit_components(view)
+    shares = fit_shares(view)
+    rules = components.backtest_rules(2026)
+    monkeypatch.setattr(
+        components,
+        "backtest_rules",
+        lambda season: dataclasses.replace(rules, defcon_enabled=False),
+    )
+
+    def fail(*args):
+        raise AssertionError("defcon_rates called")
+
+    monkeypatch.setattr(components, "defcon_rates", fail)
+    out = predict_components(view, fit, minutes, team, shares)
+    assert (out["defcon_rate"] == 0).all()

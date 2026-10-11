@@ -1,6 +1,8 @@
 # Data (immutable raw snapshots + rebuildable Parquet) — never committed
 /raw/
 /data/
+# The bot's user state (SQLite) and plan contexts (fplopt.bot)
+/state/
 *.parquet
 *.duckdb
 *.sqlite
@@ -30,6 +32,8 @@ mlruns/
 # Backtest outputs; the experiment log is the tracked audit trail (PLAN §5)
 /results/*
 !/results/experiments.csv
+# Third-party research data (FPL-Core-Insights, dev/README.md): never committed or shipped
+/research/
 
 # OS / editors
 .DS_Store

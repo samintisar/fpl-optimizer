@@ -380,3 +380,170 @@ per player-fixture):
   (e.g. all parts: xP MSE h0 4.2756; on the walk without the ban residual).
 - Time: the walk fits 1.1 s (2016/17 cutoffs) to 21 s (2024/25) per cutoff, predicts 0.5–1.5 s
   per deadline; ~4.5 min for 2016–2024 at `--jobs 6`.
+
+## `defcon_prior.py`: defensive contributions (#14, `k` and `r`, live check)
+
+Phase 5b, Task 10 (PLAN §6.5, §11; issue #14). Reads FPL-Core-Insights (FCI) files as plain
+CSV data and our built tables read-only (only 2024/25 and 2026/27; `live` filters 2025/26 out
+on read). Run it with `python -I` (isolated mode), never from inside the data folder:
+
+```sh
+.venv/Scripts/python.exe -I dev/defcon_prior.py --data-dir <data> verify   # #14, seconds
+.venv/Scripts/python.exe -I dev/defcon_prior.py --data-dir <data> fit [--tackles f_tackles_attempted]  # ~1 min
+.venv/Scripts/python.exe -I dev/defcon_prior.py --data-dir <data> live --gws 2-7   # ~2 min
+```
+
+### FPL-Core-Insights files (research only, never shipped)
+
+FCI has no licence (PLAN §10, §12): its files are only for setting the prior once, live in the
+git-ignored `research/fpl-core-insights/` (never `raw/`, `data/` or the package) and are
+treated as untrusted data. Downloaded 2026-10-08 from
+[olbauday/FPL-Core-Insights](https://github.com/olbauday/FPL-Core-Insights) at commit
+`d6148f8743a6dd64b6ec1968ed86974f56725e20`, with
+`curl -sSfL -o <local> https://raw.githubusercontent.com/olbauday/FPL-Core-Insights/d6148f8743a6dd64b6ec1968ed86974f56725e20/<path>`:
+
+| local (`research/fpl-core-insights/`) | repo path (`data/...`) | bytes |
+|---|---|---|
+| `2024-2025/playermatchstats.csv` | `2024-2025/playermatchstats/playermatchstats.csv` | 1,903,185 |
+| `2024-2025/matches.csv` | `2024-2025/matches/matches.csv` | 163,575 |
+| `2024-2025/players.csv` | `2024-2025/players/players.csv` | 39,340 |
+| `2024-2025/teams.csv` | `2024-2025/teams/teams.csv` | 1,363 |
+| `2026-2027/GW{1..5}/playermatchstats.csv` | `2026-2027/By%20Gameweek/GW{1..5}/playermatchstats.csv` | 84,497 / 128,640 / 84,113 / 135,421 / 143,415 |
+| `2026-2027/GW{1..5}/matches.csv` | `2026-2027/By%20Gameweek/GW{1..5}/matches.csv` | 8,205 / 14,215 / 8,095 / 14,126 / 14,743 |
+| `2026-2027/GW{1..5}/players.csv` | `2026-2027/By%20Gameweek/GW{1..5}/players.csv` | 28,954 / 29,726 / 31,101 / 31,335 / 31,713 |
+| `2026-2027/teams.csv` | `2026-2027/teams.csv` | 926 |
+
+Nothing from 2025-2026. The `teams.csv` files turned out not to be needed (FCI's club ids are
+FPL team codes).
+
+### #14: FCI reproduces FPL's counts (2026/27 GW1–5, 2026-10-08)
+
+Players mapped by FPL `player_code` (= our `player_key`), fixtures by (home, away) club code
+(FCI's club ids are FPL team codes): all 50 matches and all 1,537 FCI rows with minutes > 0
+mapped; 1,537 of our 1,538 played `player_match` rows matched (one 90-minute row of player
+566213 in fixture 2026047 is missing from FCI). Minutes agree exactly on 73% of rows (mean
+|difference| 0.27). On the 1,437 outfield rows (FCI leaves `blocks` blank for goalkeepers):
+
+| | rows | exact match | mean abs diff | threshold outcome agrees | FPL / FCI hit rate |
+|---|---|---|---|---|---|
+| DEF CBIT (≥ 10) | 532 | 100% | 0 | 100% | 20.1% / 20.1% |
+| MID CBIRT (≥ 12) | 729 | 100% | 0 | 100% | 7.7% / 7.7% |
+| FWD CBIRT (≥ 12) | 176 | 100% | 0 | 100% | 0.6% / 0.6% |
+
+Each component (clearances + blocks + interceptions vs FPL's CBI, tackles, recoveries) matches
+exactly too, and FPL's `defensive_contribution` equals our CBI + tackles (DEF) / + recoveries
+(MID/FWD) on every row. **The tackle count is FCI's `tackles_won` column**: FCI's `tackles` is
+blank in 2026/27. In 2024/25 FCI has both, and its `tackles` is a different, larger count
+(summed per team-match it equals FCI's team tackles won / tackles-won %, i.e. attempts: 17.5
+per team-match vs 10.5 won). The team tackles-won stat itself is 15.4 per team-match in
+2026/27 GW1–5 vs 10.5 in 2024/25, so FotMob's tackle definition probably changed between the
+seasons: per 90, FPL's 2026/27 tackles (DEF 1.58, MID 1.75, FWD 0.56) sit between FCI 2024/25
+`tackles_won` (1.11, 1.12, 0.48) and `tackles` (1.79, 1.94, 0.80). CBI (DEF 6.06 vs 5.46 per
+90) and recoveries (3.53 vs 3.87) are within early-season noise of 2024/25. `k` and `r` barely
+depend on this (below).
+
+### `k` and `r` (FCI 2024/25)
+
+10,797 played outfield rows of 380 matches (positions from our `player_season` 2024/25: all
+mapped). Count: DEF CBIT, MID/FWD CBIRT, tackles = `tackles_won`. Each row is predicted from
+the player's earlier rows of the season (`rate = (actions + k · pos_mean) / (minutes/90 + k)`,
+`pos_mean` from the position's earlier rows) with NB(rate · minutes/90, r); (k, r) maximize
+that walk-forward log-likelihood. Mean log-likelihood per row and the threshold calibration
+(given the realized minutes):
+
+| group | rows | k | r | mean LL (Poisson) | hit rate | mean P(hit) | k, r with FCI `tackles` | half-season k, r |
+|---|---|---|---|---|---|---|---|---|
+| DEF | 3,787 | **3.49** | **13.2** | −2.2955 (−2.3305) | 13.6% | 12.2% | 3.90, 14.6 | 2.72, 13.1 |
+| MID | 5,738 | 1.83 | 16.1 | −2.2201 (−2.2435) | 7.5% | 8.1% | 1.63, 15.5 | 2.24, 16.3 |
+| FWD | 1,272 | 2.57 | 8.8 | −1.8399 (−1.8585) | 0.6% | 0.9% | 2.03, 8.3 | 6.69, 9.3 |
+| **MID + FWD** | 7,010 | **1.94** | **15.2** | −2.1517 (−2.1738) | 6.2% | 6.8% | 1.71, 14.7 | 2.55, 15.7 |
+
+The profile likelihood is flat near the optimum (DEF: −2.2974 at k = 2, −2.2964 at 5; MID+FWD:
+−2.1517 at 2, −2.1529 at 3). DEF and MID/FWD differ materially in k (3.5 vs 1.9), so they get
+their own (k, r); MID and FWD are pooled (FWD alone gives r 8.8, which moves a forward's
+P(CBIRT ≥ 12) by hundredths of a percent). The half-season check (first-half totals
+predicting the second half) agrees. Hard-coded in `fplopt.models.components`
+(`DEFCON_K`, `DEFCON_R`). `DEFCON_PRIOR_MEAN` (DEF 6.57, MID 7.73, FWD 4.07 per 90) are the
+2024/25 FCI season means, used only while a position has no row of the season (a season's
+first deadline); with FCI `tackles` they would be 7.25, 8.55, 4.39 (FPL 2026/27 GW1–5: 7.63,
+8.14, 4.27).
+
+### The v1 term: calibration table and the live check (2026-10-08)
+
+The new `ComponentsParams` fields change `calibration_fingerprint`, so the table was
+regenerated (`calibrate_v1.py walk --seasons 2016-2024 --jobs 9 --ban-residual`, 4.4 min, then
+`fit --first-fit 2017 --parts p_start:1+ --write`). Develop rules score no defcon: the walk's
+per-fixture frames are identical to a walk on the previous commit apart from the two new
+columns (all 9 seasons), every develop number of `fit` is unchanged (none: xP MSE h0 4.260925 /
+h1–5 4.686697; chosen: 4.260925 / 4.684454), and so are the table's entries; only
+`CALIBRATION_PARAMS` changed.
+
+`live --gws 2-7` (2026/27, tables read without 2025/26; GW6–7 not played yet, so GW2–5): v1
+at each deadline (uncalibrated: horizon 0, where the table's h1+ P(start) map does nothing),
+P(defcon) per pool player-fixture at horizon 0 against FPL's realized count reaching the
+threshold (no `player_match` row = 0 minutes = no defcon):
+
+| position | player-fixtures | mean P(defcon) | realized | Brier | of those who played: P / realized |
+|---|---|---|---|---|---|
+| DEF | 849 | 0.088 | 0.104 | 0.078 | 0.150 / 0.208 (424) |
+| MID | 1,146 | 0.047 | 0.038 | 0.032 | 0.084 / 0.076 (578) |
+| FWD | 307 | 0.0014 | 0.0033 (1 award) | 0.003 | 0.003 / 0.007 (140) |
+
+By predicted bin (all positions): ≤ 0.02 → 0.001 realized (1,090 rows), 0.02–0.05 → 0.034,
+0.05–0.1 → 0.048, 0.1–0.2 → 0.138, 0.2–0.3 → 0.370 (119), 0.3–0.4 → 0.381 (42). Defenders run
+about 15% under their realized rate (as in the 2024/25 fit check, 12.2% vs 13.6%, and DEF
+CBIT per 90 is higher so far this season than FCI's 2024/25), midfielders slightly over; GW2
+rates rest on a single match each.
+
+## `bench_weights_eval.py`: bench-weight reliability
+
+Phase 5 plan, Task 8 (PLAN §7 *Bench*). Develop only (refuses anything but 2017/18–2022/23):
+
+```sh
+uv run python dev/bench_weights_eval.py --data-dir data [--seasons 2017-2022] [--random 3] \
+    [--jobs 6] [--out <dir>] [--max-gws N]
+```
+
+At every GW deadline: the template squad and `--random` seeded random squads
+(`fplopt.backtest.start_states`), each with its lineup from `best_lineup` on `v1`'s horizon-0 xP
+(the same rule as the planner's projected XI). Per bench slot (0 = GK, 1–3 outfield) it compares
+the fixed weights (0.03 / 0.21 / 0.06 / 0.002) and the minutes-based ones
+(`fplopt.optimize.minutes.minutes_bench_weights`) with the realized autosubs under
+`gw_score`'s rules:
+
+- `needed`: slot k's player would have come on had he played (the lineup is rescored with his
+  minutes set to 1 if he had none). This is what the weight estimates: the objective values the
+  slot at w_k · xP_k, and xP_k already includes his own P(play).
+- `came_on`: he did come on, compared with w_k · P(he plays).
+- `skip` (diagnostic, not used by the planner): outfield slot k with the skip rule,
+  P(M ≥ 1 + Σ_{j<k} B_j), with M the absent outfield starters (Poisson-binomial) and B_j the
+  earlier outfield bench players playing (Bernoulli of their P(play)).
+
+It prints means and Brier scores per slot (all rows, single-fixture and double GWs) and a
+reliability table per slot (bins of the minutes-based weight); `--out` also writes
+`rows.parquet`, `summary.json` and `summary.txt`. The in-memory store holds only seasons ≤ the
+season being run. About 4 min for 2017/18–2022/23 at `--jobs 6` (v1 fits dominate).
+
+### Results (2026-10-09)
+
+898 squad-GWs (2017/18–2022/23, template + 3 random squads per deadline). `needed` is the
+realized rate; Brier is of the `needed` event:
+
+| slot | needed | fixed | minutes | skip | Brier fixed | Brier minutes | Brier skip |
+|---|---|---|---|---|---|---|---|
+| GK | 0.237 | 0.030 | 0.263 | 0.263 | 0.224 | 0.033 | 0.033 |
+| 1 | 0.787 | 0.210 | 0.894 | 0.894 | 0.501 | 0.155 | 0.155 |
+| 2 | 0.757 | 0.060 | 0.677 | 0.805 | 0.670 | 0.135 | 0.124 |
+| 3 | 0.723 | 0.002 | 0.430 | 0.768 | 0.720 | 0.247 | 0.130 |
+
+- The fixed weights are far too low for these squads: a bench slot was needed 24% (GK) to 79%
+  (slot 1) of the time. The minutes-based weights track that; the GK slot's reliability is
+  close to the diagonal in every bin.
+- Slot 1 is overpredicted (0.89 vs 0.79; template squads 0.80 vs 0.56): a small underestimate of
+  each starter's P(play) compounds over ten starters.
+- Slots 2–3 are underpredicted (slot 3: 0.43 vs 0.72): the skip rule (a bench player who doesn't
+  play passes his turn) is ignored. Accounting for it (`skip`) halves slot 3's Brier score.
+- Random squads (678 of 898) hold more non-playing players than template squads (220): template
+  `needed` rates are 0.27 / 0.56 / 0.56 / 0.51, random 0.23 / 0.86 / 0.82 / 0.79.
+
+> **Adopted (2026-10-08):** the package's `minutes_bench_weights` now uses the skip-aware weights (`skip_aware_tail`). In the table below, the `minutes` column is the version without skips and `skip` is what is shipped.

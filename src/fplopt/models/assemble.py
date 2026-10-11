@@ -48,7 +48,11 @@ split into "60+" (probability p_60, on the pitch m_sixty / 90 of the match) and 
   E[floor(S / 3)] as above), floored at 0;
 - yellow / red cards and own goals = their points · rate per 90 · e_minutes / 90;
 - penalty misses = penalties_missed · e_pen_goals · (1 − c) / c (c: the club's conversion);
-- defensive contributions: `components.DEFCON` (0; Phase 5b Task 10).
+- defensive contributions, only when `rules.defcon_enabled` (2025/26+; develop/validate rules
+  score none, so their xP is unchanged): points[pos] · P(defcon), P(defcon) = Σ_parts P(part)
+  · P(N ≥ threshold[pos]), N ~ NB(defcon rate per 90 · fraction of the match on the pitch,
+  dispersion r) (`components.negbin_tail`; rate and r from `predict_components`), 0 for
+  goalkeepers (no threshold) and without a rate. Also returned as `p_defcon`.
 xP = their sum.
 
 **Per GW** (`gw_frame`): every pool player × GW from the target GW to `HORIZON` later
@@ -56,10 +60,13 @@ xP = their sum.
 a blank is 0). Probabilities are per player-GW only for one fixture: P(start), P(plays),
 P(60+), the 3 minutes classes, P(clean sheet) (= p_60 · team P(CS): the player's FPL clean
 sheet), P(goal ≥ 1); NaN in a double, 0 in a blank (P(0 minutes) 1). Expected minutes,
-goals and assists are sums. The frame keeps the standard xP columns and dtypes first
-(`XP_DTYPES`); the extra columns are the ones `fplopt.evaluate.metrics.COMPONENTS`
-scores. The backtester, policies and optimizer read only player_key, gw, gw_index, horizon
-and xp.
+goals and assists are sums. `p_play_gw` (`GW_EXTRAS`) is P(plays in at least one of the
+GW's fixtures), 1 − Π_f (1 − p_play_f) with the fixtures independent: p_play in a single
+GW, 0 in a blank, defined in a double too (for the optimizer's bench weights, Phase 5b
+Task 8; not scored). The frame keeps the standard xP columns and dtypes first
+(`XP_DTYPES`); then `GW_COMPONENTS`, the ones `fplopt.evaluate.metrics.COMPONENTS` scores,
+and `GW_EXTRAS`. The backtester and policies read player_key, gw, gw_index, horizon and
+xp; the optimizer also reads p_play, p_play_gw and e_minutes (`fplopt.optimize.minutes`).
 
 `MODELS["v1"]` = `FittedModel(fit_v1, predict_v1)`. No state, no file access except the
 rules config (`backtest_rules` reads `config/scoring`, never `data/`).
@@ -83,11 +90,11 @@ from fplopt.models.calibration import Calibration, apply_isotonic, calibration_f
 from fplopt.models.calibration_table import CALIBRATION_PARAMS
 from fplopt.models.components import (
     BONUS_COLUMNS,
-    DEFCON,
     GOALKEEPER,
     ComponentsFit,
     ComponentsParams,
     fit_components,
+    negbin_tail,
     predict_components,
 )
 from fplopt.models.minutes import MinutesFit, MinutesParams, conditionals, fit_minutes
@@ -98,6 +105,7 @@ from fplopt.models.team import TeamFit, TeamParams, fit_team, team_lambdas
 __all__ = (
     "FIXTURE_COLUMNS",
     "GW_COMPONENTS",
+    "GW_EXTRAS",
     "POINT_COLUMNS",
     "V1Fit",
     "V1Params",
@@ -135,6 +143,8 @@ FIXTURE_COLUMNS = (
     "red_rate",
     "own_goal_rate",
     "pen_miss_ratio",
+    "defcon_rate",
+    "defcon_r",
     *BONUS_COLUMNS,
 )
 POINT_COLUMNS = (
@@ -166,6 +176,9 @@ GW_PROBABILITIES = (
 )
 GW_SUMS = ("e_minutes", "e_goals", "e_assists")
 GW_COMPONENTS = (*GW_PROBABILITIES, *GW_SUMS)
+# Per player-GW columns after the components, not scored: P(plays in >= 1 of the GW's
+# fixtures), defined in doubles (the optimizer's bench weights).
+GW_EXTRAS = ("p_play_gw",)
 POISSON_CAP = 40  # Poisson sums run over N = 0..40 (tail < 1e-15 for rates below 10)
 SHORT_MAX_FRACTION = 59.0 / 90.0
 SAVES_FOR_BONUS = 3  # the bonus regression's `saves3` = saves // 3
@@ -333,9 +346,37 @@ def _by_position(element_type: np.ndarray, values: Mapping[int, int]) -> np.ndar
     return np.array([lookup.get(int(e), 0) for e in element_type], dtype="float64")
 
 
+def _p_defcon(
+    frame: pd.DataFrame,
+    rules: Rules,
+    p_60: np.ndarray,
+    f_long: np.ndarray,
+    p_short: np.ndarray,
+    f_short: np.ndarray,
+) -> np.ndarray:
+    """P(defcon threshold reached) per row over the minutes split; exactly 0 where the rules
+    score no defcon, for positions without a threshold and for rows without a rate."""
+    out = np.zeros(len(frame))
+    if not rules.defcon_enabled or not len(frame):
+        return out
+    et = frame["element_type"].to_numpy(dtype="int64")
+    thresholds = {e: t for e, t in rules.defcon_threshold.items() if t is not None}
+    threshold = np.array([thresholds.get(int(e), 0) for e in et], dtype="int64")
+    rate = frame["defcon_rate"].to_numpy(dtype="float64")
+    r = frame["defcon_r"].to_numpy(dtype="float64")
+    rows = (threshold > 0) & (rate > 0) & (r > 0)
+    if not rows.any():
+        return out
+    rate, r, threshold = rate[rows], r[rows], threshold[rows]
+    long = p_60[rows] * negbin_tail(rate * f_long[rows], r, threshold)
+    short = p_short[rows] * negbin_tail(rate * f_short[rows], r, threshold)
+    out[rows] = long + short
+    return out
+
+
 def fixture_points(frame: pd.DataFrame, rules: Rules) -> pd.DataFrame:
     """`frame` (`fixture_components`, possibly calibrated) plus `p_goal`, `e_goals`,
-    `e_bonus`, `e_saves`, the `POINT_COLUMNS` and `xp` (module docstring)."""
+    `e_bonus`, `e_saves`, `p_defcon`, the `POINT_COLUMNS` and `xp` (module docstring)."""
     et = frame["element_type"].to_numpy(dtype="int64")
     p_play = frame["p_play"].to_numpy(dtype="float64")
     p_60 = np.minimum(frame["p_60"].to_numpy(dtype="float64"), p_play)
@@ -382,6 +423,7 @@ def fixture_points(frame: pd.DataFrame, rules: Rules) -> pd.DataFrame:
     e_bonus = np.clip((features * beta).sum(axis=1), 0.0, None)
     saves_points = np.where(keeper, split_floor(saves_rate, rules.saves_per_point), 0.0)
     exposure = e_minutes / 90.0
+    p_defcon = _p_defcon(frame, rules, p_60, f_long, p_short, f_short)
 
     def per_90(column: str) -> np.ndarray:
         """Expected events of a per-90 rate column over the expected minutes."""
@@ -403,8 +445,7 @@ def fixture_points(frame: pd.DataFrame, rules: Rules) -> pd.DataFrame:
         "pts_pen_miss": rules.penalties_missed
         * e_pen
         * frame["pen_miss_ratio"].to_numpy(dtype="float64"),
-        # Defensive contributions: the Phase 5b hook (Task 10), 0 until then.
-        "pts_defcon": np.full(len(frame), DEFCON),
+        "pts_defcon": p_defcon * _by_position(et, rules.defensive_contribution),
     }
     xp = np.sum([points[name] for name in POINT_COLUMNS], axis=0) if len(frame) else np.zeros(0)
     return frame.assign(
@@ -412,6 +453,7 @@ def fixture_points(frame: pd.DataFrame, rules: Rules) -> pd.DataFrame:
         e_goals=e_goals,
         e_bonus=e_bonus,
         e_saves=np.where(keeper, saves_rate * exposure, 0.0),
+        p_defcon=p_defcon,
         **points,
         xp=np.asarray(xp, dtype="float64"),
     )
@@ -467,13 +509,18 @@ def gw_frame(view: AsOfView, fixtures: pd.DataFrame) -> pd.DataFrame:
         p_min_0=1.0 - fixtures["p_play"],
         p_min_1_59=np.clip(fixtures["p_play"] - fixtures["p_60"], 0.0, None),
         p_min_60=fixtures["p_60"],
+        p_dnp=1.0 - fixtures["p_play"],
     )
     keys = ["player_key", "gw", "gw_index", "horizon"]
     grouped = rows.groupby(keys, sort=True)
     sums = grouped[["xp", *GW_SUMS]].sum()
     firsts = grouped[list(GW_PROBABILITIES)].first()
     counts = grouped.size().rename("n")
-    per_gw = sums.join(firsts).join(counts).reset_index()
+    # NaN P(play) in any fixture leaves the GW's unknown (prod() would skip it, i.e. treat it
+    # as certain absence), so the optimizer falls back to the fixed bench weights there.
+    unknown = rows["p_dnp"].isna().groupby([rows[k] for k in keys], sort=True).any()
+    plays = (1.0 - grouped["p_dnp"].prod()).mask(unknown).rename("p_play_gw")
+    per_gw = sums.join(firsts).join(counts).join(plays).reset_index()
     double = per_gw["n"].to_numpy() > 1
     for column in GW_PROBABILITIES:
         per_gw[column] = np.where(double, np.nan, per_gw[column].to_numpy(dtype="float64"))
@@ -489,12 +536,12 @@ def gw_frame(view: AsOfView, fixtures: pd.DataFrame) -> pd.DataFrame:
             f"per-fixture rows, e.g. players {sorted(dropped['player_key'].unique())[:10]}"
         )
     blank = out["n"].isna().to_numpy()
-    for column in ("xp", *GW_COMPONENTS):
+    for column in ("xp", *GW_COMPONENTS, *GW_EXTRAS):
         values = out[column].to_numpy(dtype="float64")
         out[column] = np.where(blank, 1.0 if column == "p_min_0" else 0.0, values)
     base = [name for name, _ in XP_DTYPES]
-    out = out[[*base, *GW_COMPONENTS]].astype(
-        {**dict(XP_DTYPES), **{c: "float64" for c in GW_COMPONENTS}}
+    out = out[[*base, *GW_COMPONENTS, *GW_EXTRAS]].astype(
+        {**dict(XP_DTYPES), **{c: "float64" for c in (*GW_COMPONENTS, *GW_EXTRAS)}}
     )
     return out.sort_values(["player_key", "horizon"], kind="mergesort").reset_index(drop=True)
 

@@ -16,9 +16,10 @@ of them, so solving them all (`search="all"`) takes minutes per deadline. `searc
      `E` less per such chip, so `UB(s) = UB(base) − T(base) + Σ E + T(s)` (T = terminal
      value). `E` bounds the objective a chip adds in GW t (decay d_t, xP x over all
      candidates): Triple Captain `d_t · max |x|` (the captain counts once more); Bench
-     Boost `d_t · Σ_k |1 − w_k| · |x|_(k)` over the bench slots (the GK slot with the
-     largest |x| of a goalkeeper, the outfield slots' |1 − w| in descending order with
-     the three largest outfield |x|: a rearrangement bound on Σ (1 − w_k) · xP(bench_k)).
+     Boost `d_t · Σ_k |1 − w_tk| · |x|_(k)` over the bench slots, w_tk GW t's bench
+     weights (the GK slot with the largest |x| of a goalkeeper, the outfield slots'
+     |1 − w_tk| in descending order with the three largest outfield |x|: a rearrangement
+     bound on Σ (1 − w_tk) · xP(bench_k)).
      `UB(base)` is the base's LP bound or its MILP dual bound (`Plan.bound`).
 3. Best-first: repeatedly take the open scenario with the highest bound. If the bound is
    below the incumbent, stop: no remaining scenario can beat it. Otherwise tighten it
@@ -101,7 +102,7 @@ def chip_extra(problem: PlanInput, params: OptimizerParams, t: int, name: str) -
     if name == "3xc":
         return d * max((abs(p.xp[t]) for p in problem.players), default=0.0)
     if name == "bboost":
-        w = params.bench_weights
+        w = problem.gw_bench_weights(t, params)
         keepers = sorted(abs(p.xp[t]) for p in problem.players if p.element_type == GOALKEEPER)
         outfield = sorted(abs(p.xp[t]) for p in problem.players if p.element_type != GOALKEEPER)
         slots = sorted((abs(1.0 - x) for x in w[1:]), reverse=True)

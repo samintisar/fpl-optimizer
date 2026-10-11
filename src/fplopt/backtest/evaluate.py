@@ -99,6 +99,7 @@ __all__ = (
     "BootstrapResult",
     "StartSpec",
     "Summary",
+    "WindowTTest",
     "block_bootstrap",
     "build_start_states",
     "deflated_mean",
@@ -114,6 +115,7 @@ __all__ = (
     "season_points",
     "summarize",
     "transfer_gain_summary",
+    "window_t_test",
 )
 
 RulesFn = Callable[[int], Rules]
@@ -500,9 +502,9 @@ def run_units(
 # --- full runs --------------------------------------------------------------------------------
 
 
-def _refuse_holdout(seasons: Sequence[int]) -> None:
+def _refuse_holdout(seasons: Sequence[int], allow_holdout: bool = False) -> None:
     holdout = sorted(set(seasons) & HOLDOUT_SEASONS)
-    if holdout:
+    if holdout and not allow_holdout:
         raise HoldoutError(
             f"{', '.join(map(season_label, holdout))} is a holdout season; backtests refuse "
             "it until Phase 6"
@@ -518,16 +520,22 @@ def _unique_names(policies: Sequence[Policy]) -> None:
 GRID_COLUMNS = ("season", "start_id", "policy", *(n for n, _ in GW_COLUMNS if n != "season"))
 
 
+@dataclass(frozen=True)
+class _GridJob:
+    policies: tuple[Policy, ...]
+    allow_holdout: bool = False
+
+
 def _grid_unit(
-    store: DataStore, caches: Caches, rules: Rules, unit: Unit, policies: Sequence[Policy]
+    store: DataStore, caches: Caches, rules: Rules, unit: Unit, job: _GridJob
 ) -> list[pd.DataFrame]:
     """Every policy from one start state: one `SeasonRun.gws` frame each, labelled."""
     _, start_id, state = unit
     return [
-        simulate(store, rules, policy, state, caches=caches).gws.assign(
-            start_id=start_id, policy=policy.name
-        )
-        for policy in policies
+        simulate(
+            store, rules, policy, state, caches=caches, allow_holdout=job.allow_holdout
+        ).gws.assign(start_id=start_id, policy=policy.name)
+        for policy in job.policies
     ]
 
 
@@ -540,20 +548,23 @@ def run_grid(
     *,
     caches: Caches | None = None,
     jobs: int = 1,
+    allow_holdout: bool = False,
 ) -> pd.DataFrame:
     """Every policy from every start state of every season (one `simulate` each), as one
     frame: `season, start_id, policy` + the `SeasonRun.gws` columns (net_points, points,
     hit_points, xg_points, xg_net_points, n_transfers, captain_regret, xi_regret,
     pred_gain, real_gain, ...). With `jobs == 1` one `Caches` is shared by all runs;
     `jobs > 1` runs the (season, start) units in worker processes (module docstring), same
-    result. Holdout seasons raise (`HoldoutError`) before anything runs."""
+    result. Holdout seasons raise (`HoldoutError`) before anything runs, unless
+    `allow_holdout` (the Phase 6 run only, `fplopt.backtest.holdout`)."""
     seasons = list(seasons)
-    _refuse_holdout(seasons)
+    _refuse_holdout(seasons, allow_holdout)
     _unique_names(policies)
     specs = _specs(start_specs)
     caches = Caches() if caches is None else caches
     units = _units(store, seasons, specs, rules_fn)
-    results = run_units(store, caches, rules_fn, _grid_unit, units, tuple(policies), jobs)
+    job = _GridJob(tuple(policies), allow_holdout)
+    results = run_units(store, caches, rules_fn, _grid_unit, units, job, jobs)
     frames = [frame for unit_frames in results for frame in unit_frames]
     if not frames:
         empty = pd.DataFrame({name: pd.Series(dtype=dtype) for name, dtype in GW_COLUMNS})
@@ -647,6 +658,7 @@ class _PerDecisionJob:
     k: int
     stride: int
     reference: str
+    allow_holdout: bool = False
 
     @property
     def continuation_name(self) -> str:
@@ -661,7 +673,7 @@ def _per_decision_unit(
     policy_a, policy_b, continuation, k = job.policy_a, job.policy_b, job.continuation, job.k
     ref_policy = policy_a if job.reference == "a" else policy_b
     rows: list[dict[str, Any]] = []
-    ref = simulate(store, rules, ref_policy, start, caches=caches)
+    ref = simulate(store, rules, ref_policy, start, caches=caches, allow_holdout=job.allow_holdout)
     schedule = season_schedule(store, season, start.gw_index).iloc[: len(ref.gws)]
     for i, gw_index in enumerate(schedule["gw_index"]):
         if (gw_index - 1) % job.stride:
@@ -753,6 +765,7 @@ def per_decision(
     caches: Caches | None = None,
     rules_fn: RulesFn = backtest_rules,
     jobs: int = 1,
+    allow_holdout: bool = False,
 ) -> pd.DataFrame:
     """Per-decision paired differences (module docstring), one row per decision GW of the
     reference trajectory with gw_index ≡ 1 (mod `stride`), `stride` defaulting to `k`
@@ -765,7 +778,7 @@ def per_decision(
     diff = 0), each arm's transfers at t, its net points and xG net points over the window,
     and the differences A − B. `jobs > 1` runs the (season, start) units in worker
     processes (module docstring), same result. Holdout seasons raise (`HoldoutError`)
-    before anything runs."""
+    before anything runs, unless `allow_holdout` (the Phase 6 run only)."""
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
     stride = k if stride is None else stride
@@ -778,10 +791,10 @@ def per_decision(
             raise ValueError(f"continuation must be a policy or {OWN!r}, got {continuation!r}")
         continuation = None
     seasons = list(seasons)
-    _refuse_holdout(seasons)
+    _refuse_holdout(seasons, allow_holdout)
     specs = _specs(start_specs)
     caches = Caches() if caches is None else caches
-    job = _PerDecisionJob(policy_a, policy_b, continuation, k, stride, reference)
+    job = _PerDecisionJob(policy_a, policy_b, continuation, k, stride, reference, allow_holdout)
     units = _units(store, seasons, specs, rules_fn)
     results = run_units(store, caches, rules_fn, _per_decision_unit, units, job, jobs)
     rows = [row for unit_rows in results for row in unit_rows]
@@ -1023,6 +1036,36 @@ def season_t_test(diffs: pd.DataFrame, column: str = "diff") -> tuple[float, int
     if n < 2 or sd == 0:
         return float("nan"), n
     return t_sf(float(means.mean()) / (sd / math.sqrt(n)), n - 1), n
+
+
+@dataclass(frozen=True)
+class WindowTTest:
+    """`window_t_test`: the mean over cells, the one-sided p (H1: mean > 0), the cells."""
+
+    mean: float
+    p_one_sided: float
+    n_cells: int
+
+
+def window_t_test(diffs: pd.DataFrame, column: str = "diff") -> WindowTTest:
+    """One-sided t-test (H1: A > B) over the (season, gw_index) cells of a `per_decision`
+    frame: per cell the start-averaged `column` (nulls dropped), then t = mean / (sd /
+    sqrt(n)) with n − 1 degrees of freedom over the n cells. The Phase 6 gate's statistic
+    (PLAN §9): on one season with non-overlapping windows (stride = k) the cells are close
+    to independent, and unlike the block bootstrap's percentile p on ~10 cells it holds its
+    size (tests/test_backtest_evaluate.py, A/A placebo). Across seasons it ignores that a
+    season's windows share outcomes; use `season_t_test` there. p is NaN with fewer than 2
+    cells or no spread."""
+    valid = diffs[diffs[column].notna()]
+    if valid.empty:
+        return WindowTTest(float("nan"), float("nan"), 0)
+    values = pd.to_numeric(valid[column]).astype("float64")
+    cells = values.groupby([valid["season"], valid["gw_index"]]).mean().to_numpy("float64")
+    n, mean = len(cells), float(cells.mean())
+    sd = float(np.std(cells, ddof=1)) if n >= 2 else 0.0
+    if n < 2 or sd == 0:
+        return WindowTTest(mean, float("nan"), n)
+    return WindowTTest(mean, t_sf(mean / (sd / math.sqrt(n)), n - 1), n)
 
 
 def deflated_mean(mean: float, ci_low: float, ci_high: float, n_variants: int, ci: float) -> float:
