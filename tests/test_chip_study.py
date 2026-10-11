@@ -269,3 +269,91 @@ def test_chips_values_command(tmp_path, capsys):
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["seasons"] == ["2020-21"] and len(payload["values"]["3xc"]) == 19
     assert "Written to" in capsys.readouterr().out
+
+
+# --- review fixes -----------------------------------------------------------------------------
+
+
+def test_chip_policies_survive_pickling_into_workers():
+    """The backtester pickles policies into worker processes: the estimated terminal
+    values and every name must survive (they once dropped `chip_value_left`)."""
+    import pickle
+
+    table = {"bboost": (1.0, 2.5), "3xc": (0.5,)}
+    params = replace(SMALL, chip_value_left=table)
+    policies = [
+        OptimizerPolicy("v1", params, chips=True),
+        ChipRulePolicy("v1", params, t_tc=9.0, t_bb=11.0, k_fh=2, t_wc=7.0),
+        ChipGainProbe("v1", params),
+    ]
+    for policy in policies:
+        back = pickle.loads(pickle.dumps(policy))
+        assert back == policy and back.name == policy.name
+        assert back.params.chip_value_left == {"bboost": (1.0, 2.5), "3xc": (0.5,)}
+    assert pickle.loads(pickle.dumps(OptimizerParams())).chip_value_left is None
+
+
+def test_the_name_pins_the_whole_table():
+    a = OptimizerPolicy("v1", replace(SMALL, chip_value_left={"bboost": (1.0, 2.0, 3.0)}), True)
+    b = OptimizerPolicy("v1", replace(SMALL, chip_value_left={"bboost": (1.0, 2.5, 3.0)}), True)
+    assert a.name != b.name  # same first and last value, different table
+
+
+def test_chip_policy_minutes_keys_need_a_minutes_model():
+    with pytest.raises(Exception, match="only apply to xP models with minutes"):
+        cli.parse_policy_spec("chipgains:rolling:min_minutes=100")
+    with pytest.raises(Exception, match="only apply to xP models with minutes"):
+        cli.parse_policy_spec("chiprules:ep_next:bench_from_minutes=0")
+
+
+def test_window_test_null_size():
+    from fplopt.backtest.evaluate import window_test_null_size
+
+    rng = np.random.default_rng(3)
+    rows = [(s, "t", gw, rng.normal()) for s in range(2016, 2023) for gw in range(1, 39)]
+    paired = pd.DataFrame(rows, columns=["season", "start_id", "gw_index", "diff"])
+    size = window_test_null_size(paired, n_rep=4000, seed=1)
+    assert size.n_cells == 35
+    assert 0.07 <= size.rates[0.10] <= 0.13 and size.rates[0.05] <= 0.08
+    assert abs(size.critical_p[0.05] - 0.05) < 0.03
+    # Spiky, skewed cells (a big chip GW now and then): the rate and the calibrated p
+    # are reported, whatever they are.
+    spiky = paired.assign(diff=rng.exponential(1, len(paired)) ** 3)
+    skewed = window_test_null_size(spiky, n_rep=4000, seed=1)
+    assert set(skewed.rates) == {0.05, 0.10} and 0 < skewed.critical_p[0.05] < 1
+    with pytest.raises(ValueError, match="2 cells"):
+        window_test_null_size(paired[paired["gw_index"] <= 8].head(1))
+
+
+def test_chips_size_command(tmp_path, capsys):
+    rows = [(s, "t", gw, float(gw % 3), float(gw % 2)) for s in (2020, 2021) for gw in range(1, 39)]
+    paired = pd.DataFrame(rows, columns=["season", "start_id", "gw_index", "diff", "diff_xg"])
+    path = tmp_path / "paired.parquet"
+    paired.to_parquet(path, index=False)
+    settings = cli.Settings(
+        raw_dir=tmp_path, odds_api_key=None, telegram_bot_token=None, telegram_admin_chat_id=None
+    )
+    assert cli.main(["chips", "size", "--paired", str(path)], settings=settings) == 0
+    printed = capsys.readouterr().out
+    assert "realized: 10 develop cells; alpha 0.05: rate" in printed and "xg:" in printed
+    paired.assign(season=2023).to_parquet(path, index=False)
+    assert cli.main(["chips", "size", "--paired", str(path)], settings=settings) == 1
+
+
+def test_backtest_config_logs_the_estimated_table(tmp_path, monkeypatch):
+    import argparse
+
+    table = tmp_path / "terminal-values.json"
+    table.write_text(json.dumps({"source": "run", "values": {"bboost": [2.0]}}), encoding="utf-8")
+    monkeypatch.setattr(cli, "CHIP_VALUES_FILE", table)
+    specs = [
+        cli.parse_policy_spec("optimizer:v1:chips=1,chip_shrink=0.5"),
+        cli.parse_policy_spec("optimizer:v1"),
+    ]
+    args = argparse.Namespace(
+        seasons=(2020,), starts="template@1", policy_specs=specs, jobs=1, family="f", command="run"
+    )
+    config = cli._backtest_config(args, tmp_path / "out")
+    assert config["chip_values"] == {"source": "run", "values": {"bboost": [2.0]}}
+    args.policy_specs = specs[1:]
+    assert "chip_values" not in cli._backtest_config(args, tmp_path / "out")

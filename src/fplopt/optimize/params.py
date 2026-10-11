@@ -221,6 +221,7 @@ class OptimizerParams:
                 self.tie_epsilon,
                 self.bench_from_minutes,
                 self.min_minutes,
+                None if self.chip_value_left is None else dict(self.chip_value_left),
             ),
         )
 

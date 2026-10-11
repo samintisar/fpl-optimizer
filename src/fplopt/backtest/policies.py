@@ -357,9 +357,14 @@ def _optimizer_extras(params: OptimizerParams) -> list[str]:
     if params.chip_value != default.chip_value:
         parts.append("cv=" + "/".join(f"{k}:{v!r}" for k, v in params.chip_value.items()))
     if params.chip_value_left is not None:
+        # first-last value and a weighted checksum of the whole table per chip, so a
+        # re-estimated table gives a different name (the experiment log keys on names)
         parts.append(
             "cvl="
-            + "/".join(f"{k}:{v[0]:.2f}-{v[-1]:.2f}" for k, v in params.chip_value_left.items())
+            + "/".join(
+                f"{k}:{v[0]:.2f}-{v[-1]:.2f}#{sum((i + 1) * x for i, x in enumerate(v)):.3f}"
+                for k, v in params.chip_value_left.items()
+            )
         )
     if params.prune_n != default.prune_n:
         prune_n = params.prune_n

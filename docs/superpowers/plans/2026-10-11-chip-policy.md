@@ -65,6 +65,8 @@ The result is a table per chip by `L`, stored in config and logged. It replaces 
 | Statistic | **as replaced by the size check (below):** one-sided **full-run window t-test** (`evaluate.full_run_window_test`). Per-GW paired differences in realized points go into non-overlapping 8-GW cells (gw_index 1–8, 9–16, …, 33–38). Each cell is averaged over its GWs and starts. The t-test runs over the cells, df = n − 1, about 10 cells on validate. Plus the same sign on xG-scored points. |
 | Size check first | **Done 2026-10-11, before any run.** The pre-registered GW-block bootstrap rejects about 12.5% at nominal 10% on two seasons, which is outside 0.08–0.12 (measured 0.131 / 0.124 for 1 / 4 seasons, `test_bootstrap_size_under_no_effect`), so it was replaced, as this row allowed. The window t-test's A/A size on two seasons is in range: 0.10 with independent GWs, 0.108 with per-GW AR(1) 0.3 (`tests/test_chip_study.py`); in a simulation, 8-GW cells hold ≤ 0.114 up to AR 0.5, where 4-GW cells reach 0.141. Measured lag-1–4 autocorrelations of full-run differences are about 0 (−0.05 to +0.04, Phase 5b develop runs). The bootstrap CI is still reported by `backtest compare`. |
 
+**Size on real differences (added after code review, before any run).** The A/A size above assumes Gaussian cells, but chip differences are skewed (Triple Captain and Bench Boost spikes). After the develop runs, and before validate, run `fplopt chips size --paired <develop P vs S0 run>` and the same on H vs S0. This resamples the real develop 8-GW cells, centred to no effect, 10 at a time. If the rejection rate at α 0.05 is above 0.07, the validate gate uses the **calibrated critical p** that run reports (the 5% quantile of the null p values) instead of 0.05. The number used is recorded before validate runs.
+
 **Order:**
 1. **Develop:** tune H's thresholds and P's `k`. Logged, with the number of variants tried, for deflation.
 2. **Validate, once:**
@@ -118,6 +120,14 @@ Target: verdict by about GW10 (late October).
   - `optimizer:v1:...,chips=1,chip_shrink=k`: P, using the table in `config/chips/terminal-values.json` times k.
 - **`fplopt chips values --gains <chipgains run>`** writes that table from develop seasons only (`fplopt.backtest.chip_values`).
 - **`backtest compare`** prints and logs `full_run_window_tests` per split, for realized and xG.
+- **Review fixes (before any run):**
+  - `OptimizerParams` pickling now keeps `chip_value_left`. Without it, worker processes silently ran P with the placeholders.
+  - P's policy name carries a checksum of the whole table.
+  - The table P ran with is written into the run's config (`summary.json`, experiment log).
+  - `fplopt chips size` checks the size on real differences.
+- **To keep in mind when interpreting the runs (from review):**
+  - **Bench weights.** A Wildcard or Free Hit GW uses the fixed bench weights, while the no-chip plan uses v1's minutes-based ones. Part of `gain_wc`/`gain_fh` is that switch, not the squad: measure it on a few develop deadlines before setting H's `T_wc` grid.
+  - **Undiscounted terminal values.** They are added undiscounted, while chips played inside the horizon are discounted by `decay^h`. So P leans towards holding chips until the window's end comes inside the horizon (PLAN §7 design; `k` partly offsets it).
 - **H's rules** use the raw quantities as written in §2: captain xP, the bench's summed xP, squad players with no fixture, and the Wildcard plan's gain. The grid points are their develop percentiles from the chipgains run.
 
 ## 7. Open (VERIFY before the code PR)

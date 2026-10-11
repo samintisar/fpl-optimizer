@@ -115,7 +115,9 @@ __all__ = (
     "season_points",
     "summarize",
     "transfer_gain_summary",
+    "WindowTestSize",
     "full_run_window_test",
+    "window_test_null_size",
     "window_t_test",
 )
 
@@ -1087,6 +1089,56 @@ def full_run_window_test(
         raise ValueError(f"window must be >= 1, got {window}")
     cells = paired.assign(gw_index=1 + (paired["gw_index"].astype("int64") - 1) // window * window)
     return window_t_test(cells, column)
+
+
+@dataclass(frozen=True)
+class WindowTestSize:
+    """`window_test_null_size`: the rejection rates at `alphas` and, per alpha, the
+    calibrated critical p (the alpha-quantile of the null p values)."""
+
+    n_cells: int
+    rates: dict[float, float]
+    critical_p: dict[float, float]
+
+
+def window_test_null_size(
+    paired: pd.DataFrame,
+    column: str = "diff",
+    *,
+    window: int = FULL_RUN_WINDOW,
+    n_cells: int = 10,
+    alphas: tuple[float, ...] = (0.05, 0.10),
+    n_rep: int = 20000,
+    seed: int = 0,
+) -> WindowTestSize:
+    """The full-run window test's size on real differences (chip pre-registration §4): the
+    `window`-GW cells of `paired` (as `full_run_window_test` builds them), centred to mean 0
+    (no effect, the real shape kept: skew, Triple Captain / Bench Boost spikes), resampled
+    `n_cells` at a time with replacement, `n_rep` times; one-sided t-test p each time."""
+    valid = paired[paired[column].notna()]
+    cells_frame = valid.assign(
+        gw_index=1 + (valid["gw_index"].astype("int64") - 1) // window * window
+    )
+    values = pd.to_numeric(cells_frame[column]).astype("float64")
+    cells = values.groupby([cells_frame["season"], cells_frame["gw_index"]]).mean().to_numpy()
+    if len(cells) < 2:
+        raise ValueError("need at least 2 cells")
+    centred = cells - cells.mean()
+    rng = np.random.default_rng(seed)
+    draws = rng.choice(centred, size=(n_rep, n_cells), replace=True)
+    means = draws.mean(axis=1)
+    sds = draws.std(axis=1, ddof=1)
+    ps = np.array(
+        [
+            t_sf(m / (s / math.sqrt(n_cells)), n_cells - 1) if s > 0 else 1.0
+            for m, s in zip(means, sds, strict=True)
+        ]
+    )
+    return WindowTestSize(
+        n_cells=len(cells),
+        rates={a: float((ps < a).mean()) for a in alphas},
+        critical_p={a: float(np.quantile(ps, a)) for a in alphas},
+    )
 
 
 def deflated_mean(mean: float, ci_low: float, ci_high: float, n_variants: int, ci: float) -> float:

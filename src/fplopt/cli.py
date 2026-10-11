@@ -61,7 +61,7 @@ from fplopt.heartbeat import send_heartbeat
 from fplopt.ingest import health, history, jobs
 from fplopt.ingest.raw_store import RawStore
 from fplopt.redact import redact
-from fplopt.seasons import HOLDOUT_SEASONS, parse_season_label, season_label
+from fplopt.seasons import DEVELOP_SEASONS, HOLDOUT_SEASONS, parse_season_label, season_label
 from fplopt.settings import Settings
 
 if TYPE_CHECKING:
@@ -345,18 +345,14 @@ def make_policy_spec(name: str, xp: str, params: dict[str, str]) -> PolicySpec:
         )
     if name == "greedy" and given.get("max_transfers", 0) < 0:
         raise argparse.ArgumentTypeError(f"bad policy {spec}: need max_transfers >= 0")
-    if name == "optimizer" and xp not in MINUTES_XP_MODELS:
+    if name in ("optimizer", "chipgains", "chiprules") and xp not in MINUTES_XP_MODELS:
         ignored = [key for key in MINUTES_KEYS if key in given]
         if ignored:
             raise argparse.ArgumentTypeError(
                 f"bad policy {spec}: {', '.join(ignored)} only apply to xP models with "
                 f"minutes ({', '.join(MINUTES_XP_MODELS)})"
             )
-    if (
-        name in ("chiprules", "chipgains", "optimizer")
-        and "chip_shrink" in given
-        and not given.get("chips")
-    ):
+    if name == "optimizer" and "chip_shrink" in given and not given.get("chips"):
         raise argparse.ArgumentTypeError(f"bad policy {spec}: chip_shrink needs chips=1")
     if name in ("optimizer", "chipgains", "chiprules") and not 0 < given.get("decay", 0.5) <= 1:
         raise argparse.ArgumentTypeError(f"bad policy {spec}: need 0 < decay <= 1")
@@ -525,6 +521,9 @@ def _backtest_config(args: argparse.Namespace, out: Path) -> dict[str, Any]:
         "jobs": args.jobs,
         "family": args.family,
     }
+    if any("chip_shrink" in dict(spec.params) for spec in args.policy_specs):
+        # The estimated terminal values P ran with (chip pre-registration §3: logged).
+        config["chip_values"] = json.loads(CHIP_VALUES_FILE.read_text(encoding="utf-8"))
     if args.command == "compare":
         config |= {
             "per_decision": args.per_decision,
@@ -1796,6 +1795,29 @@ def _chips_values(c: Context) -> object:
     return table
 
 
+def _chips_size(c: Context) -> object:
+    """`fplopt chips size`: `evaluate.window_test_null_size` on a develop run's paired
+    differences, realized and xG-scored (chip pre-registration §4)."""
+    import pandas as pd
+
+    from fplopt.backtest.evaluate import window_test_null_size
+
+    paired = pd.read_parquet(c.args.paired)
+    outside = sorted(int(s) for s in paired["season"].unique() if int(s) not in DEVELOP_SEASONS)
+    if outside:
+        raise ValueError(f"size is checked on develop seasons only, got {outside}")
+    out = {}
+    for metric, column in (("realized", "diff"), ("xg", "diff_xg")):
+        size = window_test_null_size(paired, column, n_cells=c.args.cells)
+        out[metric] = size
+        rates = ", ".join(
+            f"alpha {a:.2f}: rate {r:.3f}, calibrated p {size.critical_p[a]:.4f}"
+            for a, r in size.rates.items()
+        )
+        print(f"{metric}: {size.n_cells} develop cells; {rates}", flush=True)
+    return out
+
+
 def _bot_run(c: Context) -> object:
     """`fplopt bot run`: the Telegram bot, long polling until stopped (`fplopt.bot.app`)."""
     from fplopt.bot.app import build_application
@@ -1841,6 +1863,7 @@ JOBS: dict[str, Job] = {
     "live prepare": lambda c: _live(c, tick=False),
     "bot run": lambda c: _bot_run(c),
     "chips values": lambda c: _chips_values(c),
+    "chips size": lambda c: _chips_size(c),
     "holdout run": _holdout_run,
 }
 
@@ -1917,6 +1940,18 @@ def _add_chips_parsers(groups: Any) -> None:
         default=CHIP_VALUES_FILE,
         help="where to write the table (default config/chips/terminal-values.json)",
     )
+    size = commands.add_parser(
+        "size",
+        help="the full-run window test's null rejection rate on resampled real differences",
+    )
+    size.set_defaults(subparser=size)
+    size.add_argument(
+        "--paired",
+        type=Path,
+        required=True,
+        help="a develop `backtest compare` run's paired.parquet",
+    )
+    size.add_argument("--cells", type=int, default=10, help="cells per test (default 10)")
 
 
 def _add_bot_parsers(groups: Any) -> None:
