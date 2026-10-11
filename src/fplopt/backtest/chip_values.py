@@ -17,15 +17,33 @@ the policy spec's `chip_shrink` (chosen on develop) corrects.
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 
 import pandas as pd
 
 from fplopt.seasons import DEVELOP_SEASONS
 
-__all__ = ("GAIN_COLUMNS", "estimate_terminal_values")
+__all__ = ("CHIP_VALUES_FILE", "GAIN_COLUMNS", "estimate_terminal_values", "load_terminal_values")
 
 GAIN_COLUMNS = {"3xc": "gain_tc", "bboost": "gain_bb", "freehit": "gain_fh", "wildcard": "gain_wc"}
+# The estimated table (`fplopt chips values`; the chip study's, PLAN §12).
+CHIP_VALUES_FILE = Path(__file__).resolve().parents[3] / "config" / "chips" / "terminal-values.json"
+
+
+def load_terminal_values(
+    shrink: float = 1.0, path: Path | None = None
+) -> dict[str, tuple[float, ...]]:
+    """The estimated terminal value table times `shrink` (ValueError if it hasn't been
+    estimated yet or `shrink` < 0): `OptimizerParams.chip_value_left`."""
+    path = CHIP_VALUES_FILE if path is None else path
+    if not math.isfinite(shrink) or shrink < 0:
+        raise ValueError(f"chip_shrink must be a finite number >= 0, got {shrink}")
+    if not path.is_file():
+        raise ValueError(f"chip_shrink: no estimated chip values at {path} (fplopt chips values)")
+    table = json.loads(path.read_text(encoding="utf-8"))["values"]
+    return {name: tuple(shrink * float(v) for v in values) for name, values in table.items()}
 
 
 def estimate_terminal_values(gws: pd.DataFrame) -> dict[str, tuple[float, ...]]:
