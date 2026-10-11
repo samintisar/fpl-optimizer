@@ -194,6 +194,8 @@ def test_user_store_overrides_and_recommendations(users):
     assert users.alert_run(SEASON, GW, "alert24") is None
     users.mark_alert_run(SEASON, GW, "alert24", "c1", datetime(2023, 9, 1, tzinfo=UTC))
     assert users.alert_run(SEASON, GW, "alert24")["context_id"] == "c1"
+    users.mark_alert_run(SEASON, GW, "alert24", "c2", datetime(2023, 9, 2, tzinfo=UTC))
+    assert users.alert_run(SEASON, GW, "alert24")["context_id"] == "c1"  # first mark kept
 
 
 # --- plan context -----------------------------------------------------------------------------

@@ -326,10 +326,12 @@ class UserStore:
     def mark_alert_run(
         self, season: int, gw: int, kind: str, context_id: str, bootstrap_at: datetime
     ) -> None:
+        """Mark the GW's alert of `kind` done; a second mark (e.g. a manual `fplopt live
+        tick` next to the timer's) keeps the first."""
         with self._connect() as db:
             db.execute(
                 "INSERT INTO alert_runs (season, gw, kind, context_id, bootstrap_at, run_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (season, gw, kind) DO NOTHING",
                 (season, gw, kind, context_id, bootstrap_at.isoformat(), _now()),
             )
 
