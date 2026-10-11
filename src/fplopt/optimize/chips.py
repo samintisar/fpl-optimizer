@@ -19,9 +19,11 @@ allowed only with `freehit_consecutive`. At most one chip per GW (a `Decision` h
 Triples are not enumerated.
 
 `terminal_value` credits each `chip_id` still unused at the horizon's end whose window
-extends past the last horizon `gw_index` with `params.chip_value[name]` (a placeholder for
-PLAN §7's "expected best use in the rest of the window, estimated from backtest
-distributions"); a window closing inside the horizon is worth 0 (use it or lose it).
+extends past the last horizon `gw_index` with `chip_value`: `params.chip_value[name]` (a
+placeholder) or, when `params.chip_value_left` has the chip, its value for the GWs left in
+the window (PLAN §7's "expected best use in the rest of the window, estimated from backtest
+distributions"; chip pre-registration §3); a window closing inside the horizon is worth 0
+(use it or lose it).
 
 Scenario keys `t` are positions in `PlanInput.gws` (equal to the horizon offset unless the
 xP frame skips a GW). Pure: no I/O.
@@ -122,8 +124,19 @@ def terminal_value(problem: PlanInput, params: OptimizerParams, scenario: ChipSc
     last = problem.gws[-1].gw_index
     return float(
         sum(
-            params.chip_value.get(w.name, 0.0)
+            chip_value(params, w.name, w.stop - last)
             for w in sorted(problem.rules.chips, key=lambda w: w.chip_id)
             if w.chip_id not in used and w.stop > last
         )
     )
+
+
+def chip_value(params: OptimizerParams, name: str, left: int) -> float:
+    """The value of holding chip `name` with `left` (≥ 1) GWs of its window after the
+    horizon: `params.chip_value_left[name][left - 1]` (its last entry for a longer window)
+    when the table has the chip, else the flat `params.chip_value[name]` (0 if missing)."""
+    table = params.chip_value_left
+    if table is not None and name in table:
+        values = table[name]
+        return values[min(left, len(values)) - 1]
+    return params.chip_value.get(name, 0.0)

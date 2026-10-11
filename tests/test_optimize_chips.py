@@ -429,3 +429,30 @@ def test_top_k_validation_and_no_roll() -> None:
         optimize(problem, params, top_k=0)
     result = optimize(problem, params, top_k=1, chips=False, roll=False)
     assert result.roll is None and result.best.gain_vs_roll is None
+
+
+def test_terminal_values_by_window_left() -> None:
+    from fplopt.optimize.chips import chip_value
+
+    flat = {"wildcard": 6.0, "freehit": 4.0, "bboost": 2.0}
+    params = replace(EXACT, chip_value=flat, chip_value_left={"wildcard": (1.0, 2.0, 3.0)})
+    assert chip_value(params, "wildcard", 1) == 1.0
+    assert chip_value(params, "wildcard", 2) == 2.0
+    assert chip_value(params, "wildcard", 30) == 3.0  # longer: the last entry
+    assert chip_value(params, "freehit", 2) == 4.0  # not in the table: the flat value
+    assert chip_value(params, "3xc", 2) == 0.0
+    # GWs 5-7: 12 GWs left in set 1, 31 in set 2 -> the Wildcard's last entry twice.
+    assert terminal_value(problem_at(5, 3), params, NO_CHIP) == 3 + 3 + 2 * 4 + 2 * 2
+    # GWs 15-17: 2 GWs left in set 1 (18, 19), 21 in set 2.
+    assert terminal_value(problem_at(15, 3), params, NO_CHIP) == 2 + 3 + 2 * 4 + 2 * 2
+
+
+def test_chip_value_left_is_validated() -> None:
+    with pytest.raises(ValueError, match="chip_value_left"):
+        OptimizerParams(chip_value_left={"wildcard": ()})
+    with pytest.raises(ValueError, match="chip_value_left"):
+        OptimizerParams(chip_value_left={"wildcard": (1.0, -1.0)})
+    params = OptimizerParams(chip_value_left={"bboost": [1, 2]})
+    assert params.chip_value_left["bboost"] == (1.0, 2.0)
+    with pytest.raises(TypeError):
+        params.chip_value_left["bboost"] = (3.0,)

@@ -131,6 +131,10 @@ class OptimizerParams:
     tie_epsilon: float = DEFAULT_TIE_EPSILON
     bench_from_minutes: bool = True
     min_minutes: float = DEFAULT_MIN_MINUTES
+    # Per chip name, the terminal value by GWs left in its window after the horizon
+    # (index L - 1; the last entry for longer): replaces `chip_value` for the chips it
+    # holds (`chips.terminal_value`; estimated, chip pre-registration §3). None = unused.
+    chip_value_left: Mapping[str, tuple[float, ...]] | None = None
 
     def __post_init__(self) -> None:
         if self.horizon < 1:
@@ -170,6 +174,14 @@ class OptimizerParams:
         object.__setattr__(
             self, "chip_value", _frozen({str(k): float(v) for k, v in self.chip_value.items()})
         )
+        if self.chip_value_left is not None:
+            table = {str(k): tuple(float(x) for x in v) for k, v in self.chip_value_left.items()}
+            for name, values in table.items():
+                if not values or any(not math.isfinite(x) or x < 0 for x in values):
+                    raise ValueError(
+                        f"chip_value_left[{name!r}] needs finite values >= 0, got {values}"
+                    )
+            object.__setattr__(self, "chip_value_left", _frozen(table))
         if self.prune_n is not None:
             prune_n = {int(k): int(v) for k, v in self.prune_n.items()}
             if any(v < 0 for v in prune_n.values()):
@@ -209,6 +221,7 @@ class OptimizerParams:
                 self.tie_epsilon,
                 self.bench_from_minutes,
                 self.min_minutes,
+                None if self.chip_value_left is None else dict(self.chip_value_left),
             ),
         )
 

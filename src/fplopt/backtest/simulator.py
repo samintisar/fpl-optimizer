@@ -54,7 +54,7 @@ from typing import Any
 import pandas as pd
 
 from fplopt.backtest.gw_score import GwScore, Lineup, Points, gw_outcomes, score_gameweek
-from fplopt.backtest.policies import DecisionContext, Policy, best_lineup
+from fplopt.backtest.policies import CHIP_DIAGNOSTICS, DecisionContext, Policy, best_lineup
 from fplopt.backtest.rules import Rules
 from fplopt.backtest.scoring import score_matches
 from fplopt.backtest.state import (
@@ -154,6 +154,14 @@ GW_COLUMNS = (
     ("real_gain", "Float64"),
     ("solver_status", "str"),
     ("mip_gap", "Float64"),
+    # Chip quantities at the GW (`policies.CHIP_DIAGNOSTICS`; chip policies only, else null)
+    ("captain_xp", "Float64"),
+    ("bench_xp", "Float64"),
+    ("gain_tc", "Float64"),
+    ("gain_bb", "Float64"),
+    ("gain_fh", "Float64"),
+    ("gain_wc", "Float64"),
+    ("blanks", "Float64"),
 )
 GAIN_WINDOW = 4  # GWs over which transfer gains are measured (PLAN §5's per-decision k)
 
@@ -445,6 +453,7 @@ def play_step(
         "autosubs": json.dumps([list(pair) for pair in score.autosubs]),
         "solver_status": decision.solver_status,
         "mip_gap": decision.mip_gap,
+        **{key: (decision.diagnostics or {}).get(key) for key in CHIP_DIAGNOSTICS},
     }
     return gw_state, record, row
 
