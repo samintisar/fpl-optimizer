@@ -714,3 +714,28 @@ def test_send_replies_splits_long_messages():
     assert bot.sent[0] == (1, "hi")
     assert [c for c, _ in bot.sent[1:]] == [2, 2]
     assert all(len(t) <= 4096 for _, t in bot.sent)
+
+
+def test_telegram_sender_posts_html_and_never_leaks_the_token():
+    from fplopt.bot.sender import TelegramSendError, telegram_sender
+
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        status = 403 if seen[-1]["chat_id"] == 2 else 200
+        return httpx.Response(status, json={"ok": status == 200})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        send = telegram_sender(http, "123:SECRET")
+        send(1, "<b>hi</b>")
+        assert seen[0] == {
+            "chat_id": 1,
+            "text": "<b>hi</b>",
+            "parse_mode": "HTML",
+            "link_preview_options": {"is_disabled": True},
+        }
+        with pytest.raises(TelegramSendError) as info:
+            send(2, "x")
+    assert "HTTP 403" in str(info.value) and "SECRET" not in str(info.value)
+    assert info.value.__cause__ is None and info.value.__suppress_context__
