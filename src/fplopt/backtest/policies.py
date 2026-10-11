@@ -485,6 +485,13 @@ def _chip_solve(problem: PlanInput, params: OptimizerParams, chip: str) -> float
         return None
 
 
+def one_gw_params(params: OptimizerParams) -> OptimizerParams:
+    """`params` for a 1-GW plan (the Free Hit gain): the expected-minutes floor is defined
+    over a full `horizon`, so it is scaled to one GW. Unscaled, a 1-GW plan with v1 xP
+    needs 180 minutes in one GW from every candidate and can't buy anyone."""
+    return replace(params, horizon=1, min_minutes=params.min_minutes / params.horizon)
+
+
 def chip_gains(
     ctx: DecisionContext, problem: PlanInput, params: OptimizerParams, plan: Any
 ) -> dict[str, float | None]:
@@ -493,7 +500,7 @@ def chip_gains(
     weights = problem.gw_bench_weights(0, params)
     bench = [_target_xp_of(ctx.xp, k) for k in first.bench]
     captain = _target_xp_of(ctx.xp, first.captain)
-    one = replace(params, horizon=1)
+    one = one_gw_params(params)
     short = PlanInput.from_context(ctx.state, ctx.pool, ctx.xp, ctx.rules, one)
     fh = None
     if chip_available(problem.state, "freehit", ctx.rules):

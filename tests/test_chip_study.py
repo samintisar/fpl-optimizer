@@ -357,3 +357,22 @@ def test_backtest_config_logs_the_estimated_table(tmp_path, monkeypatch):
     assert config["chip_values"] == {"source": "run", "values": {"bboost": [2.0]}}
     args.policy_specs = specs[1:]
     assert "chip_values" not in cli._backtest_config(args, tmp_path / "out")
+
+
+def test_free_hit_gain_with_an_expected_minutes_floor(league):
+    """With a minutes model (`e_minutes`) the 1-GW Free Hit plan scales the floor to one
+    GW; unscaled (180 minutes in one GW) it had no candidates, and every Free Hit gain was
+    'keep the squad' (found in the develop run, before any tuning)."""
+    from fplopt.backtest.policies import chip_gains, one_gw_params
+    from fplopt.optimize import PlanInput, optimize
+
+    assert one_gw_params(SMALL).min_minutes == pytest.approx(SMALL.min_minutes / SMALL.horizon)
+    view, pool, xp = league[9]
+    rules = backtest_rules(2023)
+    state = refresh(random_state(view, rules, 5), pool)
+    xp = xp.assign(e_minutes=95.0)  # 190 over the 2-GW horizon: above the 180 floor
+    context = DecisionContext(view, state, rules, pool, xp)
+    problem = PlanInput.from_context(state, pool, xp, rules, SMALL)
+    plans = optimize(problem, SMALL, top_k=1, chips=False, roll=False)
+    gains = chip_gains(context, problem, SMALL, plans.best)
+    assert gains["gain_fh"] > 1.0  # a random squad: a Free Hit rebuilds it
