@@ -917,4 +917,29 @@ def test_chips_command(users, contexts, entries, context, member):
     assert text.startswith(f"<b>GW{GW} chips</b>")
     (check,) = users.chip_checks(users.user(member).user_id)
     assert check["gw"] == GW and "none" in check["scenarios"] and check["best"]
+    # Each chip's own solve is logged with the search's scenarios.
+    options = chip_planner(entries, TEAM, context)
+    assert {label for label, _ in options.singles.values()} <= set(check["scenarios"])
     assert texts(service.chips(6)) == ["Send /start first."]
+
+
+def test_chips_text_counts_ruled_out_and_unsettled_options(entries, context):
+    from types import MappingProxyType
+
+    from fplopt.bot.messages import chips_text
+    from fplopt.optimize.search import SearchStats
+
+    options = chip_planner(entries, TEAM, context)
+    plans = options.plans
+    singles = {label for label, _ in options.singles.values()}
+    bounds = {**plans.scenario_bounds, "bboost@gw99": 1.0, "3xc@gw98": 1.0}
+    stats = replace(plans.search or SearchStats(), not_optimal=(("3xc@gw98", "TimeLimit"),))
+    patched = replace(
+        options,
+        plans=replace(plans, scenario_bounds=MappingProxyType(bounds), search=stats),
+    )
+    text = chips_text(patched)
+    ruled = len(set(bounds) - set(plans.scenario_objectives) - singles) - 1
+    if ruled:
+        assert f"{ruled} other options were ruled out" in text
+    assert "1 option(s) not settled" in text

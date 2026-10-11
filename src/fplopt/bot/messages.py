@@ -233,11 +233,20 @@ def chips_text(options: ChipOptions, shown: int = 6) -> str:
     lines += ["", "Options the solver checked (xP vs no chip):"]
     for label, value in ranked_scenarios[:shown]:
         lines.append(f"· {_e(scenario_label(label))}: {value - base:+.1f}")
-    skipped = len(options.plans.scenario_bounds) - len(objectives)
+    solved = set(objectives) | {label for label, _ in options.singles.values()}
+    unsolved = set(options.plans.scenario_bounds) - solved
+    search = options.plans.search
+    stopped = unsolved & {label for label, _ in (search.not_optimal if search else ())}
+    skipped = len(unsolved - stopped)
     if len(ranked_scenarios) > shown:
         lines.append(f"· … {len(ranked_scenarios) - shown} more, all lower")
     if skipped > 0:
         lines.append(f"{skipped} other options were ruled out: provably no better than the best.")
+    if stopped:
+        lines.append(
+            f"{len(stopped)} option(s) not settled: the solver hit its time limit before "
+            "finding a plan for them."
+        )
     values = ", ".join(
         f"{CHIP_LABELS[name]} {params.chip_value.get(name, 0.0):g}"
         for name in CHIP_LABELS

@@ -289,7 +289,10 @@ class BotService:
             context.gw,
             context_id=context.context_id,
             best=options.plans.best.scenario,
-            scenarios=options.plans.scenario_objectives,
+            scenarios={
+                **options.plans.scenario_objectives,
+                **dict(options.singles.values()),
+            },
         )
         return [Reply(chat_id, chips_text(options))]
 
