@@ -125,6 +125,7 @@ Target: verdict by about GW10 (late October).
   - P's policy name carries a checksum of the whole table.
   - The table P ran with is written into the run's config (`summary.json`, experiment log).
   - `fplopt chips size` checks the size on real differences.
+- **Develop run 1 (S0 chip gains, `results/chips-s0-develop`) found a bug, fixed before any tuning.** The Free Hit gain's 1-GW plan kept the expected-minutes floor of a full horizon: 180 minutes in one GW, so it had no candidates and every Free Hit gain was "keep the squad" (median −1.2). The fix is `policies.one_gw_params`, which scales the floor to one GW, with a test that fails without it. Only `gain_fh` was affected; Triple Captain, Bench Boost and the 6-GW Wildcard solves were not. S0 was rerun (`results/chips-s0-develop-v2`), and the first run stays in the experiment log.
 - **To keep in mind when interpreting the runs (from review):**
   - **Bench weights.** A Wildcard or Free Hit GW uses the fixed bench weights, while the no-chip plan uses v1's minutes-based ones. Part of `gain_wc`/`gain_fh` is that switch, not the squad: measure it on a few develop deadlines before setting H's `T_wc` grid.
   - **Undiscounted terminal values.** They are added undiscounted, while chips played inside the horizon are discounted by `decay^h`. So P leans towards holding chips until the window's end comes inside the horizon (PLAN §7 design; `k` partly offsets it).
