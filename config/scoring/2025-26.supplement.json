@@ -17,8 +17,8 @@
     "hit_cost": 4,
     "chip_week_ft": "retain",
     "chip_week_ft_comment": "Banked FTs after a Wildcard/Free Hit GW: 'retain_plus_one' (kept, +1 as in any GW) or 'retain' (kept, no +1). Verified 2026-10-06 (#9): 795 top-800 2026/27 entry histories (507 played WC/FH in GW2-5) are all consistent with 'retain'; 'retain_plus_one' is contradicted by 27 (hits paid with FTs it says were left).",
-    "ft_topups": [],
-    "ft_topups_comment": "Extra FTs granted at a GW, as [{\"gw_index\": n, \"amount\": k}]. 2025/26 had an AFCON top-up that the API never carried: GW and amount unknown, so empty until VERIFY #9 settles it from entry transfer histories."
+    "ft_topups": [{"gw_index": 16, "amount": 5}],
+    "ft_topups_comment": "Extra FTs granted at a GW, as [{\"gw_index\": n, \"amount\": k}], then capped at max_free_transfers. 2025/26 AFCON top-up (absent from the API): free transfers topped up to five for GW16 (gw_index 16) whatever was banked, applied after the GW15 deadline (FPL announcement, July 2025; Phase 6 pre-registration). Amount 5 with the cap 5 gives exactly five."
   },
   "chips": {
     "freehit_consecutive": false,

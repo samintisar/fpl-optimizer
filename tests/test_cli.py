@@ -1129,3 +1129,94 @@ def test_models_eval_default_out_dir(models_eval, tmp_path, monkeypatch):
     assert code == 0
     (run_dir,) = (tmp_path / "results").glob("*-eval")
     assert (run_dir / "predictions.parquet").exists() and (run_dir / "metrics.json").exists()
+
+
+# --- the Phase 6 holdout run ------------------------------------------------------------------
+
+
+@pytest.fixture
+def holdout_run(tmp_path, monkeypatch, league):
+    """`fplopt holdout run` on the synthetic league: 2023/24 stands in for the holdout,
+    with cheap greedy/roll policies in place of the pre-registered ones."""
+    from fplopt.backtest import holdout
+
+    monkeypatch.setattr(holdout, "SEASON", 2023)
+    monkeypatch.setattr(holdout, "STARTS", "template@1,random@10")
+    monkeypatch.setattr(holdout, "SYSTEM", "greedy:rolling:threshold=0.5")
+    monkeypatch.setattr(holdout, "BASELINES", (("a", "greedy:rolling"), ("b", "roll:rolling")))
+    monkeypatch.setattr(holdout, "FALLBACK", "greedy:rolling:threshold=2.0")
+    monkeypatch.setattr(holdout, "N_BOOT", 50)
+    monkeypatch.setattr(holdout, "dirty_checkout", lambda root=None: [])
+    monkeypatch.setattr(holdout, "tagged_head", lambda root=None: True)
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+    log = tmp_path / "experiments.csv"
+
+    def run(*argv):
+        argv = ["holdout", "run", "--experiments", str(log), "--jobs", "1", *argv]
+        return cli.main(argv, settings=make_settings(tmp_path)), alerts
+
+    run.log = log
+    return run
+
+
+def test_holdout_run_end_to_end_and_only_once(holdout_run, tmp_path, capsys):
+    out = tmp_path / "phase6"
+    code, alerts = holdout_run("--out", str(out))
+    assert code == 0 and alerts == []
+    printed = capsys.readouterr().out
+    assert "Phase 6 holdout run, 2023-24" in printed and "VERDICT: the system" in printed
+    assert printed.count("PASS") + printed.count("fail") >= 4  # 4 gate rows
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["verdict"] in ("pass", "fail")
+    assert len(summary["gates"]) == 4  # system and fallback vs (a) and (b)
+    assert {g["label"] for g in summary["gates"]} == {"a", "b"}
+    assert summary["config"]["reference"] == "b" and summary["config"]["continuation"] == "own"
+    for name in ("gws.parquet", "paired.parquet", "per_decision.parquet"):
+        assert (out / name).exists()
+    (logged,) = _experiments(holdout_run.log)
+    assert logged["family"] == "phase6 holdout"
+    assert json.loads(logged["metrics"])["verdict"] == summary["verdict"]
+    # The holdout runs once: a second run is a usage error (exit 2, no alert).
+    with pytest.raises(SystemExit) as info:
+        holdout_run("--out", str(tmp_path / "again"))
+    assert info.value.code == 2
+    assert "already holds a Phase 6 run" in capsys.readouterr().err
+
+
+def test_holdout_run_refuses_a_dirty_checkout_or_used_out(
+    holdout_run, tmp_path, monkeypatch, capsys
+):
+    from fplopt.backtest import holdout
+
+    monkeypatch.setattr(holdout, "dirty_checkout", lambda root=None: [" M src/x.py"])
+    with pytest.raises(SystemExit):
+        holdout_run("--out", str(tmp_path / "a"))
+    assert "uncommitted changes" in capsys.readouterr().err
+    monkeypatch.setattr(holdout, "dirty_checkout", lambda root=None: [])
+    monkeypatch.setattr(holdout, "tagged_head", lambda root=None: False)
+    with pytest.raises(SystemExit):
+        holdout_run("--out", str(tmp_path / "b"))
+    assert "is not the commit tagged 'phase6-holdout'" in capsys.readouterr().err
+    monkeypatch.setattr(holdout, "tagged_head", lambda root=None: True)
+    used = tmp_path / "used"
+    used.mkdir()
+    (used / "x").write_text("", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        holdout_run("--out", str(used))
+    assert "is not empty" in capsys.readouterr().err
+    assert not holdout_run.log.exists()
+
+
+def test_holdout_check_prints_the_inputs(tmp_path, monkeypatch, league, capsys):
+    from fplopt.backtest import holdout
+
+    monkeypatch.setattr(holdout, "SEASON", 2023)
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: league)
+    alerts = []
+    monkeypatch.setattr(cli, "send_admin_alert", lambda text, **kw: alerts.append(text))
+    code = cli.main(["holdout", "check"], settings=make_settings(tmp_path))
+    printed = capsys.readouterr().out
+    assert "2023-24 inputs per deadline" in printed
+    assert (code == 0) == (alerts == []) and ("No problems" in printed) == (code == 0)

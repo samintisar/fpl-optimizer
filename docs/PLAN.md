@@ -212,7 +212,7 @@ Luck moves a season total by roughly ±80–100 points, so across 9 develop+vali
 - **Paired comparisons only:** every policy runs from identical start states; report the per-state difference.
 - **Per-decision evaluation:** at each GW, both policies start from the same state and differ only in this GW's decision; score the difference over the next k GWs under a fixed continuation (roll). ~38 paired samples per season per start state. States come from a reference trajectory (default: the baseline policy's own run); k = 4 by default.
   - **Windows don't overlap:** decisions at gw_index 1, 1+k, 1+2k, … on one grid per season for every start state (stride = k). Every-GW windows share k−1 GWs of outcomes, and an A/A simulation showed the bootstrap rejecting ~17% at nominal 10%.
-  - **Known limitation:** each window starts from the reference state, so a policy's chip or FT spending at t is never charged at t+1, and the roll continuation never uses chips or banked FTs. Judge chips (and FT banking) on full-run paired differences. The go-live test must account for this (pre-register before Phase 6).
+  - **Known limitation:** each window starts from the reference state, so a policy's chip or FT spending at t is never charged at t+1, and the roll continuation never uses chips or banked FTs. Judge chips (and FT banking) on full-run paired differences. The go-live test runs without chips (§9 *Phase 6 design*).
 - **Confidence intervals:** GW-block bootstrap clustered by season. Start states within one season share realized outcomes, so more states ≠ more independent samples. Implementation: average the paired diffs over start states per (season, GW or decision window), then resample circular blocks of 4 GWs (one window for k = 4 per-decision) within each season; one-sided p = share of bootstrap means ≤ 0. Reported CI: two-sided 80%, whose lower bound is the one-sided α = 0.10 test.
   - **Measured size at nominal 0.10** (A/A placebo, 2000 replicates): per-decision (k = 4, non-overlapping) 0.141 / 0.122 / 0.122 for 1 / 4 / 9 seasons; full run 0.131 / 0.124 / 0.122. The circular block bootstrap understates variance by about (n − b)/(n − 1). The single-season holdout gate is therefore ~0.14, not 0.10 (open item, §11).
   - `realized@xg`: realized points on exactly the sample where the xG metric is defined, so the "same sign" check compares like with like.
@@ -676,10 +676,18 @@ First live plan, GW6 (real squad via `optimize plan --entry`, v1 + the Phase 6 o
 | 8 | Distributions, sensitivity analysis, uncertain fixtures, polish | Each adopted only if it beats the current policy in paired validation |
 
 **Go-live gate (pre-registered):** no recommendations are used live until Phase 6 is recorded and, on the 2025/26 holdout, the full system (our models + optimizer) beats **each** of (a) rolling-average xP + greedy policy and (b) FPL `ep_next` + optimizer:
-- one-sided paired test at α = 0.10 on per-decision paired differences in realized points (GW-block bootstrap), **and**
+- one-sided paired test at α = 0.10 on per-decision paired differences in realized points, **and**
 - the same sign on the xG-scored metric.
 
 The test and threshold are fixed now; any change before Phase 6 runs must be logged in §12. Go-live may slip past 2026/27.
+
+**Phase 6 design (pre-registered 2026-10-11, §12; `docs/superpowers/plans/2026-10-11-phase-6-preregistration.md`, fixed in `fplopt.backtest.holdout`, run with `fplopt holdout run`):**
+- **Statistic:** one-sided t-test (df = n − 1) over the ~10 non-overlapping 4-GW decision windows of 2025/26, each window's difference averaged over the start states live in it. It replaces the block bootstrap, whose percentile p rejects ~14% at nominal 10% on one season; the t-test's A/A size is ≈ 0.10 (tests). The bootstrap CI is still reported.
+- **Per-decision design:** each arm continues with its own policy for the window (`--continuation own`), decision states from the baseline's run (`--reference b`), k = stride = 4.
+- **Arms:** the system v1 + `optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2`; (a) `greedy:rolling`; (b) `optimizer:ep_next:horizon=6,decay=0.75,max_hits=1,hit_margin=2`. Starts `template@1,random:3@1,random:3@20`. **No chips** in any arm.
+- **Two baselines, no correction:** "beats each" is an intersection-union test.
+- **Fallback** `greedy:v1:threshold=2.0` is run against both baselines and reported only. If the system fails, go-live is judged on the live 2026/27 shadow log at season end, with the same test.
+- **Once:** a crash before the verdict may be fixed and rerun; once a result is printed it stands.
 
 ---
 
@@ -695,14 +703,16 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 
 ## 11. Open items to VERIFY
 
-- Free-transfer reconstruction rules from public transfer history, and the 2025/26 AFCON top-up (GW and amount; absent from the API). (WC/FH effect resolved below.)
 - Free Hit consecutive-GW restriction in 2026/27.
-- Go-live test size on a single season (~0.14 at nominal 0.10 with the block bootstrap, §5): choose a size-correct test (e.g. a HAC t-test with t critical values, or calibrate the threshold by A/A placebo) and how chips enter it, before Phase 6.
-- Per-decision gate design (Phase 4 review): continuation (shared roll vs each arm's own policy, `--continuation own`) and reference (whose run gives the states, `--reference a|b`); the roll continuation never credits a plan's follow-up moves. Decide and log in §12 before Phase 6.
 - A heuristic chip baseline (e.g. Wildcard at the first international break, Bench Boost / Triple Captain at the best double), so chip timing is judged against something better than never playing chips.
 - Chip terminal values estimated from backtest distributions (now placeholders: WC 6, FH 4, BB 4, TC 3); they set when the planner plays chips.
 - Mid-season start states for transfer-quality tests (the GW1 starts let squad rebuilds dominate full-run differences).
 - Exclude the degenerate 2016/17 GW1 under `rolling` (no earlier matches: every xP is 0) from comparisons, or start 2016/17 at GW2.
+
+**Resolved (2026-10-11):**
+- Go-live test size on one season and how chips enter it: window t-test (df = n − 1), A/A size ≈ 0.10; no chips in any arm (§9 *Phase 6 design*).
+- Per-decision gate design: own continuation, states from the baseline's run (§9 *Phase 6 design*).
+- 2025/26 AFCON top-up: free transfers topped up to five for GW16 (gw_index 16), whatever was banked (FPL announcement, July 2025) → `config/scoring/2025-26.supplement.json` `ft_topups`. Free-transfer reconstruction from public history checked live: team 4570069's inferred 4 FTs for 2026/27 GW6 matched the FPL site (#9 closed).
 
 **Resolved (2026-10-08):**
 - FPL-Core-Insights reproduces FPL's CBIT/CBIRT exactly for 2026/27 GW1–5 (1,437 outfield rows, every component; DEF/MID/FWD 100%), **if its `tackles_won` column is used as tackles**. Its `tackles` column is empty in 2026/27 and holds attempts in 2024/25. FotMob's team "tackles won" also rose from 10.5 (2024/25) to 15.4 (2026/27) per team-match, so the definition probably changed between seasons. #14 closed; defcon `k`, `r` in §6.5.
@@ -758,4 +768,5 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-09 | Phase 5 criterion 2 **not met as pre-registered**: optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2 vs greedy:v1:threshold=2.0 on validate, full run +0.74/GW (80% CI −0.85 to +2.37; xG +0.79; deflated with N = 8 ≈ −1.82). No further validate runs. | Positive in both validate seasons but under-powered for the CI and deflation bars. Reported only: per decision +7.28 per 4-GW window (+3.40 to +11.56, p 0.007; xG +5.29); a leave-one-season-out check over the develop runs, designed after the result, gives 7 of 8 seasons positive (season t p 0.008). The question goes to the Phase 6 holdout (§7 *Phase 5 results*). |
 | 2026-10-09 | Merge Phase 5b without its criterion 2 (as Phase 4). The system Phase 6 tests on the holdout is v1 + `optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2` (no change to the go-live gate); fallback if it fails there: `greedy:v1:threshold=2.0`. | Every out-of-sample check is positive in sign (both validate seasons, per decision, 7 of 8 seasons leave-one-season-out); the worst held-out season is −0.64/GW. The bench weights, pruning floor, defcon and tuned settings stand on their own. Decided with the user. |
 | 2026-10-09 | Fixed bench weights (not the minutes-based ones) at GW1, in a Free Hit GW and from a Wildcard on. Also from the 5b review: defcon rates only where the rules score defcon, keyed by (player, position); NaN expected minutes raise. | The minutes-based weights describe the incumbent squad, which those GWs rebuild. Develop check on the GW1 starts: +2.02/GW vs greedy, +1.81 before (§7 *Phase 5 results*). Made after validate and before Phase 6, so the holdout tests the fixed version; validate not re-run. |
+| 2026-10-11 | Phase 6 pre-registered (§9 *Phase 6 design*): gate statistic = one-sided window t-test (df = n − 1) on realized points plus a positive xG-scored mean, against each baseline at α 0.10 (intersection-union, no correction); `--continuation own --reference b`, k = stride = 4; starts as Phase 5b; no chips in any arm; 2025/26 AFCON top-up to five FTs at GW16. Fallback `greedy:v1:threshold=2.0` reported only; if the system fails, go-live is judged on the live 2026/27 shadow log at season end with the same test. Settings fixed in code (`fplopt holdout run`), which refuses a second run or a dirty checkout. | The block bootstrap's size on one season is ~0.14; the t-test's is ≈ 0.10 (A/A, normal and heavy-tailed). Own continuation credits follow-up moves and matches the Phase 5b validate run; states from the baseline keep the system from choosing them. Chips are untuned (placeholder terminal values, no heuristic baseline). Testing the fallback for go-live on the same holdout would be a second look. Rough power vs (b) ~55–60% at a +7/window edge: a fail is possible even if the system is better. Approved by the user. Changes the 2026-10-09 fallback entry: the fallback is no longer a go-live candidate from the holdout. |
 | 2026-10-07 | Chip scenarios searched best-first by LP/derived upper bounds (same plan as solving all); bulk PuLP→highspy hand-over; club-aware dominance pruning; top-N 20/60/60/30. | #10 benchmark: 107–750 s → median 14 s per deadline; old dominance lost up to 6.6 pts, 10/30/30/15 up to 1.0. |
