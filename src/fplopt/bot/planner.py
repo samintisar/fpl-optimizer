@@ -6,7 +6,8 @@ the manager's call until a chip policy passes its own test, PLAN §12).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
@@ -19,10 +20,12 @@ from fplopt.optimize import OptimizerParams, Plan, PlanInput, PlanSet, optimize
 
 __all__ = (
     "CHIP_LABELS",
+    "ChipOptions",
     "LIVE_PARAMS",
     "TOP_K",
     "UnknownTeam",
     "UserPlan",
+    "chip_options",
     "chips_left",
     "decision_summary",
     "import_user_squad",
@@ -104,6 +107,69 @@ def plan_user(
     problem = PlanInput.from_context(state, context.pool, context.xp, rules, params)
     plans = optimize(problem, params, top_k=TOP_K, chips=False, roll=True)
     return UserPlan(context, entry_id, spec, state, plans, rules, ft_override, params)
+
+
+@dataclass(frozen=True)
+class ChipOptions:
+    """`/chips`: the chip scenario search on a user's squad (information only: the chip
+    planner isn't validated, PLAN §11). `plans.scenario_objectives` holds every solved
+    scenario's best total objective (`none` = no chip); `plans.best` is the winner."""
+
+    context: PlanContext
+    entry_id: int
+    spec: SquadSpec
+    state: SquadState
+    plans: PlanSet
+    rules: Rules
+    params: OptimizerParams = LIVE_PARAMS
+    # chip name -> (scenario label, total objective): each available chip on its own, in
+    # its most promising horizon GW (the single-chip scenario with the highest bound)
+    singles: Mapping[str, tuple[str, float]] = field(default_factory=dict)
+
+
+def chip_options(
+    fpl: EntryClient,
+    entry_id: int,
+    context: PlanContext,
+    ft_override: int | None = None,
+    params: OptimizerParams = LIVE_PARAMS,
+) -> ChipOptions:
+    """Import the squad and search the chip scenarios over the horizon (the bound search:
+    only scenarios that could win are solved; same best plan as solving them all)."""
+    spec, state, rules = import_user_squad(fpl, entry_id, context, ft_override)
+    problem = PlanInput.from_context(state, context.pool, context.xp, rules, params)
+    plans = optimize(problem, params, top_k=1, chips=True, roll=False)
+    return ChipOptions(
+        context, entry_id, spec, state, plans, rules, params, _singles(problem, params, plans)
+    )
+
+
+def _singles(
+    problem: PlanInput, params: OptimizerParams, plans: PlanSet
+) -> dict[str, tuple[str, float]]:
+    """Per chip name, its single-chip scenario with the highest bound, solved unless the
+    search already did (one extra MILP per chip at most)."""
+    from fplopt.optimize.chips import scenarios
+    from fplopt.optimize.model import InfeasiblePlan, solve_plan
+
+    bounds = plans.scenario_bounds
+    promising: dict[str, Any] = {}
+    for scenario in scenarios(problem, params):
+        if len(scenario.chips) != 1 or scenario.label not in bounds:
+            continue
+        name = scenario.chips[0][1]
+        if name not in promising or bounds[scenario.label] > bounds[promising[name].label]:
+            promising[name] = scenario
+    out = {}
+    for name, scenario in promising.items():
+        value = plans.scenario_objectives.get(scenario.label)
+        if value is None:
+            try:
+                value = solve_plan(problem, params, chips=scenario).total_objective
+            except InfeasiblePlan:
+                continue
+        out[name] = (scenario.label, float(value))
+    return out
 
 
 def chips_left(state: SquadState, rules: Rules) -> list[str]:

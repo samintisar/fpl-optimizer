@@ -77,6 +77,16 @@ CREATE TABLE IF NOT EXISTS recommendations (
 );
 CREATE INDEX IF NOT EXISTS recommendations_user_gw
     ON recommendations (user_id, season, gw, kind);
+CREATE TABLE IF NOT EXISTS chip_checks (
+    check_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users (user_id),
+    season INTEGER NOT NULL,
+    gw INTEGER NOT NULL,
+    context_id TEXT,
+    created_at TEXT NOT NULL,
+    best TEXT NOT NULL,
+    scenarios TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS alert_runs (
     season INTEGER NOT NULL,
     gw INTEGER NOT NULL,
@@ -311,6 +321,31 @@ class UserStore:
                 "SELECT * FROM recommendations WHERE user_id = ? ORDER BY rec_id", (user_id,)
             ).fetchall()
         return [_recommendation(r) for r in rows]
+
+    def record_chip_check(
+        self,
+        user_id: int,
+        season: int,
+        gw: int,
+        *,
+        context_id: str | None,
+        best: str,
+        scenarios: Mapping[str, float],
+    ) -> None:
+        """Log a `/chips` answer: the best scenario and every solved one's objective."""
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO chip_checks (user_id, season, gw, context_id, created_at, best, "
+                "scenarios) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, season, gw, context_id, _now(), best, json.dumps(dict(scenarios))),
+            )
+
+    def chip_checks(self, user_id: int) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM chip_checks WHERE user_id = ? ORDER BY check_id", (user_id,)
+            ).fetchall()
+        return [{**dict(r), "scenarios": json.loads(r["scenarios"])} for r in rows]
 
     # --- alert runs -----------------------------------------------------------------------
 
