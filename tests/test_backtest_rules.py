@@ -91,6 +91,20 @@ def test_backtest_rules_for_develop_and_validate_seasons(season):
     assert rules.goals_scored[1] == 10
 
 
+def test_2025_26_afcon_top_up():
+    """FTs topped up to five for GW16 of 2025/26, whatever was banked (PLAN §11, Phase 6)."""
+    from fplopt.backtest.state import SquadState, TransferRecord, next_state
+
+    rules = backtest_rules(2025)
+    assert rules.ft_topups == ((16, 5),) and rules.max_free_transfers == 5
+    for banked, made in ((1, 1), (3, 0), (5, 0)):
+        state = SquadState(2025, 15, (), 0, banked)
+        after = next_state(state, TransferRecord(made, 0, 0, 0, None), rules, 16)
+        assert after.free_transfers == 5
+    later = next_state(SquadState(2025, 16, (), 0, 1), TransferRecord(1, 1, 0, 0, None), rules, 17)
+    assert later.free_transfers == 1  # once only
+
+
 def test_backtest_rules_native_seasons():
     assert backtest_rules(2025).label == "2025-26"
     assert backtest_rules(2025).defcon_enabled

@@ -14,6 +14,7 @@ from synthetic_season import synthetic_tables
 from fplopt.backtest import evaluate
 from fplopt.backtest.evaluate import (
     EXPERIMENT_COLUMNS,
+    OWN,
     StartSpec,
     block_bootstrap,
     build_start_states,
@@ -23,6 +24,7 @@ from fplopt.backtest.evaluate import (
     per_decision,
     run_grid,
     summarize,
+    window_t_test,
 )
 from fplopt.backtest.policies import GreedyPolicy, RollPolicy
 from fplopt.backtest.rules import backtest_rules
@@ -131,6 +133,15 @@ def test_run_grid_refuses_holdout_seasons():
     tables = synthetic_tables(seasons=(2025,))
     with pytest.raises(HoldoutError):
         run_grid(DataStore(tables=tables), [2025], "random@1", [ROLL])
+
+
+def test_holdout_runs_only_when_allowed():
+    """The Phase 6 run (`allow_holdout`) replays a holdout season, full run and per decision."""
+    store = DataStore(tables=synthetic_tables(seasons=(2025,)))
+    grid = run_grid(store, [2025], "random@1", [ROLL], allow_holdout=True)
+    assert len(grid) and set(grid["season"]) == {2025}
+    rows = per_decision(store, [2025], "random@1", GREEDY, ROLL, OWN, allow_holdout=True)
+    assert len(rows) and set(rows["season"]) == {2025}
 
 
 def refuse_start_states(*args, **kwargs):
@@ -446,6 +457,40 @@ def test_bootstrap_size_under_no_effect(design, n_seasons, window, block_length,
     (percentile bootstrap on ~10 cells)."""
     rate = rejection_rate(n_seasons, window, block_length)
     assert 0.04 <= rate <= limit, f"{design}, {n_seasons} season(s): size {rate:.3f}"
+
+
+def test_window_t_test():
+    # Cells (start-averaged, nulls dropped): 2, 4, 6 -> mean 4, sd 2, t = 2 sqrt(3), df 2.
+    frame = pd.DataFrame(
+        {
+            "season": [SEASON] * 6,
+            "gw_index": [1, 1, 5, 5, 9, 9],
+            "diff": [1.0, 3.0, 4.0, 4.0, None, 6.0],
+        }
+    )
+    result = window_t_test(frame)
+    t = 2 * np.sqrt(3)
+    assert result.mean == pytest.approx(4.0) and result.n_cells == 3
+    assert result.p_one_sided == pytest.approx(0.5 * (1 - t / np.sqrt(2 + t * t)))
+    assert np.isnan(window_t_test(frame.iloc[:2]).p_one_sided)  # one cell
+    flat = frame.assign(diff=1.0)
+    assert np.isnan(window_t_test(flat).p_one_sided)  # no spread
+    assert window_t_test(frame.assign(diff=-frame["diff"])).p_one_sided > 0.5
+
+
+@pytest.mark.parametrize("tails", ["normal", "t3"])
+def test_window_t_test_size_on_one_season(tails):
+    """A/A placebo for the Phase 6 gate: one season of non-overlapping 4-GW windows (~10
+    cells, the last one 2 GWs). The t-test rejects at nominal 0.10 about 10% of the time
+    (the percentile bootstrap: ~14%), also with heavy-tailed per-GW effects (t, 3 df)."""
+    rng = np.random.default_rng(7 if tails == "normal" else 8)
+    n_rep, rejected = 4000, 0
+    for _ in range(n_rep):
+        diffs = no_effect_diffs(rng, 1, 4)
+        if tails == "t3":
+            diffs = diffs.assign(diff=[rng.standard_t(3, 4).sum() for _ in range(len(diffs))])
+        rejected += window_t_test(diffs).p_one_sided < 0.10
+    assert 0.08 <= rejected / n_rep <= 0.12
 
 
 def test_bootstrap_ci_level():

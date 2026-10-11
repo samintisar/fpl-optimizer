@@ -937,6 +937,151 @@ def _backtest_compare(c: Context) -> object:
     return summary
 
 
+# --- the Phase 6 holdout run -----------------------------------------------------------------
+
+
+def _holdout_check(c: Context) -> object:
+    """`fplopt holdout check`: the 2025/26 inputs at every deadline (`holdout.preflight`:
+    player pool, `ep_next`, clubs without players), no results read. Fails (and alerts) on
+    any problem, which must be settled before `holdout run`."""
+    from fplopt.backtest.holdout import SEASON, preflight
+
+    table, problems = preflight(_backtest_store(c), SEASON)
+    shown = table.assign(clubs_without_players=table["clubs_without_players"].map(len))
+    print(f"{season_label(SEASON)} inputs per deadline\n{shown.to_string(index=False)}", flush=True)
+    if problems:
+        raise RuntimeError(f"{len(problems)} problem(s): " + "; ".join(problems))
+    print("\nNo problems: the holdout inputs are complete.", flush=True)
+    return table
+
+
+def _holdout_run(c: Context) -> object:
+    """`fplopt holdout run`: the pre-registered Phase 6 run (`fplopt.backtest.holdout`, every
+    setting fixed there). The system, both baselines and the fallback from the same 2025/26
+    start states (full runs), the per-decision comparisons of the system and the fallback
+    against each baseline, the gate (window t-test + xG sign) and the verdict. Writes
+    gws.parquet, paired.parquet, per_decision.parquet and summary.json to --out and logs
+    the run (family `holdout.FAMILY`) *before* printing any result, so a crash before the
+    verdict leaves no result seen."""
+    import pandas as pd
+
+    from fplopt.backtest import holdout as h
+    from fplopt.backtest.evaluate import (
+        OWN,
+        log_experiment,
+        paired_full_run,
+        parse_start_specs,
+        per_decision,
+        run_grid,
+        summarize,
+    )
+    from fplopt.backtest.simulator import Caches
+
+    args = c.args
+    store = _backtest_store(c)
+    out = Path(args.out)
+    system = parse_policy_spec(h.SYSTEM).build()
+    fallback = parse_policy_spec(h.FALLBACK).build()
+    baselines = [(label, parse_policy_spec(spec).build()) for label, spec in h.BASELINES]
+    policies = [system, *(b for _, b in baselines), fallback]
+    caches = Caches()
+    began = time.perf_counter()
+    results = run_grid(
+        store, [h.SEASON], h.STARTS, policies, caches=caches, jobs=args.jobs, allow_holdout=True
+    )
+    if results.empty:
+        raise RuntimeError("no start state could be built")
+    pairs = [(cand, base, label) for cand in (system, fallback) for label, base in baselines]
+    frames = [
+        per_decision(
+            store,
+            [h.SEASON],
+            h.STARTS,
+            cand,
+            base,
+            OWN,
+            k=h.K,
+            stride=h.K,
+            reference=h.REFERENCE,
+            caches=caches,
+            jobs=args.jobs,
+            allow_holdout=True,
+        )
+        for cand, base, _ in pairs
+    ]
+    decisions = pd.concat(frames, ignore_index=True)
+    summary = summarize(
+        results,
+        [(cand, base) for cand, base, _ in pairs],
+        decisions,
+        block_length=h.BLOCK_LENGTH,
+        n_boot=h.N_BOOT,
+        seed=h.SEED,
+        ci=h.CI,
+    )
+    gates = [h.gate(decisions, cand.name, base.name, label) for cand, base, label in pairs]
+    system_gates = [g for g in gates if g.candidate == system.name]
+    passed = all(g.passed for g in system_gates)
+    runtime = time.perf_counter() - began
+    config = {
+        "season": h.SEASON,
+        "starts": h.STARTS,
+        "system": h.SYSTEM,
+        "baselines": dict(h.BASELINES),
+        "fallback": h.FALLBACK,
+        "k": h.K,
+        "stride": h.K,
+        "continuation": OWN,
+        "reference": h.REFERENCE,
+        "alpha": h.ALPHA,
+        "block_length": h.BLOCK_LENGTH,
+        "n_boot": h.N_BOOT,
+        "seed": h.SEED,
+        "ci": h.CI,
+        "jobs": args.jobs,
+        "out": str(out),
+    }
+    out.mkdir(parents=True, exist_ok=True)
+    results.to_parquet(out / "gws.parquet", index=False)
+    pd.concat(
+        [paired_full_run(results, cand, base) for cand, base, _ in pairs], ignore_index=True
+    ).to_parquet(out / "paired.parquet", index=False)
+    decisions.to_parquet(out / "per_decision.parquet", index=False)
+    payload = {
+        "command": args.command_line,
+        "config": config,
+        "runtime_seconds": round(runtime, 1),
+        "verdict": "pass" if passed else "fail",
+        "gates": [g.to_dict() for g in gates],
+        "summary": summary.to_dict(),
+    }
+    _write_json(out / "summary.json", payload)
+    metrics = _experiment_metrics(summary) | _jsonable(
+        {"verdict": payload["verdict"], "gates": payload["gates"]}
+    )
+    log_experiment(args.experiments, args.command_line, config, metrics, 1, h.FAMILY)
+    totals = season_totals_by_start(results, parse_start_specs(h.STARTS))
+    print(
+        f"Phase 6 holdout run, {season_label(h.SEASON)}, starts {h.STARTS} ({runtime:.0f}s)\n"
+        f"System {system.name}; baselines "
+        + ", ".join(f"({label}) {base.name}" for label, base in baselines)
+        + f"; fallback {fallback.name} (reported only)\n\n"
+        f"{TOTALS_TITLE}\n{season_table(totals)}\n\n"
+        f"Paired differences candidate - baseline, all comparisons (full run per GW; "
+        f"per-decision per {h.K}-GW window, own continuation, states from the baseline's "
+        f"run; {h.CI:.0%} block-bootstrap CIs, reported only)\n"
+        f"{h.comparisons_table(summary.comparisons)}\n\n"
+        f"Gate (per-decision windows; pass = one-sided window t-test p < {h.ALPHA:.2f} on "
+        "realized points and a positive xG-scored mean)\n"
+        f"{h.gate_table(gates)}\n\n"
+        f"VERDICT: the system {'PASSES' if passed else 'FAILS'} the go-live gate "
+        f"({sum(g.passed for g in system_gates)} of {len(system_gates)} baselines beaten). "
+        f"Logged to {args.experiments} (family '{h.FAMILY}'); written to {out}.",
+        flush=True,
+    )
+    return gates
+
+
 # --- model evaluation -------------------------------------------------------------------------
 
 
@@ -1462,6 +1607,8 @@ JOBS: dict[str, Job] = {
     "optimize plan": _squad_errors(_optimize_plan),
     "optimize squad": _squad_errors(_optimize_squad),
     "models eval": _models_eval,
+    "holdout check": _holdout_check,
+    "holdout run": _holdout_run,
 }
 
 
@@ -1511,7 +1658,41 @@ def build_parser() -> argparse.ArgumentParser:
     _add_backtest_parsers(groups)
     _add_optimize_parsers(groups)
     _add_models_parsers(groups)
+    _add_holdout_parsers(groups)
     return parser
+
+
+def _add_holdout_parsers(groups: Any) -> None:
+    holdout = groups.add_parser(
+        "holdout", help="the pre-registered Phase 6 run on 2025/26 (settings fixed in code)"
+    )
+    commands = holdout.add_subparsers(dest="command", required=True)
+    check = commands.add_parser(
+        "check", help="check the 2025/26 inputs at every deadline (no results read)"
+    )
+    check.set_defaults(subparser=check)
+    run = commands.add_parser(
+        "run", help="the Phase 6 run: once, from a clean checkout; prints the go-live verdict"
+    )
+    run.set_defaults(subparser=run)
+    run.add_argument(
+        "--out",
+        default="results/phase6-holdout",
+        help="output directory (default results/phase6-holdout)",
+    )
+    run.add_argument(
+        "--experiments",
+        type=Path,
+        default=DEFAULT_EXPERIMENTS,
+        help=f"experiment log (default {DEFAULT_EXPERIMENTS.as_posix()}); a Phase 6 run "
+        "already in it refuses this one",
+    )
+    run.add_argument(
+        "--jobs",
+        type=int,
+        default=default_jobs(),
+        help="worker processes over start states (default: CPUs - 1); results equal --jobs 1",
+    )
 
 
 def _prune_n(text: str) -> dict[int, int]:
@@ -1878,6 +2059,27 @@ def main(argv: Sequence[str] | None = None, settings: Settings | None = None) ->
         early = [s for s in args.seasons if s < EP_NEXT_FIRST_SEASON]
         for xp in args.xp:
             _refuse_early_ep_next(args.subparser, xp, f"--xp {xp}", early)
+    elif name == "holdout run":
+        from fplopt.backtest import holdout
+
+        if args.jobs < 1:
+            args.subparser.error("--jobs must be >= 1")
+        if holdout.already_run(args.experiments):
+            args.subparser.error(
+                f"{args.experiments} already holds a Phase 6 run (family '{holdout.FAMILY}'): "
+                "the holdout runs once"
+            )
+        try:
+            dirty = holdout.dirty_checkout()
+        except RuntimeError as exc:
+            args.subparser.error(str(exc))
+        if dirty:
+            args.subparser.error(
+                "the checkout has uncommitted changes (run from a clean checkout of the tagged "
+                "commit): " + "; ".join(dirty[:5])
+            )
+        if Path(args.out).exists() and any(Path(args.out).iterdir()):
+            args.subparser.error(f"--out {args.out} is not empty")
     elif name in ("optimize plan", "optimize squad"):
         if len(args.season) != 1:
             args.subparser.error("--season: give one season")
