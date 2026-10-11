@@ -182,6 +182,33 @@ All runs cover develop 2016/17–2022/23 from starts `template@1,random:3@1,rand
   - each arm run once with `backtest run` (S0 as `optimizer:v1:...` without chips: the same decisions as `chipgains`, which is cheaper);
   - the three comparisons with `evaluate.full_run_window_test` on the paired per-GW differences.
 
+## 6d. Validate result (2026-10-11, the one run): **chips stay manual**
+
+`results/chips-validate/`: seasons 2023/24–2024/25, starts `template@1,random:3@1,random:3@20`, 22 runs and 418 GWs per arm, every solve Optimal. Settings and thresholds were as fixed in §6c (commit 0f8f3cb). The statistic is the full-run window t-test on 8-GW cells (10 cells).
+
+| Comparison | Mean per GW | One-sided p | Threshold | xG per GW | Per season (mean over starts) | Result |
+|---|---|---|---|---|---|---|
+| P vs H | **+1.70** | 0.083 | < 0.0296 | +1.57 | 2023/24 +68, 2024/25 +26 | fail |
+| P vs S0 | **+4.18** | **0.025** | < 0.05 | +4.30 | +131, +140 | pass |
+| H vs S0 | +2.49 | 0.106 | < 0.05 | +2.74 | +63, +114 | fail |
+
+- **Verdict, as pre-registered: chips stay manual.**
+  - P beats S0 but not H at the fixed threshold.
+  - P vs H would also fail at a nominal 0.05, so the calibrated threshold didn't decide it.
+  - H doesn't beat S0.
+- **Season totals** (mean over starts):
+
+  | Arm | 2023/24 | 2024/25 |
+  |---|---|---|
+  | S0 | 1,840 | 1,814 |
+  | H | 1,903 | 1,928 |
+  | P | 1,971 | 1,954 |
+
+- **Reading it.** P was the best arm in both validate seasons and on xG. Its edge over the rule baseline (+1.7/GW, about 65 points a season) is positive but not established on two seasons. That fits the develop edge (+0.14/GW) being small and the test having little power.
+  - This is not evidence against P.
+  - It is not enough to let P drive alerts.
+- **Live, it stays as is.** `/chips` stays information only, and plans and alerts play no chips. Whether `/chips` should show P's estimated terminal values instead of the placeholders is a separate display decision, untested as such. The live 2026/27 log can add evidence at season end (a second look on new data, not on these seasons).
+
 ## 7. Open (VERIFY before the code PR)
 
 - **Free Hit in consecutive GWs in 2026/27** (PLAN §11): check the rules config, since it constrains H and P.
