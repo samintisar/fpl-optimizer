@@ -99,6 +99,10 @@ def test_tagged_head(tmp_path):
     assert not holdout.tagged_head(tmp_path)
     git(tmp_path, "tag", f"{holdout.TAG}-old")  # a different tag is not the tag
     assert not holdout.tagged_head(tmp_path)
+    # An annotated tag (the kind the run is tagged with) points at HEAD too.
+    tagger = ["-c", "user.name=t", "-c", "user.email=t@t", "tag", "-f", "-a"]
+    git(tmp_path, *tagger, holdout.TAG, "-m", "Phase 6 holdout run")
+    assert holdout.tagged_head(tmp_path)
 
 
 def test_dirty_checkout_without_git(tmp_path, monkeypatch):
