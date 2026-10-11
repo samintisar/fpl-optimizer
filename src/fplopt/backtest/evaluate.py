@@ -115,6 +115,7 @@ __all__ = (
     "season_points",
     "summarize",
     "transfer_gain_summary",
+    "full_run_window_test",
     "window_t_test",
 )
 
@@ -1066,6 +1067,26 @@ def window_t_test(diffs: pd.DataFrame, column: str = "diff") -> WindowTTest:
     if n < 2 or sd == 0:
         return WindowTTest(mean, float("nan"), n)
     return WindowTTest(mean, t_sf(mean / (sd / math.sqrt(n)), n - 1), n)
+
+
+FULL_RUN_WINDOW = 8  # GWs per cell of `full_run_window_test` (chip pre-registration §4)
+
+
+def full_run_window_test(
+    paired: pd.DataFrame, column: str = "diff", window: int = FULL_RUN_WINDOW
+) -> WindowTTest:
+    """`window_t_test` on full-run per-GW paired differences (`paired_gws` rows: season,
+    gw_index, `column`): each GW goes to its non-overlapping `window`-GW cell (gw_index 1..w,
+    w+1..2w, ...) and each cell is the mean over its GWs and starts. The chip comparison's
+    statistic (docs/superpowers/plans/2026-10-11-chip-policy.md §4): chips can't be judged
+    per decision, and the GW-block bootstrap's percentile p rejects ~12.5% at nominal 10%
+    on two seasons. With 8-GW cells the t-test holds its size (A/A placebo in
+    tests/test_backtest_evaluate.py), also under per-GW autocorrelation up to ~0.5 (measured
+    full-run lag-1-4 autocorrelations are ~0)."""
+    if window < 1:
+        raise ValueError(f"window must be >= 1, got {window}")
+    cells = paired.assign(gw_index=1 + (paired["gw_index"].astype("int64") - 1) // window * window)
+    return window_t_test(cells, column)
 
 
 def deflated_mean(mean: float, ci_low: float, ci_high: float, n_variants: int, ci: float) -> float:

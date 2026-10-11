@@ -176,12 +176,30 @@ POLICY_PARAMS: dict[str, dict[str, Callable[[str], Any]]] = {
         "bench_from_minutes": parse_flag,
         "min_minutes": float,
         "chips": parse_flag,
+        # chips=1 with the estimated terminal values (config/chips/terminal-values.json)
+        # times this shrink factor (chip pre-registration §3), instead of the placeholders
+        "chip_shrink": float,
     },
 }
+# The chip study's policies (docs/superpowers/plans/2026-10-11-chip-policy.md): the
+# optimizer's settings, plus the rule thresholds for `chiprules`.
+_OPTIMIZER_KEYS = {
+    k: v for k, v in POLICY_PARAMS["optimizer"].items() if k not in ("chips", "chip_shrink")
+}
+POLICY_PARAMS["chipgains"] = dict(_OPTIMIZER_KEYS)
+POLICY_PARAMS["chiprules"] = {
+    **_OPTIMIZER_KEYS,
+    "t_tc": float,
+    "t_bb": float,
+    "k_fh": int,
+    "t_wc": float,
+}
+CHIP_VALUES_FILE = Path(__file__).resolve().parents[2] / "config" / "chips" / "terminal-values.json"
 DEFAULT_STARTS = "template@1,random:5@1,random:3@20"
 # Wall-clock cap per HiGHS solve for interactive commands (`optimize plan`, `optimize
 # bench`) only; backtests use the deterministic node limit alone (OptimizerParams).
 INTERACTIVE_TIME_LIMIT = 60.0
+FULL_RUN_WINDOW = 8  # evaluate.FULL_RUN_WINDOW (kept here: the CLI imports pandas lazily)
 DEFAULT_EXPERIMENTS = Path("results/experiments.csv")
 # Two-sided bootstrap CI level: its lower bound is the one-sided α = 0.10 bound of the
 # go-live gate (PLAN §9).
@@ -260,9 +278,34 @@ class PolicySpec:
             from fplopt.optimize import OptimizerParams
 
             chips = bool(params.pop("chips", 0))
+            shrink = params.pop("chip_shrink", None)
+            if shrink is not None:
+                if not chips:
+                    raise ValueError("chip_shrink needs chips=1")
+                params["chip_value_left"] = estimated_chip_values(float(shrink))
             return OptimizerPolicy(self.xp, OptimizerParams(**params), chips=chips)
+        if self.name in ("chipgains", "chiprules"):
+            from fplopt.backtest.policies import ChipGainProbe, ChipRulePolicy
+            from fplopt.optimize import OptimizerParams
+
+            rules = {k: params.pop(k) for k in ("t_tc", "t_bb", "k_fh", "t_wc") if k in params}
+            if self.name == "chipgains":
+                return ChipGainProbe(self.xp, OptimizerParams(**params))
+            return ChipRulePolicy(self.xp, OptimizerParams(**params), **rules)
         cls = GreedyPolicy if self.name == "greedy" else RollPolicy
         return cls(self.xp, **params)
+
+
+def estimated_chip_values(shrink: float, path: Path | None = None) -> dict[str, tuple[float, ...]]:
+    """The estimated terminal value table (`fplopt chips values`) times `shrink` (ValueError
+    if it hasn't been estimated yet or `shrink` < 0)."""
+    path = CHIP_VALUES_FILE if path is None else path
+    if not math.isfinite(shrink) or shrink < 0:
+        raise ValueError(f"chip_shrink must be a finite number >= 0, got {shrink}")
+    if not path.is_file():
+        raise ValueError(f"chip_shrink: no estimated chip values at {path} (fplopt chips values)")
+    table = json.loads(path.read_text(encoding="utf-8"))["values"]
+    return {name: tuple(shrink * float(v) for v in values) for name, values in table.items()}
 
 
 def make_policy_spec(name: str, xp: str, params: dict[str, str]) -> PolicySpec:
@@ -309,7 +352,13 @@ def make_policy_spec(name: str, xp: str, params: dict[str, str]) -> PolicySpec:
                 f"bad policy {spec}: {', '.join(ignored)} only apply to xP models with "
                 f"minutes ({', '.join(MINUTES_XP_MODELS)})"
             )
-    if name == "optimizer" and not 0 < given.get("decay", 0.5) <= 1:
+    if (
+        name in ("chiprules", "chipgains", "optimizer")
+        and "chip_shrink" in given
+        and not given.get("chips")
+    ):
+        raise argparse.ArgumentTypeError(f"bad policy {spec}: chip_shrink needs chips=1")
+    if name in ("optimizer", "chipgains", "chiprules") and not 0 < given.get("decay", 0.5) <= 1:
         raise argparse.ArgumentTypeError(f"bad policy {spec}: need 0 < decay <= 1")
     try:  # whatever else the policy rejects (e.g. a negative hit_margin or itb_value)
         spec.build()
@@ -881,6 +930,7 @@ def _backtest_compare(c: Context) -> object:
         n_variants=n_variants,
     )
     runtime = time.perf_counter() - began
+    window_tests = full_run_window_tests(paired)
     totals = season_totals_by_start(results, args.start_specs)
     config = _backtest_config(args, out)
     out.mkdir(parents=True, exist_ok=True)  # only now: a failed run leaves nothing behind
@@ -901,6 +951,7 @@ def _backtest_compare(c: Context) -> object:
         "starts": _starts_by_season(results),
         "season_totals_by_start": _records(totals),
         "summary": summary.to_dict(),
+        "full_run_window_tests": window_tests,
     }
     _write_json(out / "summary.json", payload)
     cont = ""
@@ -923,18 +974,64 @@ def _backtest_compare(c: Context) -> object:
         "cells = GWs or decision windows; per season = difference in season points)\n"
         f"{comparison_table(summary, args.k, args.stride)}\n\nPer season (A - B)\n"
         f"{per_season_diff_table(paired, decisions, args.k)}\n\n"
-        f"{GAINS_TITLE}\n{transfer_gain_table(summary)}\n\nWritten to {out}",
+        f"{GAINS_TITLE}\n{transfer_gain_table(summary)}\n\n"
+        f"Full-run window t-test (A - B per GW, non-overlapping {FULL_RUN_WINDOW}-GW cells "
+        "averaged over GWs and starts, one-sided, df = cells - 1; the chip study's "
+        "statistic)\n"
+        f"{window_test_table(window_tests)}\n\nWritten to {out}",
         flush=True,
     )
     log_experiment(
         args.experiments,
         args.command_line,
         config,
-        _experiment_metrics(summary),
+        {**_experiment_metrics(summary), "full_run_window_tests": window_tests},
         n_variants,
         args.family,
     )
     return summary
+
+
+def full_run_window_tests(paired: pd.DataFrame) -> list[dict[str, Any]]:
+    """`evaluate.full_run_window_test` per split (all, develop, validate) and metric
+    (realized `diff`, xG-scored `diff_xg`)."""
+    from fplopt.backtest.evaluate import SPLITS, full_run_window_test
+
+    rows = []
+    for split, seasons in SPLITS:
+        part = paired if seasons is None else paired[paired["season"].isin(seasons)]
+        if part.empty:
+            continue
+        for metric, column in (("realized", "diff"), ("xg", "diff_xg")):
+            test = full_run_window_test(part, column)
+            rows.append(
+                {
+                    "split": split,
+                    "metric": metric,
+                    "mean_per_gw": test.mean,
+                    "p_one_sided": test.p_one_sided,
+                    "n_cells": test.n_cells,
+                }
+            )
+    return _jsonable(rows)
+
+
+def window_test_table(rows: Sequence[dict[str, Any]]) -> str:
+    return text_table(
+        ["split", "metric", "mean/GW", "p", "cells"],
+        [
+            [
+                r["split"],
+                r["metric"],
+                _num(r["mean_per_gw"], 2, sign=True),
+                "-"
+                if r["p_one_sided"] is None or math.isnan(r["p_one_sided"])
+                else f"{r['p_one_sided']:.3f}",
+                str(r["n_cells"]),
+            ]
+            for r in rows
+        ],
+    )
 
 
 # --- the Phase 6 holdout run -----------------------------------------------------------------
@@ -1672,6 +1769,33 @@ def _live(c: Context, *, tick: bool) -> object:
     return result
 
 
+def _chips_values(c: Context) -> object:
+    """`fplopt chips values`: the terminal value table (`fplopt.backtest.chip_values`) from a
+    chipgains run's GW rows, written as JSON with its source and seasons."""
+    import pandas as pd
+
+    from fplopt.backtest.chip_values import estimate_terminal_values
+
+    args = c.args
+    gws = pd.read_parquet(args.gains / "gws.parquet")
+    table = estimate_terminal_values(gws)
+    seasons = sorted(int(s) for s in gws["season"].unique())
+    payload = {
+        "source": str(args.gains),
+        "seasons": [season_label(s) for s in seasons],
+        "note": "mean best ex-ante one-GW gain of each chip over the GWs left in its window "
+        "(index = GWs left - 1); unshrunk (the policy spec's chip_shrink scales it)",
+        "values": {name: [round(v, 4) for v in values] for name, values in table.items()},
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    for name, values in table.items():
+        shown = ", ".join(f"{v:.1f}" for v in values[:6])
+        print(f"{name}: L=1..6 {shown} ... L={len(values)} {values[-1]:.1f}", flush=True)
+    print(f"Written to {args.out}", flush=True)
+    return table
+
+
 def _bot_run(c: Context) -> object:
     """`fplopt bot run`: the Telegram bot, long polling until stopped (`fplopt.bot.app`)."""
     from fplopt.bot.app import build_application
@@ -1716,6 +1840,7 @@ JOBS: dict[str, Job] = {
     "live tick": lambda c: _live(c, tick=True),
     "live prepare": lambda c: _live(c, tick=False),
     "bot run": lambda c: _bot_run(c),
+    "chips values": lambda c: _chips_values(c),
     "holdout run": _holdout_run,
 }
 
@@ -1768,7 +1893,30 @@ def build_parser() -> argparse.ArgumentParser:
     _add_models_parsers(groups)
     _add_holdout_parsers(groups)
     _add_bot_parsers(groups)
+    _add_chips_parsers(groups)
     return parser
+
+
+def _add_chips_parsers(groups: Any) -> None:
+    chips = groups.add_parser("chips", help="the chip study (chip pre-registration)")
+    commands = chips.add_subparsers(dest="command", required=True)
+    values = commands.add_parser(
+        "values",
+        help="estimate chip terminal values per GWs left in the window from a chipgains run",
+    )
+    values.set_defaults(subparser=values)
+    values.add_argument(
+        "--gains",
+        type=Path,
+        required=True,
+        help="a `backtest run --spec chipgains:...` output directory (develop seasons only)",
+    )
+    values.add_argument(
+        "--out",
+        type=Path,
+        default=CHIP_VALUES_FILE,
+        help="where to write the table (default config/chips/terminal-values.json)",
+    )
 
 
 def _add_bot_parsers(groups: Any) -> None:

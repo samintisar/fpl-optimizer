@@ -120,14 +120,18 @@ class Decision:
     squad, and an optional chip name (`wildcard`, `freehit`, `bboost`, `3xc`).
 
     `solver_status` / `mip_gap`: how the solver that produced it finished (optimizer
-    policies; None for others), recorded in the simulator's GW rows. Diagnostics only: they
-    take no part in equality, so the same moves compare equal whoever made them."""
+    policies; None for others), and `diagnostics` (chip quantities, chip policies only),
+    recorded in the simulator's GW rows. Diagnostics only: they take no part in equality, so
+    the same moves compare equal whoever made them."""
 
     transfers: tuple[Transfer, ...]
     lineup: Lineup
     chip: str | None = None
     solver_status: str | None = field(default=None, compare=False)
     mip_gap: float | None = field(default=None, compare=False)
+    # Chip quantities a policy measured at this GW (`policies.CHIP_DIAGNOSTICS` keys;
+    # `ChipGainProbe`, `ChipRulePolicy`), recorded in the simulator's GW rows.
+    diagnostics: Mapping[str, float | None] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

@@ -18,6 +18,11 @@ rules of tests/test_features_architecture.py apply to this module).
 - `OptimizerPolicy`: the MILP planner (`fplopt.optimize`, PLAN §7) over the xP frame's
   horizon; executes plan #1's first-GW decision (transfers, lineup, captain, chip if
   `chips`). One plan, no roll plan (top-3 is for the manager, not the backtest).
+- `ChipGainProbe`: `OptimizerPolicy` without chips (the chip study's S0) that also records
+  each chip's ex-ante gain at the GW (`chip_gains`), for the terminal values and the rule
+  thresholds (docs/superpowers/plans/2026-10-11-chip-policy.md §2-3).
+- `ChipRulePolicy`: the heuristic chip baseline H (same plan §2): the optimizer without chip
+  scenarios, plus a chip when a fixed rule fires, then planned with that chip fixed.
 
 Ties are broken by `player_key` everywhere, so decisions are deterministic.
 """
@@ -28,7 +33,7 @@ import logging
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
@@ -38,18 +43,27 @@ from fplopt.backtest.rules import Rules, best_xi
 from fplopt.backtest.state import (
     GOALKEEPER,
     Decision,
+    InvalidDecision,
     SquadState,
     Transfer,
+    chip_available,
+    chip_window,
     refresh,
     selling_price,
 )
+from fplopt.features.baseline import pool_coverage
 from fplopt.features.store import AsOfView
 from fplopt.models import MAX_HORIZON, MODELS
 from fplopt.optimize import OptimizerParams, PlanInput, optimize
+from fplopt.optimize.model import InfeasiblePlan, solve_plan
 
 log = logging.getLogger(__name__)
 
 __all__ = (
+    "CHIP_DIAGNOSTICS",
+    "CHIP_PRIORITY",
+    "ChipGainProbe",
+    "ChipRulePolicy",
     "DecisionContext",
     "GreedyPolicy",
     "OptimizerPolicy",
@@ -342,6 +356,11 @@ def _optimizer_extras(params: OptimizerParams) -> list[str]:
         parts.append("bw=" + "/".join(repr(w) for w in params.bench_weights))
     if params.chip_value != default.chip_value:
         parts.append("cv=" + "/".join(f"{k}:{v!r}" for k, v in params.chip_value.items()))
+    if params.chip_value_left is not None:
+        parts.append(
+            "cvl="
+            + "/".join(f"{k}:{v[0]:.2f}-{v[-1]:.2f}" for k, v in params.chip_value_left.items())
+        )
     if params.prune_n != default.prune_n:
         prune_n = params.prune_n
         prune = "all" if prune_n is None else "/".join(f"{k}:{v}" for k, v in prune_n.items())
@@ -415,3 +434,207 @@ class OptimizerPolicy:
                 100 * plans.best.mip_gap,
             )
         return replace(plans.decision(), solver_status=status, mip_gap=plans.best.mip_gap)
+
+
+# --- chip study (docs/superpowers/plans/2026-10-11-chip-policy.md) -----------------------
+
+# Order the rule policy considers chips in (one per GW), and forced "last chance" plays.
+CHIP_PRIORITY = ("freehit", "wildcard", "bboost", "3xc")
+# Per-GW chip quantities (`chip_gains`), recorded by the simulator:
+# - captain_xp / gain_tc: the plan's captain's target-GW xP (what Triple Captain adds);
+# - bench_xp: the bench's summed target-GW xP; gain_bb: net of the bench weights the plan
+#   already counts (what Bench Boost adds to the objective);
+# - gain_fh: a 1-GW Free Hit plan's objective minus the 1-GW no-chip plan's;
+# - gain_wc: the horizon objective with a Wildcard now minus the no-chip plan's;
+# - blanks: squad players whose club has no fixture in the target GW.
+# A gain is None where the chip can't be played (window, or the rules) or its solve failed.
+CHIP_DIAGNOSTICS = (
+    "captain_xp",
+    "bench_xp",
+    "gain_tc",
+    "gain_bb",
+    "gain_fh",
+    "gain_wc",
+    "blanks",
+)
+
+
+def _target_xp_of(xp: pd.DataFrame, key: int) -> float:
+    rows = xp[(xp["player_key"] == key) & (xp["horizon"] == 0)]
+    return float(rows["xp"].sum())
+
+
+def _blanks(ctx: DecisionContext) -> int:
+    """Squad players whose club has no fixture in the target GW."""
+    coverage = pool_coverage(ctx.view)
+    fixtures = dict(zip(coverage["team_key"], coverage["n_fixtures"], strict=True))
+    return sum(1 for h in ctx.state.holdings if int(fixtures.get(h.team_key, 0)) == 0)
+
+
+def _chip_solve(problem: PlanInput, params: OptimizerParams, chip: str) -> float | None:
+    """The objective (no terminal value) of the plan playing `chip` in the first horizon
+    GW, or None if the rules don't allow it there or the solve found no plan."""
+    try:
+        return solve_plan(problem, params, chips={0: chip}).objective
+    except (InvalidDecision, InfeasiblePlan):
+        return None
+
+
+def chip_gains(
+    ctx: DecisionContext, problem: PlanInput, params: OptimizerParams, plan: Any
+) -> dict[str, float | None]:
+    """The `CHIP_DIAGNOSTICS` at this GW for the no-chip `plan` of `problem`."""
+    first = plan.first
+    weights = problem.gw_bench_weights(0, params)
+    bench = [_target_xp_of(ctx.xp, k) for k in first.bench]
+    captain = _target_xp_of(ctx.xp, first.captain)
+    one = replace(params, horizon=1)
+    short = PlanInput.from_context(ctx.state, ctx.pool, ctx.xp, ctx.rules, one)
+    fh = None
+    if chip_available(problem.state, "freehit", ctx.rules):
+        base = _chip_solve_none(short, one)
+        with_fh = _chip_solve(short, one, "freehit")
+        fh = None if base is None or with_fh is None else with_fh - base
+    wc = None
+    if chip_available(problem.state, "wildcard", ctx.rules):
+        with_wc = _chip_solve(problem, params, "wildcard")
+        wc = None if with_wc is None else with_wc - plan.objective
+    tc_ok = chip_available(problem.state, "3xc", ctx.rules)
+    bb_ok = chip_available(problem.state, "bboost", ctx.rules)
+    return {
+        "captain_xp": captain,
+        "bench_xp": float(sum(bench)),
+        "gain_tc": captain if tc_ok else None,
+        "gain_bb": float(sum((1 - w) * x for w, x in zip(weights, bench, strict=True)))
+        if bb_ok
+        else None,
+        "gain_fh": fh,
+        "gain_wc": wc,
+        "blanks": float(_blanks(ctx)),
+    }
+
+
+def _chip_solve_none(problem: PlanInput, params: OptimizerParams) -> float | None:
+    try:
+        return solve_plan(problem, params).objective
+    except InfeasiblePlan:
+        return None
+
+
+def _no_chip_plan(ctx: DecisionContext, params: OptimizerParams) -> tuple[PlanInput, Any]:
+    problem = PlanInput.from_context(ctx.state, ctx.pool, ctx.xp, ctx.rules, params)
+    plans = optimize(problem, params, top_k=1, chips=False, roll=False)
+    return problem, plans
+
+
+@dataclass(frozen=True)
+class ChipGainProbe:
+    """S0 of the chip study: `OptimizerPolicy(xp_model, params)` without chips (the same
+    decisions), recording `chip_gains` at every GW in `Decision.diagnostics`. Costs ~3 extra
+    solves per GW (a 1-GW no-chip and Free Hit plan, a Wildcard plan)."""
+
+    xp_model: str = "v1"
+    params: OptimizerParams = field(default_factory=OptimizerParams)
+
+    def __post_init__(self) -> None:
+        _check_model(self.xp_model)
+        _check_horizon(self.params.horizon)
+
+    @property
+    def name(self) -> str:
+        inner = OptimizerPolicy(self.xp_model, self.params).name
+        return f"chipgains({inner.removeprefix('optimizer(').removesuffix(')')})"
+
+    def decide(self, ctx: DecisionContext) -> Decision:
+        problem, plans = _no_chip_plan(ctx, self.params)
+        gains = chip_gains(ctx, problem, self.params, plans.best)
+        return replace(
+            plans.decision(),
+            solver_status=plans.solver_status,
+            mip_gap=plans.best.mip_gap,
+            diagnostics=gains,
+        )
+
+
+@dataclass(frozen=True)
+class ChipRulePolicy:
+    """The heuristic chip baseline H (chip pre-registration §2) around the optimizer
+    without chip scenarios. At each GW, from the no-chip plan:
+
+    1. **Last chance:** if a window's chips still unused and playable now are at least the
+       GWs left in it (this one included), play one now (`CHIP_PRIORITY` order).
+    2. **Rules**, in `CHIP_PRIORITY` order, first that fires: Free Hit when the squad has
+       ≥ `k_fh` players without a fixture; Wildcard when a Wildcard plan's horizon
+       objective beats the no-chip plan's by ≥ `t_wc`; Bench Boost when the bench's summed
+       xP ≥ `t_bb`; Triple Captain when the captain's xP ≥ `t_tc`.
+    3. A chip is planned with it fixed in this GW (`solve_plan(chips={0: chip})`), no chips
+       later in the horizon; otherwise the no-chip plan.
+
+    The chip quantities go to `Decision.diagnostics` (`CHIP_DIAGNOSTICS`, as computed by
+    `chip_gains`)."""
+
+    xp_model: str = "v1"
+    params: OptimizerParams = field(default_factory=OptimizerParams)
+    t_tc: float = 10.0
+    t_bb: float = 12.0
+    k_fh: int = 3
+    t_wc: float = 10.0
+
+    def __post_init__(self) -> None:
+        _check_model(self.xp_model)
+        _check_horizon(self.params.horizon)
+        if self.k_fh < 1:
+            raise ValueError(f"k_fh must be >= 1, got {self.k_fh}")
+
+    @property
+    def name(self) -> str:
+        inner = OptimizerPolicy(self.xp_model, self.params).name
+        inner = inner.removeprefix("optimizer(").removesuffix(")")
+        return (
+            f"chiprules({inner},tc={float(self.t_tc)!r},bb={float(self.t_bb)!r},"
+            f"fh={int(self.k_fh)},wc={float(self.t_wc)!r})"
+        )
+
+    def choose(self, ctx: DecisionContext, gains: Mapping[str, float | None]) -> str | None:
+        """The chip to play this GW (rules 1-2 above), or None."""
+        state, rules = ctx.state, ctx.rules
+        playable = [c for c in CHIP_PRIORITY if chip_available(state, c, rules)]
+        windows = {c: chip_window(state, c, rules) for c in playable}
+        stops = {w.chip_id: w.stop for w in rules.chips}
+        for chip in playable:
+            stop = stops[windows[chip]]
+            same = [c for c in playable if stops[windows[c]] == stop]
+            if len(same) >= stop - state.gw_index + 1:
+                return same[0]  # same keeps CHIP_PRIORITY order
+        fires = {
+            "freehit": (gains["blanks"] or 0) >= self.k_fh,
+            "wildcard": gains["gain_wc"] is not None and gains["gain_wc"] >= self.t_wc,
+            "bboost": (gains["bench_xp"] or 0) >= self.t_bb,
+            "3xc": (gains["captain_xp"] or 0) >= self.t_tc,
+        }
+        return next((c for c in playable if fires[c]), None)
+
+    def decide(self, ctx: DecisionContext) -> Decision:
+        problem, plans = _no_chip_plan(ctx, self.params)
+        gains = chip_gains(ctx, problem, self.params, plans.best)
+        chip = self.choose(ctx, gains)
+        if chip is not None:
+            try:
+                plan = solve_plan(problem, self.params, chips={0: chip})
+            except InfeasiblePlan:
+                log.warning(
+                    "%s: no plan with %s at gw_index %d", self.name, chip, ctx.state.gw_index
+                )
+            else:
+                return replace(
+                    plan.decision(),
+                    solver_status=plan.status,
+                    mip_gap=plan.mip_gap,
+                    diagnostics=gains,
+                )
+        return replace(
+            plans.decision(),
+            solver_status=plans.solver_status,
+            mip_gap=plans.best.mip_gap,
+            diagnostics=gains,
+        )
