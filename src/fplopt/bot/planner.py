@@ -26,6 +26,7 @@ __all__ = (
     "UnknownTeam",
     "UserPlan",
     "chip_options",
+    "chip_params",
     "chips_left",
     "decision_summary",
     "import_user_squad",
@@ -39,6 +40,7 @@ __all__ = (
 # (cli.INTERACTIVE_TIME_LIMIT); tests check it matches the spec.
 LIVE_PARAMS = OptimizerParams(horizon=6, decay=0.75, max_hits=1, hit_margin=2.0, time_limit=60.0)
 TOP_K = 3
+CHIP_SHRINK = 1.0  # the chip study's chosen P (chip pre-registration §6c)
 CHIP_LABELS = {
     "wildcard": "Wildcard",
     "freehit": "Free Hit",
@@ -127,15 +129,30 @@ class ChipOptions:
     singles: Mapping[str, tuple[str, float]] = field(default_factory=dict)
 
 
+def chip_params() -> OptimizerParams:
+    """`/chips`'s planner settings: `LIVE_PARAMS` with the chip study's estimated terminal
+    values (`config/chips/terminal-values.json`, chip_shrink 1.0: the study's P, PLAN §12),
+    or the flat placeholders if the table is missing. Information only: P didn't beat the
+    rule baseline at the pre-registered threshold."""
+    from fplopt.backtest.chip_values import load_terminal_values
+
+    try:
+        return replace(LIVE_PARAMS, chip_value_left=load_terminal_values(CHIP_SHRINK))
+    except ValueError:
+        return LIVE_PARAMS
+
+
 def chip_options(
     fpl: EntryClient,
     entry_id: int,
     context: PlanContext,
     ft_override: int | None = None,
-    params: OptimizerParams = LIVE_PARAMS,
+    params: OptimizerParams | None = None,
 ) -> ChipOptions:
     """Import the squad and search the chip scenarios over the horizon (the bound search:
-    only scenarios that could win are solved; same best plan as solving them all)."""
+    only scenarios that could win are solved; same best plan as solving them all), with
+    `params` (default `chip_params()`)."""
+    params = chip_params() if params is None else params
     spec, state, rules = import_user_squad(fpl, entry_id, context, ft_override)
     problem = PlanInput.from_context(state, context.pool, context.xp, rules, params)
     plans = optimize(problem, params, top_k=1, chips=True, roll=False)

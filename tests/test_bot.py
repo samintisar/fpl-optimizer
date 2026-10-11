@@ -943,3 +943,32 @@ def test_chips_text_counts_ruled_out_and_unsettled_options(entries, context):
     if ruled:
         assert f"{ruled} other options were ruled out" in text
     assert "1 option(s) not settled" in text
+
+
+def test_chip_params_use_the_estimated_table(tmp_path, monkeypatch):
+    from fplopt import cli
+    from fplopt.backtest import chip_values
+    from fplopt.bot.planner import chip_params
+
+    assert cli.CHIP_VALUES_FILE == chip_values.CHIP_VALUES_FILE  # one table
+    table = tmp_path / "terminal-values.json"
+    monkeypatch.setattr(chip_values, "CHIP_VALUES_FILE", table)
+    assert chip_params() == LIVE_PARAMS  # no table: the placeholders
+    table.write_text(json.dumps({"values": {"bboost": [2.0, 4.0]}}), encoding="utf-8")
+    params = chip_params()
+    assert params.chip_value_left == {"bboost": (2.0, 4.0)}
+    assert replace(params, chip_value_left=None) == LIVE_PARAMS
+
+
+def test_chips_text_explains_the_estimated_values(entries, context):
+    from fplopt.bot.messages import chips_text
+    from fplopt.bot.planner import chip_options
+
+    table = {"3xc": (8.0, 9.0), "bboost": (5.0, 6.0), "freehit": (6.0,), "wildcard": (4.0,)}
+    params = replace(TEST_PARAMS, chip_value_left=table)
+    text = chips_text(chip_options(entries, TEAM, context, params=params))
+    assert "estimated best use in the rest of its window" in text
+    assert "Triple Captain 9.0" in text and "Bench Boost 6.0" in text
+    assert "guessed value" not in text and "Tested on 2023-25" in text
+    plain = chips_text(chip_options(entries, TEAM, context, params=TEST_PARAMS))
+    assert "guessed value" in plain

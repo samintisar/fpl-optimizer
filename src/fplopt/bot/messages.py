@@ -207,7 +207,11 @@ def chips_text(options: ChipOptions, shown: int = 6) -> str:
     last = best.gws[-1].gw
     lines = [
         f"<b>GW{context.gw} chips</b> · information only",
-        "The chip planner isn't tested yet: weigh this against your own judgement.",
+        (
+            "Tested on 2023-25: this planner beat no chips, but not simple rules convincingly."
+            if params.chip_value_left is not None
+            else "The chip planner isn't tested yet: weigh this against your own judgement."
+        ),
         f"Unused chips: {_e(', '.join(unused) or 'none')}",
         "",
         f"<b>Best over the next {horizon} GWs:</b> {_e(scenario_label(best.scenario))}"
@@ -247,17 +251,35 @@ def chips_text(options: ChipOptions, shown: int = 6) -> str:
             f"{len(stopped)} option(s) not settled: the solver hit its time limit before "
             "finding a plan for them."
         )
-    values = ", ".join(
-        f"{CHIP_LABELS[name]} {params.chip_value.get(name, 0.0):g}"
-        for name in CHIP_LABELS
-        if name in params.chip_value
-    )
-    lines += [
-        "",
-        f"How to read it: a chip still held after GW{last} counts as worth a guessed "
-        f"value ({values} xP); a chip whose window ends sooner is worth nothing if held. "
-        "So a chip wins only if it beats that guess. The bot's plans don't play chips.",
-    ]
+    if params.chip_value_left is not None:
+        from fplopt.optimize.chips import chip_value
+
+        last_index = context.gw_index_map.get(last, context.gw_index + len(best.gws) - 1)
+        held = []
+        for w in sorted(rules.chips, key=lambda w: (w.start, w.chip_id)):
+            if w.chip_id in used or w.stop <= last_index or w.start > last_index + 1:
+                continue
+            left = w.stop - last_index
+            value = chip_value(params, w.name, left)
+            held.append(f"{CHIP_LABELS.get(w.name, w.name)} {value:.1f}")
+        how = (
+            f"How to read it: a chip still held after GW{last} counts as worth its estimated "
+            f"best use in the rest of its window ({_e(', '.join(held) or 'none')} xP, from "
+            "backtests); a chip whose window ends sooner is worth nothing if held. So a chip "
+            "wins only if it beats holding it. The bot's plans don't play chips."
+        )
+    else:
+        values = ", ".join(
+            f"{CHIP_LABELS[name]} {params.chip_value.get(name, 0.0):g}"
+            for name in CHIP_LABELS
+            if name in params.chip_value
+        )
+        how = (
+            f"How to read it: a chip still held after GW{last} counts as worth a guessed "
+            f"value ({values} xP); a chip whose window ends sooner is worth nothing if held. "
+            "So a chip wins only if it beats that guess. The bot's plans don't play chips."
+        )
+    lines += ["", how]
     return "\n".join(lines)
 
 

@@ -297,15 +297,10 @@ class PolicySpec:
 
 
 def estimated_chip_values(shrink: float, path: Path | None = None) -> dict[str, tuple[float, ...]]:
-    """The estimated terminal value table (`fplopt chips values`) times `shrink` (ValueError
-    if it hasn't been estimated yet or `shrink` < 0)."""
-    path = CHIP_VALUES_FILE if path is None else path
-    if not math.isfinite(shrink) or shrink < 0:
-        raise ValueError(f"chip_shrink must be a finite number >= 0, got {shrink}")
-    if not path.is_file():
-        raise ValueError(f"chip_shrink: no estimated chip values at {path} (fplopt chips values)")
-    table = json.loads(path.read_text(encoding="utf-8"))["values"]
-    return {name: tuple(shrink * float(v) for v in values) for name, values in table.items()}
+    """`chip_values.load_terminal_values` from `CHIP_VALUES_FILE` (patched in tests)."""
+    from fplopt.backtest.chip_values import load_terminal_values
+
+    return load_terminal_values(shrink, CHIP_VALUES_FILE if path is None else path)
 
 
 def make_policy_spec(name: str, xp: str, params: dict[str, str]) -> PolicySpec:
