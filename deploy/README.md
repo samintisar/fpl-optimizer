@@ -145,7 +145,7 @@ State lives in `~/fpl-optimizer/state/` (gitignored; `FPLOPT_STATE_DIR` to move 
 
 - Logs: `journalctl --user -u fplopt-bot.service -u fplopt-live.service --since today`
 - Contexts: `ls state/context`. The newest is the one in use, and the 12 newest are kept.
-- Memory: botbox has 3.8 GB and no swap.
+- Memory: the server (botbox, a VM) has 3.8 GB and no swap.
   - `build all` peaks at ~1.7 GB, and the live job runs it in a subprocess.
   - v1 peaks at ~2.0 GB.
   - Only the live job runs these. The bot only reads contexts, and a `/plan` (import + solve) takes ~20 s and a few hundred MB.
