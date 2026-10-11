@@ -739,3 +739,125 @@ def test_telegram_sender_posts_html_and_never_leaks_the_token():
             send(2, "x")
     assert "HTTP 403" in str(info.value) and "SECRET" not in str(info.value)
     assert info.value.__cause__ is None and info.value.__suppress_context__
+
+
+# --- review fixes: retries, undeliverable chats, off-season, polling errors -------------------
+
+
+def test_due_alerts_rerun_does_not_wait_for_a_stuck_alert24(users, deadlines):
+    d = deadlines[GW]
+    event = (SEASON, GW, d)
+    window = d - timedelta(hours=2)
+    # alert24 never marked done (a user kept failing): the re-run is still due.
+    due = live.due_alerts(users, event, window + timedelta(minutes=5), [window + timedelta(1)])
+    assert due.kinds == ("alert24",)  # a snapshot after the deadline doesn't count
+    snap = [window + timedelta(minutes=1)]
+    due = live.due_alerts(users, event, window + timedelta(minutes=5), snap)
+    assert due.kinds == ("alert24", "alert2")
+
+
+def test_live_tick_gives_up_after_max_attempts_and_snapshots_once(alerts_env, users):
+    env = alerts_env
+    env["clock"].now = env["deadline"] - timedelta(hours=23)
+
+    def broken(chat, text):
+        raise RuntimeError("telegram down")
+
+    for attempt in range(live.MAX_ATTEMPTS):
+        with pytest.raises(RuntimeError, match="alerts failed"):
+            env["tick"](send=broken)
+        assert users.alert_run(SEASON, GW, "alert24") is None or attempt == live.MAX_ATTEMPTS - 1
+        env["clock"].now += timedelta(minutes=15)
+    assert users.alert_run(SEASON, GW, "alert24") is not None  # given up: done
+    assert env["source"].calls == 2  # one fresh snapshot for the GW, not one per retry
+    result = env["tick"](send=broken)  # nothing due, nothing retried
+    assert result.due is None and result.failed == []
+
+
+def test_live_tick_undeliverable_chat_turns_alerts_off(alerts_env, users):
+    from fplopt.bot.sender import TelegramSendError
+
+    env = alerts_env
+    env["clock"].now = env["deadline"] - timedelta(hours=23)
+
+    def blocked(chat, text):
+        raise TelegramSendError("sendMessage failed: HTTPStatusError (HTTP 403)", permanent=True)
+
+    result = env["tick"](send=blocked)
+    assert result.failed == [] and result.sent == []
+    assert not users.user(5).alerts
+    assert users.alert_run(SEASON, GW, "alert24") is not None
+    (rec,) = users.recommendations(env["member"].user_id)
+    assert rec.error.startswith("undeliverable") and not rec.sent
+
+
+def test_live_tick_one_users_failure_does_not_stop_the_others(alerts_env, users, monkeypatch):
+    env = alerts_env
+    other = users.add_user(6, "active")
+    users.set_entry(other.user_id, TEAM)
+    env["clock"].now = env["deadline"] - timedelta(hours=23)
+    real = live.recommendation_text
+    calls = []
+
+    def flaky(plan, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise KeyError("player")
+        return real(plan, **kwargs)
+
+    monkeypatch.setattr(live, "recommendation_text", flaky)
+    with pytest.raises(RuntimeError, match=r"failed for 1 user\(s\)"):
+        env["tick"]()
+    assert [chat for chat, _ in env["sent"]] == [6]
+
+
+def test_live_tick_does_nothing_off_season(alerts_env, deadlines):
+    env = alerts_env
+    env["clock"].now = max(deadlines.values()) + timedelta(days=1)
+    result = env["tick"]()
+    assert result.due is None and not result.rebuilt and env["builds"] == []
+
+
+def test_polling_network_errors_are_not_alerted(service, monkeypatch):
+    from telegram.error import Conflict, NetworkError
+
+    from fplopt.bot import app
+
+    alerts = []
+
+    def alert(text, **kwargs):
+        alerts.append(text)
+
+    monkeypatch.setattr(app, "send_admin_alert", alert)
+    application = app.build_application("123456:TEST", service)
+    (on_error,) = application.error_handlers
+
+    class Ctx:
+        def __init__(self, error):
+            self.error = error
+
+    for error in (NetworkError("Bad Gateway"), Conflict("terminated by other getUpdates")):
+        asyncio.run(on_error(None, Ctx(error)))
+    assert alerts == []
+    asyncio.run(on_error(None, Ctx(ValueError("boom"))))
+    assert alerts == ["fplopt bot: ValueError: boom"]
+
+
+def test_send_replies_skips_chats_that_refuse():
+    from telegram.error import Forbidden
+
+    from fplopt.bot.app import send_replies
+    from fplopt.bot.service import Reply
+
+    class Bot:
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, chat_id, text):
+            if chat_id == 2:
+                raise Forbidden("bot can't initiate conversation with a user")
+            self.sent.append(chat_id)
+
+    bot = Bot()
+    asyncio.run(send_replies(bot, [Reply(1, "a"), Reply(2, "b"), Reply(3, "c")]))
+    assert bot.sent == [1, 3]

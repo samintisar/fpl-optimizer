@@ -6,8 +6,11 @@ Each run:
 1. **Due?** From the newest bootstrap, the next deadline d and its GW.
    - `alert24` is due from d − 24 h until d − 15 min, once per GW.
    - `alert2` (the silent re-run) is due from the archiver's pre-deadline snapshot (taken in
-     [d − 2 h, d), after the alert24 run's) until d − 30 min, once per GW.
-2. **Fresh flags for alert24:** an FPL snapshot (fixtures + bootstrap, like the tick's).
+     [d − 2 h, d), after the one alert24 planned on, if it ran) until d − 30 min, once per
+     GW.
+   Off-season (no deadline ahead) nothing runs, not even a rebuild.
+2. **Fresh flags for alert24:** an FPL snapshot (fixtures + bootstrap, like the tick's),
+   once per GW (a retry reuses it).
 3. **Context:** rebuilt (`build all` in a subprocess, then `context.build_context`) when the
    archive's fingerprint, the code's commit or the next deadline changed.
 4. **Users** (active, with a team, alerts on), each once per GW and kind (a crashed run
@@ -16,9 +19,12 @@ Each run:
    - alert2: sent only if plan 1's moves, captain or vice differ from the last alert sent
      (the message says what changed), else just logged. A user who got no alert24 gets the
      full recommendation.
-   An `EntryError` (the squad can't be imported) is sent to the user and logged; any other
-   failure is logged, the other users still get theirs, the job fails at the end, and the
-   next run retries the failed users (the GW's run is marked done only without failures).
+   An `EntryError` (the squad can't be imported) is sent to the user and logged. A chat
+   Telegram refuses for good (403, or 400: the user blocked the bot or the chat is gone)
+   turns the user's alerts off and is logged. Any other failure is logged, the other users
+   still get theirs, the job fails at the end, and the next run retries the failed users,
+   up to MAX_ATTEMPTS tries each (the GW's run is marked done once nobody is left to
+   retry).
 """
 
 from __future__ import annotations
@@ -39,8 +45,9 @@ from fplopt.bot.context import (
 )
 from fplopt.bot.messages import changes_text, recommendation_text, split_message
 from fplopt.bot.planner import decision_summary, plans_json
+from fplopt.bot.sender import TelegramSendError
 from fplopt.bot.service import BotService
-from fplopt.bot.store import UserStore
+from fplopt.bot.store import User, UserStore
 from fplopt.entry import EntryError
 from fplopt.features.store import DataStore
 from fplopt.ingest.jobs import FplSource, snapshot_fpl
@@ -64,6 +71,10 @@ log = logging.getLogger(__name__)
 ALERT24_LEAD = timedelta(hours=24)
 ALERT24_CUTOFF = timedelta(minutes=15)  # no alert24 later than this before the deadline
 ALERT2_CUTOFF = timedelta(minutes=30)  # no re-run later than this before the deadline
+MAX_ATTEMPTS = 3  # tries per user, GW and kind before an alert is given up
+# Recorded errors that end a user's alert for the GW: a squad that can't be imported
+# (told to the user) and an undeliverable chat.
+DONE_ERRORS = ("EntryError", "undeliverable")
 
 
 @dataclass(frozen=True)
@@ -104,7 +115,10 @@ def due_alerts(
     now: datetime,
     bootstrap_times: list[datetime],
 ) -> Due | None:
-    """The alert kinds due at `now` (module docstring), or None."""
+    """The alert kinds due at `now` (module docstring), or None. The re-run doesn't wait
+    for the 24-hour alert to be marked done (one user whose alerts keep failing must not
+    cost everyone the re-run); it needs a pre-deadline snapshot newer than the one the
+    24-hour alert planned on, if that ran."""
     if event is None:
         return None
     season, gw, deadline = event
@@ -113,13 +127,12 @@ def due_alerts(
     if alert24 is None and deadline - ALERT24_LEAD <= now < deadline - ALERT24_CUTOFF:
         kinds.append("alert24")
     if (
-        alert24 is not None
-        and users.alert_run(season, gw, "alert2") is None
+        users.alert_run(season, gw, "alert2") is None
         and deadline - PRE_DEADLINE_LEAD <= now < deadline - ALERT2_CUTOFF
     ):
-        after = datetime.fromisoformat(alert24["bootstrap_at"])
+        after = None if alert24 is None else datetime.fromisoformat(alert24["bootstrap_at"])
         window = deadline - PRE_DEADLINE_LEAD
-        if any(t >= window and t > after and t < deadline for t in bootstrap_times):
+        if any(window <= t < deadline and (after is None or t > after) for t in bootstrap_times):
             kinds.append("alert2")
     return Due(season, gw, deadline, tuple(kinds)) if kinds else None
 
@@ -198,9 +211,19 @@ def live_tick(
         return result
     current = now()
     event = next_event(raw.read_json(latest), current)
-    due = due_alerts(users, event, current, raw.times("fpl", "bootstrap-static"))
+    if event is None:  # off-season: no deadline ahead, nothing to plan or rebuild
+        log.info("no deadline ahead in the newest bootstrap: nothing to do")
+        return result
+    times = raw.times("fpl", "bootstrap-static")
+    due = due_alerts(users, event, current, times)
     result.due = due
-    if due is not None and "alert24" in due.kinds:
+    if (
+        due is not None
+        and "alert24" in due.kinds
+        and not any(t >= due.deadline - ALERT24_LEAD for t in times)
+    ):
+        # Once per GW: a retried alert24 (failed users) reuses this snapshot, so retries
+        # don't grow raw/ or rebuild the context every run.
         log.info("GW%d alert24 due: fresh FPL snapshot", due.gw)
         snapshot_fpl(raw, fpl, now)
         result.snapshot = True
@@ -218,9 +241,8 @@ def live_tick(
             f"is {due.season} GW{due.gw}: data/ is behind the archive"
         )
     for kind in due.kinds:
-        failed = len(result.failed)
         _alert(kind, context, users, service, send, result)
-        if len(result.failed) == failed:  # else the next run retries the failed users
+        if not _retry_left(kind, context, users):
             users.mark_alert_run(
                 due.season,
                 due.gw,
@@ -244,33 +266,18 @@ def _alert(
     send: Callable[[int, str], None],
     result: TickResult,
 ) -> None:
-    # Users already done for this GW and kind: sent, silent or a squad error (told to the
-    # user); a failed plan or send is retried by the next run.
-    done = {
-        r.user_id
-        for user in users.alert_users()
-        for r in users.recommendations(user.user_id)
-        if r.season == context.season
-        and r.gw == context.gw
-        and r.kind == kind
-        and (r.error is None or r.error.startswith("EntryError"))
-    }
     for user in users.alert_users():
-        if user.user_id in done:
-            continue
+        records = [
+            r
+            for r in users.recommendations(user.user_id)
+            if r.season == context.season and r.gw == context.gw and r.kind == kind
+        ]
+        if any(r.error is None or r.error.startswith(DONE_ERRORS) for r in records):
+            continue  # sent, silent, or a final error (told to the user, or undeliverable)
+        if len(records) >= MAX_ATTEMPTS:
+            continue  # failed MAX_ATTEMPTS times: given up (each failure was alerted)
         try:
-            plan = service.make_plan(user, context, kind)
-        except EntryError as exc:
-            try:
-                _send(
-                    send,
-                    user.chat_id,
-                    f"Couldn't plan GW{context.gw} for team {user.entry_id}: "
-                    + html.escape(str(exc), quote=False),
-                )
-            except Exception:
-                log.exception("telling user %d about their squad failed", user.user_id)
-            continue
+            _alert_user(kind, context, user, users, service, send, result)
         except Exception:
             log.exception("GW%d %s failed for user %d", context.gw, kind, user.user_id)
             users.record(
@@ -279,58 +286,86 @@ def _alert(
                 context.gw,
                 kind,
                 context_id=context.context_id,
-                error="plan failed (see the job log)",
+                error="failed (see the job log)",
             )
             result.failed.append(user.user_id)
-            continue
-        decision = decision_summary(plan)
-        last = users.last_sent_alert(user.user_id, context.season, context.gw)
-        if kind == "alert2" and last is not None:
-            changes = changes_text(last.decision, decision, context.names)
-            if not changes:
-                users.record(
-                    user.user_id,
-                    context.season,
-                    context.gw,
-                    kind,
-                    context_id=context.context_id,
-                    plans=plans_json(plan),
-                    decision=decision,
-                )
-                result.silent.append(user.user_id)
-                continue
-            text = recommendation_text(plan, title=f"GW{context.gw} update", changes=changes)
-        else:
-            text = recommendation_text(plan)
+
+
+def _alert_user(
+    kind: str,
+    context: PlanContext,
+    user: User,
+    users: UserStore,
+    service: BotService,
+    send: Callable[[int, str], None],
+    result: TickResult,
+) -> None:
+    try:
+        plan = service.make_plan(user, context, kind)
+    except EntryError as exc:
         try:
-            _send(send, user.chat_id, text)
-        except Exception:
-            log.exception("sending GW%d %s to user %d failed", context.gw, kind, user.user_id)
-            users.record(
-                user.user_id,
-                context.season,
-                context.gw,
-                kind,
-                context_id=context.context_id,
-                plans=plans_json(plan),
-                decision=decision,
-                message=text,
-                error="send failed",
+            _send(
+                send,
+                user.chat_id,
+                f"Couldn't plan GW{context.gw} for team {user.entry_id}: "
+                + html.escape(str(exc), quote=False),
             )
-            result.failed.append(user.user_id)
-            continue
+        except Exception:
+            log.exception("telling user %d about their squad failed", user.user_id)
+        return
+    decision = decision_summary(plan)
+    last = users.last_sent_alert(user.user_id, context.season, context.gw)
+    record = {
+        "context_id": context.context_id,
+        "plans": plans_json(plan),
+        "decision": decision,
+    }
+    if kind == "alert2" and last is not None:
+        changes = changes_text(last.decision, decision, context.names)
+        if not changes:
+            users.record(user.user_id, context.season, context.gw, kind, **record)
+            result.silent.append(user.user_id)
+            return
+        text = recommendation_text(plan, title=f"GW{context.gw} update", changes=changes)
+    else:
+        text = recommendation_text(plan)
+    try:
+        _send(send, user.chat_id, text)
+    except TelegramSendError as exc:
+        if not exc.permanent:
+            raise
+        # The user blocked the bot or the chat is gone: stop alerting them (/alerts on
+        # turns it back on) and don't retry.
+        log.warning("GW%d %s undeliverable to user %d: %s", context.gw, kind, user.user_id, exc)
+        users.set_alerts(user.user_id, False)
         users.record(
             user.user_id,
             context.season,
             context.gw,
             kind,
-            context_id=context.context_id,
-            plans=plans_json(plan),
-            decision=decision,
             message=text,
-            sent=True,
+            error=f"undeliverable: {exc}",
+            **record,
         )
-        result.sent.append(user.user_id)
+        return
+    users.record(user.user_id, context.season, context.gw, kind, message=text, sent=True, **record)
+    result.sent.append(user.user_id)
+
+
+def _retry_left(kind: str, context: PlanContext, users: UserStore) -> bool:
+    """Whether a user's alert of this kind failed and has tries left (the next run retries
+    it, so the GW's run isn't done yet)."""
+    for user in users.alert_users():
+        records = [
+            r
+            for r in users.recommendations(user.user_id)
+            if r.season == context.season and r.gw == context.gw and r.kind == kind
+        ]
+        if any(r.error is None or r.error.startswith(DONE_ERRORS) for r in records):
+            continue
+        if records and len(records) < MAX_ATTEMPTS:
+            return True
+    return False
 
 
 def _send(send: Callable[[int, str], None], chat_id: int, text: str) -> None:

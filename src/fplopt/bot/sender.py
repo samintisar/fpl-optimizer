@@ -12,7 +12,12 @@ __all__ = ("TelegramSendError", "telegram_sender")
 
 class TelegramSendError(RuntimeError):
     """A message wasn't sent. The message never contains the request URL (it holds the bot
-    token)."""
+    token). `permanent`: Telegram refused the chat (403: the user blocked the bot; 400:
+    e.g. chat not found), so retrying won't help."""
+
+    def __init__(self, message: str, permanent: bool = False) -> None:
+        super().__init__(message)
+        self.permanent = permanent
 
 
 def telegram_sender(http: httpx.Client, token: str) -> Callable[[int, str], None]:
@@ -35,7 +40,8 @@ def telegram_sender(http: httpx.Client, token: str) -> Callable[[int, str], None
             status = getattr(getattr(exc, "response", None), "status_code", None)
             detail = f" (HTTP {status})" if status else ""
             raise TelegramSendError(
-                f"sendMessage to chat {chat_id} failed: {type(exc).__name__}{detail}"
+                f"sendMessage to chat {chat_id} failed: {type(exc).__name__}{detail}",
+                permanent=status in (400, 403),
             ) from None
 
     return send

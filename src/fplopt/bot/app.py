@@ -38,10 +38,17 @@ COMMANDS: dict[str, tuple[str, bool]] = {
 
 
 async def send_replies(bot: Any, replies: Sequence[Reply]) -> None:
-    """Send each reply (split to Telegram's length limit)."""
+    """Send each reply (split to Telegram's length limit). A chat that refuses messages
+    (blocked the bot, or never started it: e.g. the "you have access" note after /allow)
+    is logged and skipped; the other replies still go."""
+    from telegram.error import BadRequest, Forbidden
+
     for reply in replies:
-        for piece in split_message(reply.text):
-            await bot.send_message(reply.chat_id, piece)
+        try:
+            for piece in split_message(reply.text):
+                await bot.send_message(reply.chat_id, piece)
+        except (Forbidden, BadRequest) as exc:
+            log.warning("reply to chat %s refused: %s", reply.chat_id, type(exc).__name__)
 
 
 def build_application(
@@ -97,7 +104,14 @@ def build_application(
     application.add_handler(MessageHandler(private & (filters.COMMAND | filters.TEXT), unknown))
 
     async def on_error(update: object | None, context: ContextTypes.DEFAULT_TYPE) -> None:
+        from telegram.error import Conflict, NetworkError
+
         error = context.error
+        if update is None and isinstance(error, NetworkError | Conflict):
+            # Polling errors (a Telegram 5xx, a network blip, two instances during a
+            # restart): python-telegram-bot retries with backoff; alerting each would spam.
+            log.warning("polling: %s: %s", type(error).__name__, error)
+            return
         log.error("bot update failed", exc_info=error)
         summary = str(error).splitlines()[0] if error is not None and str(error) else ""
         await asyncio.to_thread(
