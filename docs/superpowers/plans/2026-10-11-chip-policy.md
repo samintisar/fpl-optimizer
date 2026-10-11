@@ -131,6 +131,84 @@ Target: verdict by about GW10 (late October).
   - **Undiscounted terminal values.** They are added undiscounted, while chips played inside the horizon are discounted by `decay^h`. So P leans towards holding chips until the window's end comes inside the horizon (PLAN §7 design; `k` partly offsets it).
 - **H's rules** use the raw quantities as written in §2: captain xP, the bench's summed xP, squad players with no fixture, and the Wildcard plan's gain. The grid points are their develop percentiles from the chipgains run.
 
+## 6c. Develop results and the settings fixed for validate (2026-10-11, before any validate run)
+
+All runs cover develop 2016/17–2022/23 from starts `template@1,random:3@1,random:3@20` (49 runs, 1,448 GWs each, every solve Optimal). Differences are full-run mean net points per GW against S0 (`results/chips-s0-develop-v2`). These are **in-sample**: the settings were chosen on these seasons.
+
+- **Terminal values:** `config/chips/terminal-values.json`, from the S0 rerun, values for L = 1 → 19:
+
+  | Chip | L = 1 | L = 19 |
+  |---|---|---|
+  | TC | 8.0 | 12.8 |
+  | BB | 5.2 | 9.4 |
+  | FH | 6.1 | 22.4 |
+  | WC | 4.8 | 23.3 |
+
+- **H, tuned one chip at a time** (TC, BB, FH, WC; the others at their current value; `results/chips-h-tune.log`; 9 variants):
+
+  | Setting | Grid values: mean vs S0 per GW | Chosen |
+  |---|---|---|
+  | `t_tc` | 7.04: +1.99; 8.3: +2.19; 10.88: +2.17 | **8.3** |
+  | `t_bb` | 7.54: +1.90; 9.42: +2.19; 10.9: +2.36 | **10.9** |
+  | `k_fh` | 2: +2.24; 3: +2.36; 4: +2.39 | **4** |
+  | `t_wc` | 6.75: +2.20; 12.87: +2.39; 19.65: +2.08 | **12.87** |
+
+  - Chosen H: `chiprules:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2,t_tc=8.3,t_bb=10.9,k_fh=4,t_wc=12.87`, **+2.39/GW vs S0**.
+  - Every chip is played in every window it has (77 of each; the last-chance rule).
+- **P, chip_shrink k** (`results/chips-p-tune.log`; 3 variants):
+
+  | k | vs S0 per GW | vs H per GW |
+  |---|---|---|
+  | 0.5 | +1.77 | −0.62 |
+  | 0.75 | +2.07 | −0.32 |
+  | 1.0 | +2.53 | +0.14 |
+
+  - **Chosen k = 1.0:** `optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2,chips=1,chip_shrink=1.0`.
+  - The best k is the grid's upper edge, and the grid is not widened, since that would be another look.
+  - P's develop edge over H is small (+0.14/GW).
+- **Size on real develop differences** (`fplopt chips size`, 10 cells resampled from the centred develop 8-GW cells; rates at α 0.05):
+  - P vs S0: 0.061;
+  - H vs S0: 0.025;
+  - P vs H: **0.075**, with calibrated critical p 0.0296.
+- **Validate thresholds, fixed now.**
+  - The rule (§4) names P vs S0 and H vs S0, which are both ≤ 0.07, so they stay at **p < 0.05**.
+  - P vs H over-rejects, and it is part of P's gate, so it uses the stricter **calibrated p < 0.0296**. This is the conservative reading.
+  - Each comparison also needs a positive mean xG-scored difference.
+  - **P goes live** if P vs H and P vs S0 both pass.
+  - **Otherwise H goes live** if H vs S0 passes.
+  - **Otherwise chips stay manual.**
+- **Validate run, once:**
+  - seasons 2023/24–2024/25, the same starts;
+  - each arm run once with `backtest run` (S0 as `optimizer:v1:...` without chips: the same decisions as `chipgains`, which is cheaper);
+  - the three comparisons with `evaluate.full_run_window_test` on the paired per-GW differences.
+
+## 6d. Validate result (2026-10-11, the one run): **chips stay manual**
+
+`results/chips-validate/`: seasons 2023/24–2024/25, starts `template@1,random:3@1,random:3@20`, 22 runs and 418 GWs per arm, every solve Optimal. Settings and thresholds were as fixed in §6c (commit 0f8f3cb). The statistic is the full-run window t-test on 8-GW cells (10 cells).
+
+| Comparison | Mean per GW | One-sided p | Threshold | xG per GW | Per season (mean over starts) | Result |
+|---|---|---|---|---|---|---|
+| P vs H | **+1.70** | 0.083 | < 0.0296 | +1.57 | 2023/24 +68, 2024/25 +26 | fail |
+| P vs S0 | **+4.18** | **0.025** | < 0.05 | +4.30 | +131, +140 | pass |
+| H vs S0 | +2.49 | 0.106 | < 0.05 | +2.74 | +63, +114 | fail |
+
+- **Verdict, as pre-registered: chips stay manual.**
+  - P beats S0 but not H at the fixed threshold.
+  - P vs H would also fail at a nominal 0.05, so the calibrated threshold didn't decide it.
+  - H doesn't beat S0.
+- **Season totals** (mean over starts):
+
+  | Arm | 2023/24 | 2024/25 |
+  |---|---|---|
+  | S0 | 1,840 | 1,814 |
+  | H | 1,903 | 1,928 |
+  | P | 1,971 | 1,954 |
+
+- **Reading it.** P was the best arm in both validate seasons and on xG. Its edge over the rule baseline (+1.7/GW, about 65 points a season) is positive but not established on two seasons. That fits the develop edge (+0.14/GW) being small and the test having little power.
+  - This is not evidence against P.
+  - It is not enough to let P drive alerts.
+- **Live, it stays as is.** `/chips` stays information only, and plans and alerts play no chips. Whether `/chips` should show P's estimated terminal values instead of the placeholders is a separate display decision, untested as such. The live 2026/27 log can add evidence at season end (a second look on new data, not on these seasons).
+
 ## 7. Open (VERIFY before the code PR)
 
 - **Free Hit in consecutive GWs in 2026/27** (PLAN §11): check the rules config, since it constrains H and P.
