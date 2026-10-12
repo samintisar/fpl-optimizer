@@ -863,3 +863,112 @@ def test_send_replies_skips_chats_that_refuse():
     bot = Bot()
     asyncio.run(send_replies(bot, [Reply(1, "a"), Reply(2, "b"), Reply(3, "c")]))
     assert bot.sent == [1, 3]
+
+
+# --- /chips (information only) ----------------------------------------------------------------
+
+
+def chip_planner(fpl, entry_id, context, ft=None):
+    from fplopt.bot.planner import chip_options
+
+    return chip_options(fpl, entry_id, context, ft, params=TEST_PARAMS)
+
+
+def test_scenario_label():
+    from fplopt.bot.messages import scenario_label
+
+    assert scenario_label("none") == "no chip"
+    assert scenario_label("bboost@gw9") == "Bench Boost GW9"
+    assert scenario_label("wildcard@gw5+3xc@gw9") == "Wildcard GW5 + Triple Captain GW9"
+
+
+def test_chip_options_and_text(entries, context):
+    from fplopt.bot.messages import chips_text
+
+    options = chip_planner(entries, TEAM, context)
+    objectives = options.plans.scenario_objectives
+    assert "none" in objectives and options.plans.best.scenario in objectives
+    available = {"bboost", "3xc", "freehit", "wildcard"} & {
+        c.name for c in options.rules.chips if c.start <= GW <= c.stop
+    }
+    assert set(options.singles) <= available and options.singles
+    for name, (label, value) in options.singles.items():
+        assert label == f"{name}@gw{GW}"  # a 1-GW horizon: the only GW
+        assert value <= options.plans.best.total_objective + 1e-6
+    text = chips_text(options)
+    assert text.startswith(f"<b>GW{GW} chips</b> · information only")
+    assert "Each chip on its own" in text and "Best over the next 1 GWs" in text
+    assert "Unused chips: " in text and "The bot's plans don't play chips." in text
+    assert len(text) < 4096
+
+
+def test_chips_command(users, contexts, entries, context, member):
+    service = BotService(
+        users,
+        contexts,
+        entries,
+        ADMIN,
+        now=lambda: context.deadline - timedelta(hours=20),
+        chip_planner=chip_planner,
+    )
+    assert texts(service.chips(member))[0].startswith("Register your team first")
+    users.set_entry(users.user(member).user_id, TEAM)
+    text = texts(service.chips(member))[0]
+    assert text.startswith(f"<b>GW{GW} chips</b>")
+    (check,) = users.chip_checks(users.user(member).user_id)
+    assert check["gw"] == GW and "none" in check["scenarios"] and check["best"]
+    # Each chip's own solve is logged with the search's scenarios.
+    options = chip_planner(entries, TEAM, context)
+    assert {label for label, _ in options.singles.values()} <= set(check["scenarios"])
+    assert texts(service.chips(6)) == ["Send /start first."]
+
+
+def test_chips_text_counts_ruled_out_and_unsettled_options(entries, context):
+    from types import MappingProxyType
+
+    from fplopt.bot.messages import chips_text
+    from fplopt.optimize.search import SearchStats
+
+    options = chip_planner(entries, TEAM, context)
+    plans = options.plans
+    singles = {label for label, _ in options.singles.values()}
+    bounds = {**plans.scenario_bounds, "bboost@gw99": 1.0, "3xc@gw98": 1.0}
+    stats = replace(plans.search or SearchStats(), not_optimal=(("3xc@gw98", "TimeLimit"),))
+    patched = replace(
+        options,
+        plans=replace(plans, scenario_bounds=MappingProxyType(bounds), search=stats),
+    )
+    text = chips_text(patched)
+    ruled = len(set(bounds) - set(plans.scenario_objectives) - singles) - 1
+    if ruled:
+        assert f"{ruled} other options were ruled out" in text
+    assert "1 option(s) not settled" in text
+
+
+def test_chip_params_use_the_estimated_table(tmp_path, monkeypatch):
+    from fplopt import cli
+    from fplopt.backtest import chip_values
+    from fplopt.bot.planner import chip_params
+
+    assert cli.CHIP_VALUES_FILE == chip_values.CHIP_VALUES_FILE  # one table
+    table = tmp_path / "terminal-values.json"
+    monkeypatch.setattr(chip_values, "CHIP_VALUES_FILE", table)
+    assert chip_params() == LIVE_PARAMS  # no table: the placeholders
+    table.write_text(json.dumps({"values": {"bboost": [2.0, 4.0]}}), encoding="utf-8")
+    params = chip_params()
+    assert params.chip_value_left == {"bboost": (2.0, 4.0)}
+    assert replace(params, chip_value_left=None) == LIVE_PARAMS
+
+
+def test_chips_text_explains_the_estimated_values(entries, context):
+    from fplopt.bot.messages import chips_text
+    from fplopt.bot.planner import chip_options
+
+    table = {"3xc": (8.0, 9.0), "bboost": (5.0, 6.0), "freehit": (6.0,), "wildcard": (4.0,)}
+    params = replace(TEST_PARAMS, chip_value_left=table)
+    text = chips_text(chip_options(entries, TEAM, context, params=params))
+    assert "estimated best use in the rest of its window" in text
+    assert "Triple Captain 9.0" in text and "Bench Boost 6.0" in text
+    assert "guessed value" not in text and "Tested on 2023-25" in text
+    plain = chips_text(chip_options(entries, TEAM, context, params=TEST_PARAMS))
+    assert "guessed value" in plain

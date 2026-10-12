@@ -29,6 +29,7 @@ COMMANDS: dict[str, tuple[str, bool]] = {
     "help": ("help", False),
     "register": ("register", True),
     "plan": ("plan", False),
+    "chips": ("chips", False),
     "setft": ("setft", True),
     "alerts": ("alerts", True),
     "allow": ("allow", True),
@@ -84,7 +85,7 @@ def build_application(
             if chat is None:
                 return
             args = list(context.args or [])
-            if method == "plan":
+            if method in ("plan", "chips"):
                 await context.bot.send_chat_action(chat.id, "typing")
             replies = await asyncio.to_thread(
                 (lambda: call(chat.id, args)) if with_args else (lambda: call(chat.id))
