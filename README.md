@@ -17,7 +17,8 @@ see the future and statistics that can't be fooled by one lucky season.
 > **Status:** Phases 0–6 of 9 (numbered 0–8) are done. On the untouched 2025/26 season, in one
 > pre-registered run, the system beat both baselines and passed its go-live gate
 > ([results](#results)). The Telegram bot (Phase 7) is built and goes live once its live checks
-> pass. Chips are still played manually.
+> pass. A pre-registered chip study found the chip planner best but not convincingly better than
+> simple rules, so chips stay manual and `/chips` gives its advice as information only.
 
 ## Highlights
 
@@ -48,9 +49,10 @@ see the future and statistics that can't be fooled by one lucky season.
   block-bootstrap CIs, season-level t-tests and a best-of-N deflation for every variant tried. Test
   sizes were measured by A/A placebo simulation, which is why the holdout gate uses a t-test
   rather than the bootstrap.
-- **Negative results kept.** Two pre-registered checks failed and are reported as failed: the
+- **Negative results kept.** Three pre-registered checks failed and are reported as failed: the
   optimizer's edge over greedy with baseline xP (Phase 4) and with the new model on the validation
-  seasons (Phase 5, positive but under-powered). Neither was re-run until it passed.
+  seasons (Phase 5), and the chip planner's edge over rule-based chips. None was re-run until it
+  passed, and none of them ships until it does.
 - **Plans from your real team.** `--entry TEAM_ID` imports a squad, purchase prices, bank, free
   transfers and chips from FPL's public API; a TOML squad file can override any of it.
 - **Production ops on a home server.** systemd timers archive the FPL API and bookmaker odds daily
@@ -115,6 +117,22 @@ and the optimizer is allowed one. Its full-run edge was positive in both validat
 small to clear the pre-registered bar on two seasons, so the question went to the holdout above,
 which uses the per-decision test.
 
+### Chips: validate, one run
+
+Three arms with the system's transfer settings, 2023/24–2024/25: no chips, a rule baseline (for
+example Triple Captain when the captain's xP clears a threshold), and the chip planner with
+terminal values estimated from develop backtests. One-sided t-test over 8-GW cells, thresholds
+fixed before the run.
+
+| Comparison | Pts/GW | p | Needed | Result |
+|---|---|---|---|---|
+| Chip planner vs no chips | +4.18 | 0.025 | < 0.05 | ✅ |
+| Chip planner vs rule baseline | +1.70 | 0.083 | < 0.0296 | ❌ |
+| Rule baseline vs no chips | +2.49 | 0.106 | < 0.05 | ❌ |
+
+The planner was the best arm in both seasons (about 65 points a season over the rules), but the
+gate required it to beat both, so chips stay manual.
+
 ## How it works
 
 ```mermaid
@@ -168,7 +186,7 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.12.
 git clone https://github.com/samintisar/fpl-optimizer.git
 cd fpl-optimizer
 uv sync --all-extras
-uv run pytest            # ~1,450 tests on synthetic data, no network needed
+uv run pytest            # ~1,480 tests on synthetic data, no network needed
 ```
 
 To work with real data, backfill history into `raw/` (about 1 GB, 20–30 minutes in total) and
@@ -210,6 +228,7 @@ Running the archiver, alerts and bot on a server is covered in
 | `fplopt optimize plan` | Top-3 plans plus the roll plan from a template, random or real (`--entry`) squad |
 | `fplopt optimize squad` | Write an imported FPL team as a squad file to check or edit |
 | `fplopt optimize bench` | Optimizer solve-time and pruning benchmark on real deadlines |
+| `fplopt chips values` / `size` | Estimate chip terminal values from backtests; check the chip test's size |
 | `fplopt holdout check` / `run` | Check the 2025/26 inputs; the one-shot pre-registered Phase 6 run |
 | `fplopt live prepare` / `tick` | Build the plan context; the 15-minute deadline-alert job |
 | `fplopt bot run` | The Telegram bot (long polling) |
@@ -224,7 +243,8 @@ Policy specs are `name:xp[:key=value,...]`, e.g. `greedy:rolling:threshold=2.0`,
 
 Access is invite-only: the admin approves each chat. Users `/register` their FPL team ID, then
 get `/plan` on demand and the alerts automatically; `/setft` corrects the free-transfer count and
-`/alerts` turns alerts on or off. The admin has `/allow`, `/block` and `/users`.
+`/alerts` turns alerts on or off. `/chips` shows the chip planner's best chip plan for the squad
+(about a minute), as information only. The admin has `/allow`, `/block` and `/users`.
 
 ### Environment variables
 
@@ -252,8 +272,8 @@ server.
 | 4 | MILP optimizer (transfers, captain, bench, chips, top-3 plans) | ✅ Matches open-fpl-solver |
 | 5 | Real models (market-implied team model, shares, minutes, calibration) | ✅ `v1` beats both baselines on validate; optimizer-vs-greedy not met as pre-registered, sent to the holdout |
 | 6 | Holdout evaluation on 2025/26 (single, pre-registered run) | ✅ Passes the go-live gate against both baselines |
-| 7 | Telegram bot + go live | 🔄 Built (`/register`, `/plan`, alerts); live once its checks pass |
-| 8 | Distributions, sensitivity analysis, uncertain fixtures, chip timing, live findings | Next |
+| 7 | Telegram bot + go live | 🔄 Built (`/register`, `/plan`, `/chips`, alerts); live once its checks pass |
+| 8 | Distributions, sensitivity analysis, uncertain fixtures, live findings | Next. Chip study done early: chips stay manual |
 
 Progress is tracked as GitHub milestones (one per phase) and issues.
 
@@ -271,7 +291,7 @@ src/fplopt/
   backtest/   simulator, FPL rules and scoring, policies, paired evaluation, the holdout run
   bot/        Telegram bot, plan contexts, deadline alerts, SQLite user state
   entry.py    import a real FPL team (squad, prices, bank, free transfers, chips)
-config/       scoring rules per season, teams.csv (club names per source), overrides.csv
+config/       scoring rules per season, chip terminal values, teams.csv, overrides.csv
 deploy/       systemd units + server runbook
 dev/          model-tuning and reference-check scripts (not in the package) and their results
 docs/PLAN.md  design doc and decision log (source of truth)
