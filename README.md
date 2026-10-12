@@ -14,10 +14,10 @@ Most FPL tools give you a points projection and a solver. This project spends mo
 the part they skip: **proving the recommendations are actually better**, using a backtest that can't
 see the future and statistics that can't be fooled by one lucky season.
 
-> **Status:** Phases 0–6 of 9 (numbered 0–8) are done. On the untouched 2025/26 season, in one
+> **Status:** Phases 0–7 of 9 (numbered 0–8) are done. On the untouched 2025/26 season, in one
 > pre-registered run, the system beat both baselines and passed its go-live gate
-> ([results](#results)). The Telegram bot (Phase 7) is built and goes live once its live checks
-> pass. A pre-registered chip study found the chip planner best but not convincingly better than
+> ([results](#results)). The Telegram bot (Phase 7) is live and sends each registered user's plan
+> before every deadline. A pre-registered chip study found the chip planner best but not convincingly better than
 > simple rules, so chips stay manual and `/chips` gives its advice as information only.
 
 ## Highlights
@@ -272,7 +272,7 @@ server.
 | 4 | MILP optimizer (transfers, captain, bench, chips, top-3 plans) | ✅ Matches open-fpl-solver |
 | 5 | Real models (market-implied team model, shares, minutes, calibration) | ✅ `v1` beats both baselines on validate; optimizer-vs-greedy not met as pre-registered, sent to the holdout |
 | 6 | Holdout evaluation on 2025/26 (single, pre-registered run) | ✅ Passes the go-live gate against both baselines |
-| 7 | Telegram bot + go live | 🔄 Built (`/register`, `/plan`, `/chips`, alerts); live once its checks pass |
+| 7 | Telegram bot + go live | ✅ Live (`/register`, `/plan`, `/chips`, deadline alerts) |
 | 8 | Distributions, sensitivity analysis, uncertain fixtures, live findings | Next. Chip study done early: chips stay manual |
 
 Progress is tracked as GitHub milestones (one per phase) and issues.
