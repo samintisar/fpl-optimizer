@@ -33,6 +33,8 @@ PINNED = r"fpl-harness|\.fpl-harness"
 PINNED_CALLS = (
     r"bash\s+~/fpl-harness/autoresearch/model_eval\.sh",
     r"python\s+~/fpl-harness/autoresearch/judge\.py\s+compare",
+    r"bash\s+~/fpl-harness/autoresearch/weekly\.sh",
+    r"python\s+~/fpl-harness/autoresearch/status\.py",
 )
 # A shell command that writes (in place, redirect, copy/move/delete, git restore) and names
 # a frozen file.
@@ -93,7 +95,9 @@ def check_command(command: str) -> str | None:
     for call in PINNED_CALLS:
         rest = re.sub(call, " ", rest)
     if re.search(PINNED, rest):
-        return "the pinned harness is the user's: only model_eval.sh and judge.py compare"
+        return (
+            "the pinned harness is the user's: only its model_eval, judge compare, weekly, status"
+        )
     if re.search(WRITES, flat):
         for path in re.findall(r"[\w./~-]+", flat):
             if check_path(path):

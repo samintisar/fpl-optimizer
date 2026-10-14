@@ -24,7 +24,7 @@ try at most 3 values of any one setting; log every variant, kept or not.
 | Research clone | this folder, branch `research` | where you edit, test and commit |
 | `~/fpl-research` | fplopt-server, `research` detached | experiments; `data/` holds develop seasons only (`DEVELOP_ONLY`) |
 | `~/fpl-live` | fplopt-server, `main` detached | the live bot's code; `raw/` from botbox; full `data/` |
-| `~/fpl-harness` | fplopt-server, pinned by the user | the scoring: `model_eval.sh`, `dev/calibrate_v1.py`, `judge.py`. Your edits to their copies on `research` change nothing; never touch it |
+| `~/fpl-harness` | fplopt-server, pinned by the user | the scoring and monitor: `model_eval.sh`, `dev/calibrate_v1.py`, `judge.py`, `weekly.sh`, `status.py`. Your edits to their copies on `research` change nothing; never touch it |
 | botbox | read only, via `sync.sh` | the live bot and archiver: never touch it |
 
 Run server commands as `ssh fplopt-server 'cd ~/fpl-research && …'` with
@@ -57,12 +57,12 @@ Run server commands as `ssh fplopt-server 'cd ~/fpl-research && …'` with
 - `git status` must be clean on `research`. Read the last 20 rows of `ledger.tsv`, the newest
   report in `reports/`, and `ideas.md`.
 - `bash autoresearch/sync.sh all`: code to the server, new raw files from botbox.
-- `ssh fplopt-server 'cd ~/fpl-live && ~/.local/bin/uv run python autoresearch/status.py'`:
+- `ssh fplopt-server 'cd ~/fpl-live && ~/.local/bin/uv run python ~/fpl-harness/autoresearch/status.py'`:
   `last_checked_gw`. If it is newer than the newest report's GW, do step 2 first.
 
 ### 2. Weekly monitor (when a GW has been checked since the last report)
 
-1. `ssh fplopt-server 'cd ~/fpl-live && bash autoresearch/weekly.sh'` (~10 min): rebuilds
+1. `ssh fplopt-server 'cd ~/fpl-live && bash ~/fpl-harness/autoresearch/weekly.sh'` (~10 min): rebuilds
    `data/`, evaluates v1 and `ep_next` on 2026/27 so far into `results/live/<stamp>/`,
    refreshes `~/fpl-research/data`. A refreshed develop copy invalidates baselines:
    `model_eval.sh` keys results by data hash, so the next baseline is recomputed.

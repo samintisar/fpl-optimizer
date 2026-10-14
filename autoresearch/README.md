@@ -58,6 +58,6 @@ cp autoresearch/guard.py ~/.fpl-harness/guard.py
    NotebookEdit: `python ~/.fpl-harness/guard.py`) and an allow-list for the loop's commands.
 3. On fplopt-server: `git -C ~/fpl-optimizer worktree add --detach` for `~/fpl-research`,
    `~/fpl-live` and `~/fpl-harness` (the last at `harness`, above); copy `raw/` into
-   `~/fpl-live`; `bash autoresearch/sync.sh all`; then `bash autoresearch/weekly.sh` once in
+   `~/fpl-live`; `bash autoresearch/sync.sh all`; then `bash ~/fpl-harness/autoresearch/weekly.sh` once in
    `~/fpl-live` (builds data/ and the develop copy).
 4. The scheduled task (desktop app), nightly, pointed at the research clone.

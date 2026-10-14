@@ -60,7 +60,9 @@ def test_the_guard_refuses(command):
         "uv run ruff format src/fplopt/models/minutes.py",
         "git checkout -b try/x",
         "ls results > /dev/null",
-        "ssh fplopt-server 'cd ~/fpl-live && bash autoresearch/weekly.sh'",
+        "ssh fplopt-server 'cd ~/fpl-live && bash ~/fpl-harness/autoresearch/weekly.sh'",
+        "ssh fplopt-server 'cd ~/fpl-live && ~/.local/bin/uv run python "
+        "~/fpl-harness/autoresearch/status.py'",
         "git commit -m 'try: x' && git reset --hard HEAD~1",
         "gh issue view 39",
         "uv run pytest tests/test_models_availability.py -q",
