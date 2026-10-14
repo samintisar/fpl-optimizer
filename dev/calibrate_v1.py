@@ -10,7 +10,7 @@ Subcommands:
   and the points re-scored under the season's backtest rules. A player without a row in a
   played fixture scored nothing in 0 minutes; fixtures not played (postponed beyond the
   data) are dropped. One parquet per season in `--out`. `--ban-residual` uses
-  `MinutesParams(ban_residual=True)`.
+  `MinutesParams(ban_residual=True)`; `--back-split` uses `V1Params(back_split=True)`.
 - `fit`: from a `walk` directory, the expanding-window calibrations: for each season S of
   `--apply` the maps fitted on the walk-forward rows of the seasons in [`--first-fit`, S)
   (`fplopt.models.calibration`). Effects are reported on develop seasons only (2017/18–
@@ -182,10 +182,12 @@ def realized(tables: dict[str, pd.DataFrame], season: int) -> tuple[pd.DataFrame
 
 
 def walk_season(job: tuple) -> dict:
-    data_dir, season, out_dir, ban_residual = job
+    data_dir, season, out_dir, ban_residual, back_split = job
     tables = load_tables(Path(data_dir), 2016, season)
     store = DataStore(tables=tables)
-    params = V1Params(minutes=MinutesParams(ban_residual=ban_residual), calibrate=False)
+    params = V1Params(
+        minutes=MinutesParams(ban_residual=ban_residual), back_split=back_split, calibrate=False
+    )
     outcomes, against = realized(tables, season)
     gameweeks = tables["gameweek"]
     gameweeks = gameweeks[gameweeks["season"] == season].sort_values("gw_index")
@@ -218,8 +220,10 @@ def walk(args) -> None:
         sys.exit("walk covers develop and validate only (never the 2025/26 holdout)")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    jobs = [(str(args.data_dir), s, str(out), args.ban_residual) for s in seasons]
-    params = V1Params(minutes=MinutesParams(ban_residual=args.ban_residual))
+    jobs = [(str(args.data_dir), s, str(out), args.ban_residual, args.back_split) for s in seasons]
+    params = V1Params(
+        minutes=MinutesParams(ban_residual=args.ban_residual), back_split=args.back_split
+    )
     (out / "params.txt").write_text(calibration_fingerprint(params), encoding="utf-8")
     start = time.perf_counter()
     with ProcessPoolExecutor(max_workers=min(args.jobs, len(jobs))) as pool:
@@ -481,6 +485,7 @@ def main() -> None:
     w.add_argument("--jobs", type=int, default=6)
     w.add_argument("--out", required=True)
     w.add_argument("--ban-residual", action="store_true")
+    w.add_argument("--back-split", action="store_true", help="V1Params(back_split=True)")
     f = sub.add_parser("fit")
     f.add_argument("--walk", required=True)
     f.add_argument("--first-fit", type=int, default=2016)
