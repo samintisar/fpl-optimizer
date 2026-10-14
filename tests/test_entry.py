@@ -79,6 +79,15 @@ def test_import_squad_bank_prices_and_free_transfers():
     assert any("GW5 before its deadline aren't public" in n for n in spec.notes)
 
 
+def test_the_held_since_note_only_for_a_squad_picked_after_gw1():
+    """FPL prices don't move before the GW1 deadline, so a GW1 squad's prices are exact; a
+    squad first picked for a later GW may have been bought at other prices."""
+    from_gw1 = imported(rows=[(1, 0, 0), (2, 0, 0)], squads={2: ELEMENTS})
+    assert not any("held since" in n for n in from_gw1.notes)
+    from_gw3 = imported(rows=[(3, 0, 0), (4, 0, 0)], squads={4: ELEMENTS})
+    assert any("held since GW3" in n for n in from_gw3.notes)
+
+
 def test_the_latest_transfer_in_sets_the_price():
     squad = ELEMENTS
     spec = imported(
