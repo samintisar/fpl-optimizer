@@ -11,7 +11,8 @@ history (`entry/{id}/transfers/`):
   Hit, the GW before it (the Free Hit squad reverts);
 - purchase prices: a player's latest transfer in (`element_in_cost`), Free Hit GWs
   excepted; a player held since the manager's first GW, their price at that GW's deadline
-  (the newest player snapshot before it: `initial_prices`);
+  (the newest player snapshot before it: `initial_prices`). That is exact for a GW1 squad
+  (prices don't move before the GW1 deadline) and noted as inferred for a later first GW;
 - free transfers: the season replayed with the backtester's own rule
   (`backtest.state.next_state`: transfers made and chips played per GW, top-ups and cap);
 - chips used: the history's chips, by GW.
@@ -207,7 +208,10 @@ def squad_from_api(
                 "give its purchase_price in the squad file"
             )
         players.append(SquadPlayer(element, int(start_prices[element])))
-    if any(p.element_id not in bought for p in players):
+    # FPL prices don't change before the GW1 deadline (one player in 2021/22-2026/27's
+    # pre-season snapshots, 2024/25), so a squad held since GW1 has its exact prices; a later
+    # first GW's squad may have been picked days before that deadline's prices.
+    if gw_index.get(first) != 1 and any(p.element_id not in bought for p in players):
         notes.append(
             f"purchase price of players held since GW{first}: their price at the GW{first} "
             "deadline (newest snapshot before it)"
