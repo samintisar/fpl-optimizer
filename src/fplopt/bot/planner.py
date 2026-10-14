@@ -6,16 +6,23 @@ the manager's call until a chip policy passes its own test, PLAN §12).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
 
 from fplopt.backtest.rules import Rules, backtest_rules
-from fplopt.backtest.state import SquadState, chip_available
+from fplopt.backtest.state import Holding, SquadState, chip_available, selling_price
 from fplopt.bot.context import PlanContext
-from fplopt.entry import EntryClient, EntryError, SquadSpec, import_squad, squad_state
+from fplopt.entry import (
+    EntryClient,
+    EntryError,
+    SquadPlayer,
+    SquadSpec,
+    import_squad,
+    squad_state,
+)
 from fplopt.optimize import OptimizerParams, Plan, PlanInput, PlanSet, optimize
 
 __all__ = (
@@ -23,6 +30,7 @@ __all__ = (
     "ChipOptions",
     "LIVE_PARAMS",
     "TOP_K",
+    "apply_made_transfers",
     "UnknownTeam",
     "UserPlan",
     "chip_options",
@@ -67,11 +75,67 @@ class UserPlan:
     params: OptimizerParams = LIVE_PARAMS
 
 
+def apply_made_transfers(
+    spec: SquadSpec, made: Sequence[tuple[int, int]], context: PlanContext
+) -> SquadSpec:
+    """The squad after the transfers the manager already made for the planned GW (`made`:
+    (element out, element in) in order; FPL doesn't publish them before the deadline): each
+    sale at its FPL selling price, each buy at the current price (which becomes its purchase
+    price), the bank and free transfers updated (a move beyond the free transfers was a hit,
+    already paid). EntryError when a move isn't possible."""
+    if not made:
+        return spec
+    keys = context.element_keys
+    price = dict(zip(context.pool["player_key"], context.pool["price"], strict=True))
+    names = context.names
+    players = {p.element_id: p for p in spec.players}
+    bank = spec.bank
+    for out, into in made:
+        if out not in players:
+            raise EntryError(f"{_name(out, keys, names)} isn't in the squad")
+        if into in players:
+            raise EntryError(f"{_name(into, keys, names)} is already in the squad")
+        if keys.get(into) not in price or keys.get(out) not in price:
+            raise EntryError(f"{_name(into, keys, names)} isn't in this GW's player pool")
+        held = Holding(keys[out], 0, 0, players[out].purchase_price, int(price[keys[out]]))
+        cost = int(price[keys[into]])
+        bank += selling_price(held) - cost
+        del players[out]
+        players[into] = SquadPlayer(into, cost, names.get(keys[into], ""))
+    if bank < 0:
+        raise EntryError(f"those transfers need £{-bank / 10:.1f}m more than you have")
+    moves = ", ".join(f"{_name(o, keys, names)} → {_name(i, keys, names)}" for o, i in made)
+    hits = max(0, len(made) - spec.free_transfers)
+    left = max(0, spec.free_transfers - len(made))
+    note = (
+        f"transfers you told the bot about (/transfer): {moves}; bank now £{bank / 10:.1f}m, "
+        f"{left} free transfer(s) left"
+    )
+    if hits:
+        note += f"; {hits} of them beyond your free transfers (hits already taken)"
+    return replace(
+        spec,
+        players=tuple(players.values()),
+        bank=bank,
+        free_transfers=left,
+        notes=(*spec.notes, note),
+    )
+
+
+def _name(element: int, keys: Mapping[int, int], names: Mapping[int, str]) -> str:
+    return names.get(keys.get(element, -1), f"element {element}")
+
+
 def import_user_squad(
-    fpl: EntryClient, entry_id: int, context: PlanContext, ft_override: int | None = None
+    fpl: EntryClient,
+    entry_id: int,
+    context: PlanContext,
+    ft_override: int | None = None,
+    made: Sequence[tuple[int, int]] = (),
 ) -> tuple[SquadSpec, SquadState, Rules]:
-    """The FPL team's squad before the context's GW, as a spec and a state (EntryError when it
-    can't be imported or isn't usable)."""
+    """The FPL team's squad before the context's GW, after the transfers already `made` for
+    it (`apply_made_transfers`), as a spec and a state (EntryError when it can't be imported
+    or isn't usable)."""
     rules = backtest_rules(context.season)
     try:
         spec = import_squad(
@@ -87,6 +151,7 @@ def import_user_squad(
         if exc.response.status_code == 404:
             raise UnknownTeam(f"FPL has no team with ID {entry_id}") from None
         raise
+    spec = apply_made_transfers(spec, made, context)
     if ft_override is not None:
         spec = replace(
             spec,
@@ -103,9 +168,11 @@ def plan_user(
     context: PlanContext,
     ft_override: int | None = None,
     params: OptimizerParams = LIVE_PARAMS,
+    made: Sequence[tuple[int, int]] = (),
 ) -> UserPlan:
-    """Import the squad and plan it: the top `TOP_K` plans and the roll plan, no chips."""
-    spec, state, rules = import_user_squad(fpl, entry_id, context, ft_override)
+    """Import the squad (after the transfers already `made`) and plan it: the top `TOP_K`
+    plans and the roll plan, no chips."""
+    spec, state, rules = import_user_squad(fpl, entry_id, context, ft_override, made)
     problem = PlanInput.from_context(state, context.pool, context.xp, rules, params)
     plans = optimize(problem, params, top_k=TOP_K, chips=False, roll=True)
     return UserPlan(context, entry_id, spec, state, plans, rules, ft_override, params)
@@ -148,12 +215,13 @@ def chip_options(
     context: PlanContext,
     ft_override: int | None = None,
     params: OptimizerParams | None = None,
+    made: Sequence[tuple[int, int]] = (),
 ) -> ChipOptions:
     """Import the squad and search the chip scenarios over the horizon (the bound search:
     only scenarios that could win are solved; same best plan as solving them all), with
     `params` (default `chip_params()`)."""
     params = chip_params() if params is None else params
-    spec, state, rules = import_user_squad(fpl, entry_id, context, ft_override)
+    spec, state, rules = import_user_squad(fpl, entry_id, context, ft_override, made)
     problem = PlanInput.from_context(state, context.pool, context.xp, rules, params)
     plans = optimize(problem, params, top_k=1, chips=True, roll=False)
     return ChipOptions(
@@ -241,8 +309,10 @@ def plans_json(plan: UserPlan) -> dict[str, Any]:
             ],
         }
 
+    prices_at = plan.context.prices_at
     return {
         "entry_id": plan.entry_id,
+        "prices_at": None if prices_at is None else prices_at.isoformat(),
         "bank": plan.spec.bank,
         "free_transfers": plan.spec.free_transfers,
         "squad": [[p.element_id, p.purchase_price] for p in plan.spec.players],

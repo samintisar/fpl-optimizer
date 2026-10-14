@@ -77,6 +77,15 @@ CREATE TABLE IF NOT EXISTS recommendations (
 );
 CREATE INDEX IF NOT EXISTS recommendations_user_gw
     ON recommendations (user_id, season, gw, kind);
+CREATE TABLE IF NOT EXISTS user_transfers (
+    transfer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users (user_id),
+    season INTEGER NOT NULL,
+    gw INTEGER NOT NULL,
+    element_out INTEGER NOT NULL,
+    element_in INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS chip_checks (
     check_id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users (user_id),
@@ -238,6 +247,41 @@ class UserStore:
                 (user_id, season, gw),
             ).fetchone()
         return None if row is None or row[0] is None else int(row[0])
+
+    def add_transfer(self, user_id: int, season: int, gw: int, out: int, into: int) -> None:
+        """A transfer the user already made for GW `gw` (element ids), after any before it."""
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO user_transfers (user_id, season, gw, element_out, element_in, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, season, gw, int(out), int(into), _now()),
+            )
+
+    def transfers(self, user_id: int, season: int, gw: int) -> list[tuple[int, int]]:
+        """The transfers the user made for GW `gw`, in order: (element out, element in)."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT element_out, element_in FROM user_transfers WHERE user_id = ? AND "
+                "season = ? AND gw = ? ORDER BY transfer_id",
+                (user_id, season, gw),
+            ).fetchall()
+        return [(int(r[0]), int(r[1])) for r in rows]
+
+    def drop_transfers(self, user_id: int, season: int, gw: int, last_only: bool) -> int:
+        """Remove the GW's transfers (or only the newest); returns how many were removed."""
+        with self._connect() as db:
+            if last_only:
+                cursor = db.execute(
+                    "DELETE FROM user_transfers WHERE transfer_id = (SELECT MAX(transfer_id) "
+                    "FROM user_transfers WHERE user_id = ? AND season = ? AND gw = ?)",
+                    (user_id, season, gw),
+                )
+            else:
+                cursor = db.execute(
+                    "DELETE FROM user_transfers WHERE user_id = ? AND season = ? AND gw = ?",
+                    (user_id, season, gw),
+                )
+            return int(cursor.rowcount)
 
     # --- squads and recommendations -------------------------------------------------------
 

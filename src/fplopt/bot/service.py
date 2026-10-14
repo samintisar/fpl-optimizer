@@ -9,14 +9,15 @@ Access is invite-only: `/start` from a new chat makes a `pending` user and tells
 from __future__ import annotations
 
 import html
+import json
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
-from fplopt.bot.context import ContextStore, PlanContext
+from fplopt.bot.context import ContextStore, PlanContext, with_live_prices
 from fplopt.bot.messages import chips_text, recommendation_text, squad_text, uk_time
 from fplopt.bot.planner import (
     ChipOptions,
@@ -43,6 +44,8 @@ HELP = "\n".join(
         "/register &lt;team ID&gt; · your FPL team (the number in your team's URL)",
         "/plan · plans for the next deadline",
         "/chips · what the (untested) chip planner would do: information only",
+        "/transfer &lt;out&gt; -&gt; &lt;in&gt; · a transfer you already made for the next GW (FPL "
+        "doesn't show it before the deadline); /transfer list, /transfer undo, /transfer clear",
         "/setft &lt;n&gt; · correct the free transfers for the next GW (/setft clear to undo)",
         "/alerts on|off · the message 24 hours before each deadline (and a re-run about 2 "
         "hours before, only if the plan changes)",
@@ -51,6 +54,9 @@ HELP = "\n".join(
 )
 ADMIN_HELP = "Admin: /allow &lt;chat id&gt;, /block &lt;chat id&gt;, /users"
 PENDING = "Waiting for access: the admin has been asked."
+# FPL's live prices are fetched at most this often (one bootstrap for every plan in an
+# alert run, or a burst of commands).
+PRICE_TTL = timedelta(minutes=5)
 NOT_READY = (
     "The data for the next deadline isn't ready yet (it's rebuilt after each new snapshot). "
     "Try again in a few minutes."
@@ -65,6 +71,35 @@ class Reply:
 
 def _e(text: object) -> str:
     return html.escape(str(text), quote=False)
+
+
+def _split_transfer(text: str) -> tuple[str, str] | None:
+    """`Wissa -> Gonzalo` (also →, >, or a comma) or `Wissa Gonzalo` -> (out, in)."""
+    for separator in ("->", "→", ">", ","):
+        if separator in text:
+            out, _, into = text.partition(separator)
+            out, into = out.strip(), into.strip()
+            return (out, into) if out and into else None
+    parts = text.split()
+    return (parts[0], parts[1]) if len(parts) == 2 else None
+
+
+def _resolve(context: PlanContext, name: str) -> tuple[int | None, str]:
+    """The element id of the season's player called `name` (web name, any case and accents
+    as typed; or an element id), or None and why."""
+    players = context.players
+    if name.isdigit() and int(name) in set(players["element_id"]):
+        return int(name), ""
+    wanted = name.casefold()
+    hits = players[players["web_name"].str.casefold() == wanted]
+    if hits.empty:
+        hits = players[players["web_name"].str.casefold().str.contains(wanted, regex=False)]
+    if len(hits) == 1:
+        return int(hits["element_id"].iloc[0]), ""
+    if hits.empty:
+        return None, f"No player called {name!r} this season."
+    options = ", ".join(sorted(hits["web_name"].astype(str))[:8])
+    return None, f"{name!r} matches several players ({options}): be more specific."
 
 
 def _utc_now() -> datetime:
@@ -91,6 +126,7 @@ class BotService:
         self.admin_chat_id = admin_chat_id
         self.now = now
         self.planner = planner
+        self._prices: tuple[datetime, dict[int, int]] | None = None
         self.chip_planner = chip_planner
 
     # --- access ---------------------------------------------------------------------------
@@ -189,11 +225,30 @@ class BotService:
     # --- the user's team ------------------------------------------------------------------
 
     def _context(self) -> PlanContext | None:
-        """The newest context, if it is for a deadline still ahead."""
+        """The newest context, if it is for a deadline still ahead, with FPL's live prices
+        (`priced`)."""
         context = self.contexts.latest()
         if context is None or context.deadline <= self.now():
             return None
-        return context
+        return self.priced(context)
+
+    def priced(self, context: PlanContext) -> PlanContext:
+        """`context` with FPL's current prices (`context.with_live_prices`), fetched at most
+        every `PRICE_TTL`. If FPL can't be reached the context's own prices are kept (logged;
+        the message then says prices are from the data's snapshot)."""
+        if context.prices_at is not None:
+            return context
+        now = self.now()
+        if self._prices is None or now - self._prices[0] > PRICE_TTL:
+            try:
+                bootstrap = json.loads(self.fpl.bootstrap_static())
+                prices = {int(e["id"]): int(e["now_cost"]) for e in bootstrap["elements"]}
+            except Exception as exc:  # noqa: BLE001 (any failure: plan on the data's prices)
+                log.warning("live prices unavailable (%s): using the context's", type(exc).__name__)
+                return context
+            self._prices = (now, prices)
+        fetched_at, prices = self._prices
+        return with_live_prices(context, prices, fetched_at)
 
     def register(self, chat_id: int, args: Sequence[str]) -> list[Reply]:
         user, replies = self._active(chat_id)
@@ -279,8 +334,9 @@ class BotService:
         if context is None:
             return [Reply(chat_id, NOT_READY)]
         ft = self.users.free_transfers(user.user_id, context.season, context.gw)
+        made = self.users.transfers(user.user_id, context.season, context.gw)
         try:
-            options = self.chip_planner(self.fpl, user.entry_id, context, ft)
+            options = self.chip_planner(self.fpl, user.entry_id, context, ft, made=made)
         except EntryError as exc:
             return [Reply(chat_id, f"Can't plan team {user.entry_id}: {_e(exc)}")]
         self.users.record_chip_check(
@@ -297,12 +353,14 @@ class BotService:
         return [Reply(chat_id, chips_text(options))]
 
     def make_plan(self, user: User, context: PlanContext, kind: str) -> UserPlan:
-        """Plan the user's team on `context` and log it (`kind`; EntryError is logged as
-        the recommendation's error and re-raised)."""
+        """Plan the user's team on `context` (with FPL's live prices) and log it (`kind`;
+        EntryError is logged as the recommendation's error and re-raised)."""
         assert user.entry_id is not None
+        context = self.priced(context)
         ft = self.users.free_transfers(user.user_id, context.season, context.gw)
+        made = self.users.transfers(user.user_id, context.season, context.gw)
         try:
-            result = self.planner(self.fpl, user.entry_id, context, ft)
+            result = self.planner(self.fpl, user.entry_id, context, ft, made=made)
         except EntryError as exc:
             self.users.record(
                 user.user_id,
@@ -327,6 +385,68 @@ class BotService:
                 sent=True,
             )
         return result
+
+    def transfer(self, chat_id: int, args: Sequence[str]) -> list[Reply]:
+        """`/transfer <out> -> <in>` (or `/transfer <out> <in>` for one-word names): record a
+        transfer already made for the next GW; `list`, `undo`, `clear`. Checked against the
+        squad (position, club limit, money) before it is stored."""
+        user, replies = self._active(chat_id)
+        if user is None:
+            return replies
+        if user.entry_id is None:
+            return [Reply(chat_id, "Register your team first: /register &lt;team ID&gt;")]
+        context = self._context()
+        if context is None:
+            return [Reply(chat_id, NOT_READY)]
+        season, gw = context.season, context.gw
+        made = self.users.transfers(user.user_id, season, gw)
+        names = context.names
+        keys = context.element_keys
+
+        def listed(moves: Sequence[tuple[int, int]]) -> str:
+            text = ", ".join(
+                f"{names.get(keys.get(o, -1), o)} → {names.get(keys.get(i, -1), i)}"
+                for o, i in moves
+            )
+            return _e(text or "none")
+
+        command = " ".join(args).strip()
+        if command.lower() in ("", "list"):
+            return [Reply(chat_id, f"GW{gw} transfers you've told me about: {listed(made)}")]
+        if command.lower() in ("undo", "clear"):
+            n = self.users.drop_transfers(user.user_id, season, gw, command.lower() == "undo")
+            left = self.users.transfers(user.user_id, season, gw)
+            return [Reply(chat_id, f"Removed {n}. GW{gw} transfers now: {listed(left)}")]
+        pair = _split_transfer(command)
+        if pair is None:
+            return [
+                Reply(
+                    chat_id,
+                    "Usage: /transfer Wissa -&gt; Gonzalo (or /transfer Wissa Gonzalo); "
+                    "/transfer list, /transfer undo, /transfer clear",
+                )
+            ]
+        resolved = []
+        for name in pair:
+            element, problem = _resolve(context, name)
+            if element is None:
+                return [Reply(chat_id, _e(problem))]
+            resolved.append(element)
+        move = (resolved[0], resolved[1])
+        ft = self.users.free_transfers(user.user_id, season, gw)
+        try:
+            spec, _, _ = import_user_squad(self.fpl, user.entry_id, context, ft, [*made, move])
+        except EntryError as exc:
+            return [Reply(chat_id, f"Can't record that transfer: {_e(exc)}")]
+        self.users.add_transfer(user.user_id, season, gw, *move)
+        return [
+            Reply(
+                chat_id,
+                f"Recorded for GW{gw}: {listed([move])}. All GW{gw} transfers: "
+                f"{listed([*made, move])}. Bank £{spec.bank / 10:.1f}m, "
+                f"{spec.free_transfers} FT left. /plan and the alerts now plan from this squad.",
+            )
+        ]
 
     def setft(self, chat_id: int, args: Sequence[str]) -> list[Reply]:
         user, replies = self._active(chat_id)
