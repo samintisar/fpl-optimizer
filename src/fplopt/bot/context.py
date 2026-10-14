@@ -28,7 +28,7 @@ import logging
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -45,6 +45,7 @@ __all__ = (
     "git_sha",
     "next_gameweek",
     "raw_fingerprint",
+    "with_live_prices",
 )
 
 log = logging.getLogger(__name__)
@@ -81,6 +82,9 @@ class PlanContext:
     players: pd.DataFrame = field(repr=False)
     prices: pd.DataFrame = field(repr=False)
     gameweeks: pd.DataFrame = field(repr=False)
+    # When the pool's prices were replaced by FPL's live ones (`with_live_prices`); None =
+    # the prices of the snapshot the context was built from.
+    prices_at: datetime | None = None
 
     @property
     def gw_index_map(self) -> dict[int, int]:
@@ -123,6 +127,26 @@ class PlanContext:
             "git_sha": self.git_sha,
             "xp_model": self.xp_model,
         }
+
+
+def with_live_prices(
+    context: PlanContext, prices: dict[int, int], fetched_at: datetime
+) -> PlanContext:
+    """The context with the pool's prices replaced by FPL's current ones (`prices`:
+    element_id -> now_cost in tenths of £m, from a bootstrap fetched at `fetched_at`). FPL
+    changes prices nightly (~01:30 UK) and a context is rebuilt only after the next archived
+    snapshot, so plans fetch prices live (squad selling prices, what is affordable). Players
+    missing from `prices` keep the context's price; the xP is unchanged."""
+    by_key = {
+        key: int(prices[element])
+        for element, key in context.element_keys.items()
+        if element in prices
+    }
+    pool = context.pool.copy()
+    pool["price"] = (
+        pool["player_key"].map(by_key).fillna(pool["price"]).astype(context.pool["price"].dtype)
+    )
+    return replace(context, pool=pool, prices_at=fetched_at)
 
 
 def next_gameweek(store: DataStore, now: datetime) -> tuple[int, int] | None:

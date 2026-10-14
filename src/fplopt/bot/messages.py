@@ -18,6 +18,7 @@ __all__ = (
     "MAX_MESSAGE",
     "UK",
     "changes_text",
+    "prices_line",
     "chips_text",
     "recommendation_text",
     "split_message",
@@ -85,6 +86,7 @@ def recommendation_text(
         f"Team {plan.entry_id} · bank £{spec.bank / 10:.1f}m · {spec.free_transfers} FT",
         f"Chips you can play this GW: {_e(chips)}",
         f"xP data from {uk_time(context.bootstrap_at or context.created_at)} (UK)",
+        prices_line(context),
         "",
     ]
     if not plans.plans:
@@ -126,12 +128,21 @@ def recommendation_text(
         lines.append(f"The solver stopped early ({_e(best.status)}): plan 1 may not be the best.")
     lines += [
         "Chips are your call: the system doesn't plan them yet.",
-        f"Transfers you've already made for GW{gw} can't be seen before the deadline.",
+        f"Made transfers for GW{gw} already? FPL doesn't show them before the deadline: "
+        "tell the bot with /transfer.",
     ]
     notes = [n for n in spec.notes if not n.startswith("transfers or a chip made for")]
     if notes:
         lines += ["", "Notes:"] + [f"· {_e(n)}" for n in notes]
     return "\n".join(lines)
+
+
+def prices_line(context: Any) -> str:
+    """Where the prices came from: FPL live (when) or the data's snapshot."""
+    if context.prices_at is not None:
+        return f"Prices live from FPL at {uk_time(context.prices_at)} (UK)"
+    stamp = uk_time(context.bootstrap_at or context.created_at)
+    return f"Prices from the data's snapshot ({stamp} UK): FPL couldn't be reached"
 
 
 def changes_text(
@@ -213,6 +224,7 @@ def chips_text(options: ChipOptions, shown: int = 6) -> str:
             else "The chip planner isn't tested yet: weigh this against your own judgement."
         ),
         f"Unused chips: {_e(', '.join(unused) or 'none')}",
+        prices_line(context),
         "",
         f"<b>Best over the next {horizon} GWs:</b> {_e(scenario_label(best.scenario))}"
         + (

@@ -31,6 +31,7 @@ COMMANDS: dict[str, tuple[str, bool]] = {
     "plan": ("plan", False),
     "chips": ("chips", False),
     "setft": ("setft", True),
+    "transfer": ("transfer", True),
     "alerts": ("alerts", True),
     "allow": ("allow", True),
     "block": ("block", True),

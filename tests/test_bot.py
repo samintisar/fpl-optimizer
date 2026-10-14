@@ -125,8 +125,8 @@ def contexts(tmp_path, context):
 TEST_PARAMS = replace(LIVE_PARAMS, horizon=1, time_limit=None)
 
 
-def rolling_planner(fpl, entry_id, context, ft=None):
-    return plan_user(fpl, entry_id, context, ft, params=TEST_PARAMS)
+def rolling_planner(fpl, entry_id, context, ft=None, made=()):
+    return plan_user(fpl, entry_id, context, ft, params=TEST_PARAMS, made=made)
 
 
 @pytest.fixture
@@ -320,7 +320,7 @@ def test_recommendation_text(entries, context):
     assert f"Team {TEAM} · bank £0.5m" in text
     assert f"Captain {names[best.captain]} · vice {names[best.vice]}" in text
     assert "Save the FT" in text or plan.plans.roll is ranked(plan.plans)[0]
-    assert "Chips are your call" in text and "can't be seen before the deadline" in text
+    assert "Chips are your call" in text and "tell the bot with /transfer" in text
     assert "aren't public" not in text  # the squad-file note is for the CLI
     assert len(text) < 4096
     titled = recommendation_text(plan, title="GW6 update", changes=["Captain changed: a > b"])
@@ -868,10 +868,10 @@ def test_send_replies_skips_chats_that_refuse():
 # --- /chips (information only) ----------------------------------------------------------------
 
 
-def chip_planner(fpl, entry_id, context, ft=None):
+def chip_planner(fpl, entry_id, context, ft=None, made=()):
     from fplopt.bot.planner import chip_options
 
-    return chip_options(fpl, entry_id, context, ft, params=TEST_PARAMS)
+    return chip_options(fpl, entry_id, context, ft, params=TEST_PARAMS, made=made)
 
 
 def test_scenario_label():
@@ -972,3 +972,167 @@ def test_chips_text_explains_the_estimated_values(entries, context):
     assert "guessed value" not in text and "Tested on 2023-25" in text
     plain = chips_text(chip_options(entries, TEAM, context, params=TEST_PARAMS))
     assert "guessed value" in plain
+
+
+# --- live prices --------------------------------------------------------------------------------
+
+
+class PricedEntries(FakeEntries):
+    """FakeEntries plus FPL's bootstrap: every pool player at their context price, except
+    the first squad player, now £0.3m dearer."""
+
+    def __init__(self, squad, context, fail=False):
+        super().__init__(squad)
+        self.context = context
+        self.fail = fail
+        self.bootstraps = 0
+
+    def bootstrap_static(self):
+        self.bootstraps += 1
+        if self.fail:
+            raise httpx.ConnectError("down")
+        price = dict(zip(self.context.pool["player_key"], self.context.pool["price"], strict=True))
+        elements = [
+            {"id": e, "now_cost": int(price[k]) + (3 if e == self.squad[0] else 0)}
+            for e, k in self.context.element_keys.items()
+            if k in price
+        ]
+        return json.dumps({"elements": elements}).encode()
+
+
+def test_with_live_prices(context):
+    from datetime import UTC, datetime
+
+    from fplopt.bot.context import with_live_prices
+
+    element, key = next(iter(context.element_keys.items()))
+    old = dict(zip(context.pool["player_key"], context.pool["price"], strict=True))
+    at = datetime(2026, 10, 14, 1, 0, tzinfo=UTC)
+    priced = with_live_prices(context, {element: 999}, at)
+    new = dict(zip(priced.pool["player_key"], priced.pool["price"], strict=True))
+    if key in old:
+        assert new[key] == 999
+    assert all(new[k] == old[k] for k in old if k != key)  # the rest unchanged
+    assert priced.pool["price"].dtype == context.pool["price"].dtype
+    assert priced.prices_at == at and context.prices_at is None
+    pd.testing.assert_frame_equal(priced.xp, context.xp)
+
+
+def test_plans_use_fpl_live_prices(users, contexts, squad, context, member):
+    entries = PricedEntries(squad, context)
+    clock = context.deadline - timedelta(hours=20)
+    service = BotService(
+        users, contexts, entries, ADMIN, now=lambda: clock, planner=rolling_planner
+    )
+    users.set_entry(users.user(member).user_id, TEAM)
+    text = texts(service.plan(member))[0]
+    assert "Prices live from FPL at" in text
+    # The planned squad holds the dearer player at FPL's live price.
+    plan = service.make_plan(users.user(member), context, "plan")
+    held = {h.player_key: h.price for h in plan.state.holdings}
+    key = context.element_keys[squad[0]]
+    base = dict(zip(context.pool["player_key"], context.pool["price"], strict=True))[key]
+    assert held[key] == base + 3
+    assert entries.bootstraps == 1  # cached across both plans (PRICE_TTL)
+    logged = [r for r in users.recommendations(users.user(member).user_id) if r.kind == "plan"]
+    assert logged
+
+
+def test_plans_fall_back_to_the_data_prices_when_fpl_is_down(
+    users, contexts, squad, context, member
+):
+    entries = PricedEntries(squad, context, fail=True)
+    service = BotService(
+        users,
+        contexts,
+        entries,
+        ADMIN,
+        now=lambda: context.deadline - timedelta(hours=20),
+        planner=rolling_planner,
+    )
+    users.set_entry(users.user(member).user_id, TEAM)
+    text = texts(service.plan(member))[0]
+    assert text.startswith(f"<b>GW{GW} plan</b>")
+    assert "Prices from the data's snapshot" in text and "FPL couldn't be reached" in text
+
+
+# --- /transfer --------------------------------------------------------------------------------
+
+
+def swap_for(context, squad):
+    """(out, in) element ids: the squad's first player for the cheapest pool player of the
+    same position and club-limit-safe (a different club from every squad player)."""
+    pool = context.pool.set_index("player_key")
+    keys = context.element_keys
+    elements = {k: e for e, k in keys.items()}
+    out = squad[0]
+    position = pool.at[keys[out], "element_type"]
+    clubs = {pool.at[keys[e], "team_key"] for e in squad}
+    options = pool[
+        (pool["element_type"] == position)
+        & ~pool["team_key"].isin(clubs)
+        & ~pool.index.isin([keys[e] for e in squad])
+    ].sort_values("price")
+    return out, elements[int(options.index[0])]
+
+
+def test_apply_made_transfers(entries, context, squad):
+    from fplopt.bot.planner import apply_made_transfers, import_user_squad
+
+    spec, _, _ = import_user_squad(entries, TEAM, context)
+    out, into = swap_for(context, squad)
+    after = apply_made_transfers(spec, [(out, into)], context)
+    price = dict(zip(context.pool["player_key"], context.pool["price"], strict=True))
+    keys = context.element_keys
+    held = {p.element_id: p for p in spec.players}
+    from fplopt.backtest.state import Holding, selling_price
+
+    sale = selling_price(Holding(0, 0, 0, held[out].purchase_price, int(price[keys[out]])))
+    assert after.bank == spec.bank + sale - int(price[keys[into]])
+    assert after.free_transfers == spec.free_transfers - 1
+    assert {p.element_id for p in after.players} == (
+        {p.element_id for p in spec.players} - {out}
+    ) | {into}
+    assert "free transfer(s) left" in after.notes[-1]
+    with pytest.raises(EntryError, match="isn't in the squad"):
+        apply_made_transfers(spec, [(into, out)], context)
+    with pytest.raises(EntryError, match="already in the squad"):
+        apply_made_transfers(spec, [(out, squad[1])], context)
+    # The planner plans from the squad after the move.
+    plan = rolling_planner(entries, TEAM, context, made=[(out, into)])
+    assert keys[into] in plan.state.player_keys and keys[out] not in plan.state.player_keys
+
+
+def test_transfer_command(service, users, member, context, squad):
+    service.register(member, [str(TEAM)])
+    names = context.names
+    keys = context.element_keys
+    out, into = swap_for(context, squad)
+    out_name, in_name = names[keys[out]], names[keys[into]]
+    assert "transfers you've told me about: none" in texts(service.transfer(member, ["list"]))[0]
+    text = texts(service.transfer(member, [out_name, "->", in_name]))[0]
+    assert text.startswith(f"Recorded for GW{GW}: {out_name} → {in_name}")
+    user = users.user(member)
+    assert users.transfers(user.user_id, SEASON, GW) == [(out, into)]
+    # Refused moves are not stored.
+    refused = texts(service.transfer(member, [out_name, in_name]))[0]
+    assert refused.startswith("Can't record that transfer")
+    assert texts(service.transfer(member, ["Nobody", "->", in_name]))[0].startswith("No player")
+    assert texts(service.transfer(member, ["a", "b", "c"]))[0].startswith("Usage")
+    # /plan and the alerts plan from the squad after it.
+    plan_text = texts(service.plan(member))[0]
+    assert f"(/transfer): {out_name} → {in_name}" in plan_text
+    assert texts(service.transfer(member, ["undo"]))[0].startswith("Removed 1.")
+    assert users.transfers(user.user_id, SEASON, GW) == []
+    service.transfer(member, [out_name, "->", in_name])
+    assert texts(service.transfer(member, ["clear"]))[0].startswith("Removed 1.")
+
+
+def test_split_transfer():
+    from fplopt.bot.service import _split_transfer
+
+    assert _split_transfer("Wissa -> Gonzalo") == ("Wissa", "Gonzalo")
+    assert _split_transfer("João Pedro → Calvert-Lewin") == ("João Pedro", "Calvert-Lewin")
+    assert _split_transfer("Wissa Gonzalo") == ("Wissa", "Gonzalo")
+    assert _split_transfer("Joao Pedro Gonzalo") is None  # ambiguous without a separator
+    assert _split_transfer("Wissa ->") is None

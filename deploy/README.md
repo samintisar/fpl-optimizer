@@ -113,7 +113,7 @@ With [healthchecks.io](https://healthchecks.io) (free tier is plenty):
 ## Telegram bot (Phase 7)
 
 The bot uses the same `TELEGRAM_BOT_TOKEN` as the failure alerts. Its design is in `docs/superpowers/plans/2026-10-11-phase-7-bot.md`. It has two parts:
-- **`fplopt-bot.service`**: long polling (no public URL). It answers `/register`, `/plan`, `/chips` (information only, ~40–60 s), `/setft`, `/alerts`, `/help`, plus the admin's `/allow`, `/block` and `/users`.
+- **`fplopt-bot.service`**: long polling (no public URL). It answers `/register`, `/plan`, `/chips` (information only, ~40–60 s), `/transfer` (moves already made for the coming GW), `/setft`, `/alerts`, `/help`, plus the admin's `/allow`, `/block` and `/users`.
 - **`fplopt-live.timer`** (`fplopt live tick`): every 15 minutes, 5 minutes after the archiver tick. It does three things:
   - rebuilds `data/` and the **plan context** (the v1 xP for the next deadline, shared by every user) whenever something new was archived;
   - sends the full recommendation **24 hours before each deadline**, after taking a fresh FPL snapshot;
