@@ -36,6 +36,11 @@ judge = load("judge")
         "ssh botbox 'ls'",
         "cat .env",
         "uv run fplopt backtest run --seasons 2016-2022 --data-dir ~/fpl-live/data",
+        "sed -i 's/MIN_GAIN = 0.0005/MIN_GAIN = 0/' autoresearch/judge.py",
+        "echo x > dev/calibrate_v1.py",
+        "git checkout try/x -- src/fplopt/backtest/scoring.py",
+        "ssh fplopt-server 'cd ~/fpl-harness && git checkout -q try/x'",
+        "cp guard.py C:/Users/samin/.fpl-harness/guard.py",
     ],
 )
 def test_the_guard_refuses(command):
@@ -48,7 +53,13 @@ def test_the_guard_refuses(command):
         "uv run fplopt backtest compare --a x --b y --seasons 2016-2022 --jobs 14",
         "uv run fplopt models eval --models v1,rolling --seasons 2017,2021-22",
         "bash autoresearch/sync.sh all",
-        "ssh fplopt-server 'cd ~/fpl-research && bash autoresearch/model_eval.sh'",
+        "ssh fplopt-server 'cd ~/fpl-research && bash ~/fpl-harness/autoresearch/model_eval.sh'",
+        "ssh fplopt-server 'cd ~/fpl-research && ~/.local/bin/uv run python "
+        "~/fpl-harness/autoresearch/judge.py compare a/metrics.json b/metrics.json'",
+        "cat autoresearch/judge.py",
+        "uv run ruff format src/fplopt/models/minutes.py",
+        "git checkout -b try/x",
+        "ls results > /dev/null",
         "ssh fplopt-server 'cd ~/fpl-live && bash autoresearch/weekly.sh'",
         "git commit -m 'try: x' && git reset --hard HEAD~1",
         "gh issue view 39",

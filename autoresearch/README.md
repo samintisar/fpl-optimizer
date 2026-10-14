@@ -15,6 +15,17 @@ fplopt-server (3090 box, 24 threads, 62 GB)
   ~/fpl-optimizer   hub repo (receives pushes)
   ~/fpl-research    `research` / `try/*` detached; data/ = develop seasons only
   ~/fpl-live        `main` detached (the bot's code); raw/ from botbox; full data/
+  ~/fpl-harness     the scoring (model_eval.sh, dev/calibrate_v1.py, judge.py), pinned by you
+```
+
+The scoring runs from `~/fpl-harness`, not from the candidate's checkout, so a candidate
+can't change how it is judged; the hook runs from `C:\Users\samin\.fpl-harness\guard.py`
+for the same reason. Updating either is yours:
+
+```bash
+git push -f fplopt-server:fpl-optimizer <commit>:refs/heads/harness
+ssh fplopt-server 'git -C ~/fpl-harness checkout -q --detach harness'
+cp autoresearch/guard.py ~/.fpl-harness/guard.py
 ```
 
 - **Nightly** (scheduled task in the desktop app): orient, the weekly monitor if a GW has
@@ -42,9 +53,11 @@ fplopt-server (3090 box, 24 threads, 62 GB)
 ## Setup (done 2026-10-14; repeat on a new machine)
 
 1. `git worktree add ../fpl-autoresearch research` from the repo (branch `research`).
-2. In that folder, `.claude/settings.local.json` with the guard hook (PreToolUse on Bash,
-   PowerShell, Edit, Write, NotebookEdit: `python autoresearch/guard.py`).
-3. On fplopt-server: `git -C ~/fpl-optimizer worktree add --detach ~/fpl-research` and
-   `~/fpl-live`; copy `raw/` into `~/fpl-live`; `bash autoresearch/sync.sh all`; then
-   `bash autoresearch/weekly.sh` once in `~/fpl-live` (builds data/ and the develop copy).
+2. Copy `autoresearch/guard.py` to `~/.fpl-harness/guard.py`; in the research clone,
+   `.claude/settings.local.json` with the hook (PreToolUse on Bash, PowerShell, Edit, Write,
+   NotebookEdit: `python ~/.fpl-harness/guard.py`) and an allow-list for the loop's commands.
+3. On fplopt-server: `git -C ~/fpl-optimizer worktree add --detach` for `~/fpl-research`,
+   `~/fpl-live` and `~/fpl-harness` (the last at `harness`, above); copy `raw/` into
+   `~/fpl-live`; `bash autoresearch/sync.sh all`; then `bash autoresearch/weekly.sh` once in
+   `~/fpl-live` (builds data/ and the develop copy).
 4. The scheduled task (desktop app), nightly, pointed at the research clone.

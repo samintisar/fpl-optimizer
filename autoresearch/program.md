@@ -24,6 +24,7 @@ try at most 3 values of any one setting; log every variant, kept or not.
 | Research clone | this folder, branch `research` | where you edit, test and commit |
 | `~/fpl-research` | fplopt-server, `research` detached | experiments; `data/` holds develop seasons only (`DEVELOP_ONLY`) |
 | `~/fpl-live` | fplopt-server, `main` detached | the live bot's code; `raw/` from botbox; full `data/` |
+| `~/fpl-harness` | fplopt-server, pinned by the user | the scoring: `model_eval.sh`, `dev/calibrate_v1.py`, `judge.py`. Your edits to their copies on `research` change nothing; never touch it |
 | botbox | read only, via `sync.sh` | the live bot and archiver: never touch it |
 
 Run server commands as `ssh fplopt-server 'cd ~/fpl-research && …'` with
@@ -37,7 +38,8 @@ Run server commands as `ssh fplopt-server 'cd ~/fpl-research && …'` with
 2. Never edit the frozen files: everything in `autoresearch/` except `ideas.md`, `ledger.tsv`
    and `reports/`; `.claude/`; `src/fplopt/bot/`; `deploy/`; `config/scoring/`,
    `config/chips/`; `src/fplopt/backtest/holdout.py`; `src/fplopt/models/calibration_table.py`;
-   `raw/`, `data/`.
+   how outcomes are scored (`src/fplopt/backtest/{scoring,rules,gw_score,xg_points,evaluate}.py`,
+   `dev/calibrate_v1.py`); `raw/`, `data/`.
 3. Git: work on `research` only. Never touch `main`, never push except with
    `bash autoresearch/sync.sh`, never open PRs or issues, never `gh` writes.
 4. Never touch botbox, `.env` or secrets; no `sudo`, `systemctl`, `crontab`.
@@ -83,13 +85,13 @@ Take the top idea in `ideas.md` you can test tonight. One change per experiment.
 
 **Model experiments** (anything that changes v1's xP):
 1. Baseline: `bash autoresearch/sync.sh code`, then
-   `ssh fplopt-server 'cd ~/fpl-research && bash autoresearch/model_eval.sh'` at the
+   `ssh fplopt-server 'cd ~/fpl-research && bash ~/fpl-harness/autoresearch/model_eval.sh'` at the
    `research` head (~3 min; reused if already scored). It prints the metrics dir.
 2. `git checkout -b try/<id>` from `research`, make the change, run the tests it touches
    (`uv run pytest tests/test_models_*.py -q` at least) and commit.
 3. `bash autoresearch/sync.sh try try/<id>`, then the same `model_eval.sh` command: the
    candidate's metrics dir.
-4. `ssh fplopt-server 'cd ~/fpl-research && ~/.local/bin/uv run python autoresearch/judge.py compare results/research/<base>/metrics.json results/research/<cand>/metrics.json'`.
+4. `ssh fplopt-server 'cd ~/fpl-research && ~/.local/bin/uv run python ~/fpl-harness/autoresearch/judge.py compare results/research/<base>/metrics.json results/research/<cand>/metrics.json'`.
 5. `git checkout research`. KEEP: `git merge --ff-only try/<id>`. DISCARD: `git branch -D
    try/<id>`. Either way add the ledger row, commit it on `research`, and `bash
    autoresearch/sync.sh code`.

@@ -20,10 +20,25 @@ FROZEN = (
     r"(^|/)src/fplopt/bot/",
     r"(^|/)src/fplopt/backtest/holdout\.py$",
     r"(^|/)src/fplopt/models/calibration_table\.py$",
+    # How outcomes are scored: a candidate must not change what it is judged against.
+    r"(^|/)src/fplopt/backtest/(scoring|rules|gw_score|xg_points|evaluate)\.py$",
+    r"(^|/)dev/calibrate_v1\.py$",
     r"(^|/)deploy/",
     r"(^|/)config/(scoring|chips)/",
     r"(^|/)(raw|data)/",
     r"(^|/)\.env",
+)
+# The pinned harness and hook (README *Setup*): only these calls may name them.
+PINNED = r"fpl-harness|\.fpl-harness"
+PINNED_CALLS = (
+    r"bash\s+~/fpl-harness/autoresearch/model_eval\.sh",
+    r"python\s+~/fpl-harness/autoresearch/judge\.py\s+compare",
+)
+# A shell command that writes (in place, redirect, copy/move/delete, git restore) and names
+# a frozen file.
+WRITES = (
+    r"\b(sed|perl)\s+-\w*i|>|\btee\b|\b(mv|cp|rm|truncate|install)\b|\bgit\s+(checkout|restore)\s"
+    r"|Set-Content|Out-File|Add-Content|Remove-Item|Move-Item|Copy-Item|write_text|open\("
 )
 COMMANDS = (
     (r"botbox", "botbox is the live box: only autoresearch/sync.sh reads from it"),
@@ -74,6 +89,15 @@ def check_command(command: str) -> str | None:
     for pattern, why in COMMANDS:
         if re.search(pattern, flat):
             return why
+    rest = flat
+    for call in PINNED_CALLS:
+        rest = re.sub(call, " ", rest)
+    if re.search(PINNED, rest):
+        return "the pinned harness is the user's: only model_eval.sh and judge.py compare"
+    if re.search(WRITES, flat):
+        for path in re.findall(r"[\w./~-]+", flat):
+            if check_path(path):
+                return f"{path} is frozen for the loop (autoresearch/program.md)"
     if re.search(SEASON_COMMANDS, flat):
         found = re.findall(r"--seasons[=\s]+(\S+)", flat)
         if not found:
