@@ -197,6 +197,9 @@ class V1Params:
     minutes: MinutesParams = field(default_factory=_v1_minutes)
     shares: SharesParams = field(default_factory=SharesParams)
     components: ComponentsParams = field(default_factory=ComponentsParams)
+    # The flag layer's own cells for an available player who missed his last match
+    # (`availability` module docstring, issue #39).
+    back_split: bool = False
     calibrate: bool = True  # apply the season's calibration_table entry
 
 
@@ -215,7 +218,9 @@ def calibration_fingerprint(params: V1Params) -> str:
     """The settings a calibration table is valid for: every `V1Params` field except
     `calibrate` (its repr; frozen dataclasses of numbers and strings). `calibration_table.
     CALIBRATION_PARAMS` holds the fingerprint of the walk it was fitted on."""
-    return repr(replace(params, calibrate=True))
+    text = repr(replace(params, calibrate=True))
+    # `back_split` came after the table; off, it is the setting the table was fitted with.
+    return text.replace(", back_split=False", "")
 
 
 def fit_v1(view: AsOfView, params: V1Params | None = None) -> V1Fit:
@@ -224,7 +229,7 @@ def fit_v1(view: AsOfView, params: V1Params | None = None) -> V1Fit:
     team = fit_team(view, params.team)
     history = training_frame(view)  # shared by the minutes and availability fits
     minutes = fit_minutes(view, params.minutes, history)
-    availability = fit_availability(view, minutes, history)
+    availability = fit_availability(view, minutes, history, back_split=params.back_split)
     shares = fit_shares(view, params.shares)
     components = fit_components(view, params.components)
     return V1Fit(view.deadline, params, team, minutes, availability, shares, components)
