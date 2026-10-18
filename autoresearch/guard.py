@@ -37,10 +37,12 @@ PINNED_CALLS = (
     r"bash\s+~/fpl-harness/autoresearch/weekly\.sh",
     r"python\s+~/fpl-harness/autoresearch/status\.py",
 )
-# A shell command that writes (in place, redirect, copy/move/delete, git restore) and names
-# a frozen file.
+# A shell command that writes a frozen file: a redirect into it (`>`, `>>`, `2>`; not
+# `2>&1`), or a command that writes the files it names (in place, copy/move/delete,
+# git restore, PowerShell and Python file writes).
+REDIRECT_TARGET = r"\d?>>?\s*(?!&)([^\s|;&<>]+)"
 WRITES = (
-    r"\b(sed|perl)\s+-\w*i|>|\btee\b|\b(mv|cp|rm|truncate|install)\b|\bgit\s+(checkout|restore)\s"
+    r"\b(sed|perl)\s+-\w*i|\btee\b|\b(mv|cp|rm|truncate|install)\b|\bgit\s+(checkout|restore)\s"
     r"|Set-Content|Out-File|Add-Content|Remove-Item|Move-Item|Copy-Item|write_text|open\("
 )
 COMMANDS = (
@@ -99,10 +101,12 @@ def check_command(command: str) -> str | None:
         return (
             "the pinned harness is the user's: only its model_eval, judge compare, weekly, status"
         )
+    targets = re.findall(REDIRECT_TARGET, flat)
     if re.search(WRITES, flat):
-        for path in re.findall(r"[\w./~-]+", flat):
-            if check_path(path):
-                return f"{path} is frozen for the loop (autoresearch/program.md)"
+        targets += re.findall(r"[\w./~-]+", flat)
+    for path in targets:
+        if check_path(path):
+            return f"{path} is frozen for the loop (autoresearch/program.md)"
     if re.search(SEASON_COMMANDS, flat):
         found = re.findall(r"--seasons[=\s]+(\S+)", flat)
         if not found:

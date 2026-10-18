@@ -38,6 +38,8 @@ judge = load("judge")
         "uv run fplopt backtest run --seasons 2016-2022 --data-dir ~/fpl-live/data",
         "sed -i 's/MIN_GAIN = 0.0005/MIN_GAIN = 0/' autoresearch/judge.py",
         "echo x > dev/calibrate_v1.py",
+        "echo x >> autoresearch/judge.py",
+        "python -c 'print(1)' 2>autoresearch/program.md",
         "git checkout try/x -- src/fplopt/backtest/scoring.py",
         "ssh fplopt-server 'cd ~/fpl-harness && git checkout -q try/x'",
         "cp guard.py C:/Users/samin/.fpl-harness/guard.py",
@@ -60,6 +62,9 @@ def test_the_guard_refuses(command):
         "uv run ruff format src/fplopt/models/minutes.py",
         "git checkout -b try/x",
         "ls results > /dev/null",
+        "bash autoresearch/sync.sh code 2>&1 | tail -3",
+        "uv run fplopt backtest run --seasons 2016-2022 > results/x.log 2>&1",
+        "git commit -q -m 'x' -m 'Co-Authored-By: C <a@b.c>' autoresearch/ideas.md",
         "ssh fplopt-server 'cd ~/fpl-live && bash ~/fpl-harness/autoresearch/weekly.sh'",
         "ssh fplopt-server 'cd ~/fpl-live && ~/.local/bin/uv run python "
         "~/fpl-harness/autoresearch/status.py'",
