@@ -107,7 +107,20 @@ N_RANDOM = 3  # random squads per deadline for the regret metrics (besides the t
 # Predicted-xP bands (per player-GW, the model's own prediction): [lo, hi).
 XP_BANDS = (-math.inf, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, math.inf)
 # Realized per player-GW columns joined to the predictions (null if the GW is not played).
-REALIZED = ("points", "minutes", "starts", "n_fixtures", "goals_scored", "assists", "clean_sheets")
+# `defcon`: 1 if the GW's defensive contributions reached the position's threshold under the
+# season's rules, null without the stat (before 2025/26) or a threshold (goalkeepers).
+REALIZED = (
+    "points",
+    "minutes",
+    "starts",
+    "n_fixtures",
+    "goals_scored",
+    "assists",
+    "clean_sheets",
+    "bonus",
+    "defcon",
+)
+_NULLABLE = ("starts", "defcon")  # null for a player without a row too
 PREDICTION_COLUMNS = (
     ("model", "str"),
     ("season", "int64"),
@@ -239,6 +252,15 @@ def _empty(columns: Sequence[tuple[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame({name: pd.Series(dtype=dtype) for name, dtype in columns})
 
 
+def _with_defcon(totals: pd.DataFrame, rules: Rules) -> pd.DataFrame:
+    """`gw_totals` plus `defcon` (float64; `REALIZED`)."""
+    thresholds = {int(e): t for e, t in rules.defcon_threshold.items() if t is not None}
+    threshold = totals["element_type"].map(thresholds).astype("float64")
+    stat = totals["defensive_contribution"].astype("float64")
+    reached = (stat >= threshold).astype("float64")
+    return totals.assign(defcon=reached.where(stat.notna() & threshold.notna()))
+
+
 class _Realized:
     """Per player-GW realized outcomes of one season, read once per GW."""
 
@@ -258,7 +280,7 @@ class _Realized:
                     self.store, self.rules, self.season, gw, self.lockdowns[gw]
                 )
                 if not fixtures.empty:
-                    frame = gw_totals(fixtures).set_index("player_key")
+                    frame = _with_defcon(gw_totals(fixtures), self.rules).set_index("player_key")
             self.frames[gw] = frame
         return self.frames[gw]
 
@@ -275,7 +297,7 @@ class _Realized:
             values = {}
             for name in REALIZED:
                 mapped = part["player_key"].map(totals[name].astype("float64"))
-                values[name] = mapped if name == "starts" else mapped.fillna(0.0)
+                values[name] = mapped if name in _NULLABLE else mapped.fillna(0.0)
             parts.append(part.assign(**values))
         return pd.concat(parts).sort_index()
 
@@ -502,6 +524,8 @@ def compute_metrics(
                     if all(c in rows.columns for c in component.columns):
                         if rows[list(component.columns)].isna().all().all():
                             continue
+                        if rows[component.target].isna().all():
+                            continue  # e.g. defcon before 2025/26
                         values = component_metrics(rows, component)
                         component_rows.append(
                             {"model": model, "component": component.name, "split": split}

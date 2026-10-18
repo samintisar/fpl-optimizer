@@ -417,6 +417,8 @@ COMPONENTS = (
     Component("p_goal", "prob", ("p_goal",), "goals_scored"),
     Component("e_goals", "count", ("e_goals",), "goals_scored", single_fixture=False),
     Component("e_assists", "count", ("e_assists",), "assists", single_fixture=False),
+    Component("e_bonus", "count", ("e_bonus",), "bonus", single_fixture=False),
+    Component("p_defcon", "prob", ("p_defcon",), "defcon"),
 )
 
 
