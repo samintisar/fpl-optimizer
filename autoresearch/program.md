@@ -56,7 +56,10 @@ Run server commands as `ssh fplopt-server 'cd ~/fpl-research && …'` with
 
 - `git status` must be clean on `research`. Read the last 20 rows of `ledger.tsv`, the newest
   report in `reports/`, and `ideas.md`.
-- `bash autoresearch/sync.sh all`: code to the server, new raw files from botbox.
+- `bash autoresearch/sync.sh all`: code to the server, new raw files from botbox. If
+  the raw step fails (botbox unreachable), run `bash autoresearch/sync.sh code`, skip
+  step 2 (the monitor needs botbox's newest data), say so at the top of your summary,
+  and go on to the experiments: they only need the develop data on the server.
 - `ssh fplopt-server 'cd ~/fpl-live && ~/.local/bin/uv run python ~/fpl-harness/autoresearch/status.py'`:
   `last_checked_gw`. If it is newer than the newest report's GW, do step 2 first.
 
