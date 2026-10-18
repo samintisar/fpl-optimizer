@@ -23,13 +23,14 @@ try at most 3 values of any one setting; log every variant, kept or not.
 |---|---|---|
 | Research clone | this folder, branch `research` | where you edit, test and commit |
 | `~/fpl-research` | fplopt-server, `research` detached | experiments; `data/` holds develop seasons only (`DEVELOP_ONLY`) |
-| `~/fpl-live` | fplopt-server, `main` detached | the live bot's code; `raw/` from botbox; full `data/` |
+| `~/fpl-live` | fplopt-server, `main` detached | the live bot's code; `raw/` copied from the archiver's; full `data/` |
 | `~/fpl-harness` | fplopt-server, pinned by the user | the scoring and monitor: `model_eval.sh`, `dev/calibrate_v1.py`, `judge.py`, `weekly.sh`, `status.py`. Your edits to their copies on `research` change nothing; never touch it |
-| botbox | read only, via `sync.sh` | the live bot and archiver: never touch it |
+| `~/fpl-optimizer` | fplopt-server | **the live bot and archiver** (its timers, its `raw/`, its checkout): never touch it; `sync.sh raw` reads its `raw/` |
 
 Run server commands as `ssh fplopt-server 'cd ~/fpl-research && …'` with
-`~/.local/bin/uv` (not on the non-interactive PATH). The server has 24 threads and 62 GB:
-`--jobs 14` is fine; it is shared, so never more than 20.
+`nice -n 15 ~/.local/bin/uv` (uv isn't on the non-interactive PATH). The server has 24
+threads and 62 GB and is shared with the live bot and archiver: always `nice -n 15`, never
+more than `--jobs 12`, and never anything in `~/fpl-optimizer`.
 
 ## Hard rules (a hook enforces most of them)
 
@@ -42,7 +43,8 @@ Run server commands as `ssh fplopt-server 'cd ~/fpl-research && …'` with
    `dev/calibrate_v1.py`); `raw/`, `data/`.
 3. Git: work on `research` only. Never touch `main`, never push except with
    `bash autoresearch/sync.sh`, never open PRs or issues, never `gh` writes.
-4. Never touch botbox, `.env` or secrets; no `sudo`, `systemctl`, `crontab`.
+4. Never touch the live bot's checkout `~/fpl-optimizer` (code, `raw/`, `state/`, timers),
+   `.env` or secrets; no `sudo`, `systemctl`, `crontab`.
 5. Defaults stay the live system's unless a change is kept by the judge: a kept model change
    may flip a default on `research` (it is not live until the user promotes it).
 6. Never edit `results/experiments.csv` by hand; commands append to it. Commit what they
@@ -56,10 +58,10 @@ Run server commands as `ssh fplopt-server 'cd ~/fpl-research && …'` with
 
 - `git status` must be clean on `research`. Read the last 20 rows of `ledger.tsv`, the newest
   report in `reports/`, and `ideas.md`.
-- `bash autoresearch/sync.sh all`: code to the server, new raw files from botbox. If
-  the raw step fails (botbox unreachable), run `bash autoresearch/sync.sh code`, skip
-  step 2 (the monitor needs botbox's newest data), say so at the top of your summary,
-  and go on to the experiments: they only need the develop data on the server.
+- `bash autoresearch/sync.sh all`: code to the server, new raw files from the live
+  archiver's `raw/` (read-only). If the raw step fails, run `bash autoresearch/sync.sh
+  code`, skip step 2, say so at the top of your summary, and go on to the experiments:
+  they only need the develop data on the server.
 - `ssh fplopt-server 'cd ~/fpl-live && ~/.local/bin/uv run python ~/fpl-harness/autoresearch/status.py'`:
   `last_checked_gw`. If it is newer than the newest report's GW, do step 2 first.
 
@@ -100,7 +102,7 @@ Take the top idea in `ideas.md` you can test tonight. One change per experiment.
    autoresearch/sync.sh code`.
 
 **Decision experiments** (planner settings, chips, hits, FT value, solver gap):
-`uv run fplopt backtest compare --a <candidate spec> --b <live spec> --seasons 2016-2022 --starts "template@1,random:3@1,random:3@20" --continuation own --reference b --no-per-decision --family "autoresearch decisions" --jobs 14 --out results/research/<id>`
+`uv run fplopt backtest compare --a <candidate spec> --b <live spec> --seasons 2016-2022 --starts "template@1,random:3@1,random:3@20" --continuation own --reference b --no-per-decision --family "autoresearch decisions" --jobs 12 --out results/research/<id>`
 on `~/fpl-research`, with the live spec `optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2`.
 KEEP needs the full-run mean > 0 with its 80% CI lower bound > 0, and the xG-scored mean
 > 0. One run takes 15–40 minutes: at most two a night. A new spec key is a code change

@@ -46,7 +46,11 @@ WRITES = (
     r"|Set-Content|Out-File|Add-Content|Remove-Item|Move-Item|Copy-Item|write_text|open\("
 )
 COMMANDS = (
-    (r"botbox", "botbox is the live box: only autoresearch/sync.sh reads from it"),
+    (r"botbox", "botbox is gone (wiped Oct 17); the bot runs in ~/fpl-optimizer"),
+    (
+        r"(~|/home/fplopt|\$HOME)/fpl-optimizer\b",
+        "~/fpl-optimizer is the live bot and archiver: only autoresearch/sync.sh reads it",
+    ),
     (r"\bgit\s+push\b", "pushes go through autoresearch/sync.sh only"),
     (
         r"\bgit\s+(checkout|switch|merge|rebase|reset)\b[^|;&]*\b(main|origin/main)\b",

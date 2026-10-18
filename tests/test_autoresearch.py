@@ -34,6 +34,8 @@ judge = load("judge")
         "git checkout main",
         "gh pr create --title x",
         "ssh botbox 'ls'",
+        "ssh fplopt-server 'cd ~/fpl-optimizer && git checkout research'",
+        "ssh fplopt-server 'ls /home/fplopt/fpl-optimizer/raw'",
         "cat .env",
         "uv run fplopt backtest run --seasons 2016-2022 --data-dir ~/fpl-live/data",
         "sed -i 's/MIN_GAIN = 0.0005/MIN_GAIN = 0/' autoresearch/judge.py",

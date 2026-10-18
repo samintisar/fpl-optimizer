@@ -9,12 +9,13 @@ on develop, under fixed rules. It proposes; you promote. The agent's instruction
 ```
 dev PC (Claude, research clone, branch `research`)
   │  edits, tests, commits; guard hook in .claude/settings.local.json
-  │  bash autoresearch/sync.sh        code → server; raw: botbox → server (read only)
+  │  bash autoresearch/sync.sh        code → server; raw: the archiver's raw/ → ~/fpl-live
   ▼
 fplopt-server (3090 box, 24 threads, 62 GB)
-  ~/fpl-optimizer   hub repo (receives pushes)
+  ~/fpl-optimizer   THE LIVE BOT AND ARCHIVER (main, timers, raw/, state/) and the hub repo
+                    for pushes; research only pushes refs here and reads raw/
   ~/fpl-research    `research` / `try/*` detached; data/ = develop seasons only
-  ~/fpl-live        `main` detached (the bot's code); raw/ from botbox; full data/
+  ~/fpl-live        `main` detached (the bot's code); raw/ copied from the archiver's; data/
   ~/fpl-harness     the scoring (model_eval.sh, dev/calibrate_v1.py, judge.py), pinned by you
 ```
 

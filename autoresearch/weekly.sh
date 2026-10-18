@@ -12,7 +12,8 @@
 set -euo pipefail
 harness=~/fpl-harness
 test -d raw && test -f pyproject.toml || { echo "run it in ~/fpl-live" >&2; exit 2; }
-uv=~/.local/bin/uv
+# The live bot and archiver share this box: research runs at low priority.
+uv="nice -n 15 $HOME/.local/bin/uv"
 stamp=$(date -u +%Y-%m-%dT%H%MZ)
 out="results/live/$stamp"
 mkdir -p "$out"

@@ -20,7 +20,8 @@ if [ -f "$out/metrics.json" ]; then
   exit 0
 fi
 mkdir -p "$out"
-uv=~/.local/bin/uv
+# The live bot and archiver share this box: research runs at low priority.
+uv="nice -n 15 $HOME/.local/bin/uv"
 start=$(date +%s)
 $uv run python "$harness/dev/calibrate_v1.py" --data-dir data walk --seasons 2016-2022 \
   --jobs 7 --out "$out/walk" --ban-residual > "$out/walk.log" 2>&1

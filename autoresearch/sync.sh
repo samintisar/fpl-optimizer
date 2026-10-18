@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Run on the dev PC from the research clone (autoresearch/README.md). Puts code and data on
-# fplopt-server, which can't reach GitHub or botbox itself:
+# fplopt-server, which can't reach GitHub itself:
 #   code   push `research` (this clone) and `main` (origin/main) to the server's hub repo
 #          ~/fpl-optimizer, then check them out detached in ~/fpl-research and ~/fpl-live
 #          and `uv sync` both;
-#   raw    `raw` only: copy the files botbox's archive has and ~/fpl-live/raw lacks (raw/
-#          is append-only, so missing paths are the whole difference). Read-only on botbox.
+#   raw    copy the files the live archiver's ~/fpl-optimizer/raw has and ~/fpl-live/raw
+#          lacks (raw/ is append-only, so missing paths are the whole difference). The bot
+#          and archiver run in ~/fpl-optimizer on the same box (botbox was wiped Oct 17):
+#          this only reads it, niced, and never writes there.
 #
 #   try    push a candidate branch try/<id> and check it out in ~/fpl-research (`code` puts
 #          ~/fpl-research back on `research`).
@@ -28,17 +30,14 @@ sync_code() {
 }
 
 sync_raw() {
-  tmp=$(mktemp -d)
-  ssh -o BatchMode=yes botbox 'cd ~/fpl-optimizer && find raw -type f ! -name ".*" | LC_ALL=C sort' > "$tmp/botbox"
-  ssh -o BatchMode=yes "$server" 'cd ~/fpl-live && find raw -type f | LC_ALL=C sort' > "$tmp/server"
-  LC_ALL=C comm -23 "$tmp/botbox" "$tmp/server" > "$tmp/missing"
-  n=$(wc -l < "$tmp/missing")
-  echo "raw: $n new file(s) on botbox"
-  if [ "$n" -gt 0 ]; then
-    ssh -o BatchMode=yes botbox 'cd ~/fpl-optimizer && tar cf - -T -' < "$tmp/missing" \
-      | ssh -o BatchMode=yes "$server" 'cd ~/fpl-live && tar xf -'
-  fi
-  rm -rf "$tmp"
+  ssh -o BatchMode=yes "$server" 'set -e; export LC_ALL=C; cd ~
+    comm -23 <(cd fpl-optimizer && find raw -type f ! -name ".*" | sort) \
+      <(cd fpl-live && find raw -type f | sort) > /tmp/fplopt-research-missing
+    echo "raw: $(wc -l < /tmp/fplopt-research-missing) new file(s) in the live archive"
+    if [ -s /tmp/fplopt-research-missing ]; then
+      (cd fpl-optimizer && nice -n 15 tar cf - -T /tmp/fplopt-research-missing) \
+        | (cd fpl-live && tar xf -)
+    fi'
 }
 
 sync_try() {
