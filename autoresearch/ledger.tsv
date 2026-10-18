@@ -1,1 +1,2 @@
 date	id	kind	idea	change	baseline	candidate	verdict	notes
+2026-10-18	measure-bonus-defcon	tooling	2 measure defcon and bonus	GW frame: p_defcon, e_bonus components + summed pts_* extras; xP eval joins realized bonus/defcon and scores e_bonus, p_defcon	results/research/c5c822bb9f-62719625	results/research/31a91159f7-62719625	KEEP	tests pass (62 touched); model_eval metrics identical (mean and per season)
