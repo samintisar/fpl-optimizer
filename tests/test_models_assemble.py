@@ -443,6 +443,15 @@ def test_v1_frame_schema_doubles_and_blanks(league):
     np.testing.assert_allclose(single["p_cs"], single["p_60_fixture"] * single["p_cs_fixture"])
     np.testing.assert_allclose(single["p_min_0"] + single["p_min_1_59"] + single["p_min_60"], 1.0)
     np.testing.assert_allclose(single["p_play_gw"], single["p_play"])
+    # The per-component points are summed over a double, 0 in a blank, and add up to the
+    # uncalibrated xP (FAST is uncalibrated).
+    points = in_double.groupby("player_key")[list(POINT_COLUMNS)].sum()
+    np.testing.assert_allclose(
+        double[list(POINT_COLUMNS)], points.loc[double["player_key"]].to_numpy()
+    )
+    assert (blank[list(POINT_COLUMNS)] == 0).all().all()
+    np.testing.assert_allclose(single["e_bonus"], single["e_bonus_fixture"])
+    np.testing.assert_allclose(out[list(POINT_COLUMNS)].sum(axis=1), out["xp"], atol=1e-9)
     assert (out["xp"].abs() < 20).all() and out["xp"].notna().all()
 
 
