@@ -10,6 +10,9 @@ so they are on the same scale as `rescored_points`, the models' xP and the backt
 - `fixture_outcomes`: one row per player-fixture (`OUTCOME_COLUMNS`).
 - `gw_totals`: one row per player-GW, doubles summed (`n_fixtures` = 2); a player without a
   row in the GW (his club blanks, or he isn't registered) has no row: 0 points, 0 minutes.
+
+`starts` and `defensive_contribution` are null where the source has none (sums: null if
+every fixture's is).
 """
 
 from __future__ import annotations
@@ -48,6 +51,7 @@ OUTCOME_COLUMNS = (
     ("element_type", "int64"),
     ("starts", "Int64"),  # null where the source has no starts (before 2022/23 GW16)
     *((name, "int64") for name in STAT_COLUMNS),
+    ("defensive_contribution", "Int64"),  # null where the source has none (before 2025/26)
     ("points", "int64"),
 )
 GW_TOTAL_COLUMNS = (
@@ -60,6 +64,7 @@ GW_TOTAL_COLUMNS = (
     ("n_fixtures", "int64"),
     ("starts", "Int64"),  # null if every fixture's is
     *((name, "int64") for name in STAT_COLUMNS),
+    ("defensive_contribution", "Int64"),  # null if every fixture's is
     ("points", "int64"),
 )
 _READ_COLUMNS = (*MATCH_COLUMNS, "team_key", "starts")
@@ -102,8 +107,10 @@ def gw_totals(fixtures: pd.DataFrame) -> pd.DataFrame:
     grouped = ordered.groupby(keys, sort=True)
     sums = grouped[[*STAT_COLUMNS, "points"]].sum()
     first = grouped[["team_key", "element_type"]].first()
-    starts = grouped["starts"].sum(min_count=1)
-    out = sums.join(first).assign(n_fixtures=grouped.size(), starts=starts).reset_index()
+    nullable = {
+        name: grouped[name].sum(min_count=1) for name in ("starts", "defensive_contribution")
+    }
+    out = sums.join(first).assign(n_fixtures=grouped.size(), **nullable).reset_index()
     out = out[[name for name, _ in GW_TOTAL_COLUMNS]].astype(dict(GW_TOTAL_COLUMNS))
     return out.sort_values(["season", "gw_index", "player_key"], kind="mergesort").reset_index(
         drop=True

@@ -59,11 +59,12 @@ xP = their sum.
 (`upcoming_fixtures`): xP and `GW_COMPONENTS` summed over his fixtures (a double sums two,
 a blank is 0). Probabilities are per player-GW only for one fixture: P(start), P(plays),
 P(60+), the 3 minutes classes, P(clean sheet) (= p_60 · team P(CS): the player's FPL clean
-sheet), P(goal ≥ 1); NaN in a double, 0 in a blank (P(0 minutes) 1). Expected minutes,
-goals and assists are sums. `p_play_gw` (`GW_EXTRAS`) is P(plays in at least one of the
-GW's fixtures), 1 − Π_f (1 − p_play_f) with the fixtures independent: p_play in a single
-GW, 0 in a blank, defined in a double too (for the optimizer's bench weights, Phase 5b
-Task 8; not scored). The frame keeps the standard xP columns and dtypes first
+sheet), P(goal ≥ 1), P(defcon); NaN in a double, 0 in a blank (P(0 minutes) 1). Expected
+minutes, goals, assists and bonus are sums. `p_play_gw` (`GW_EXTRAS`) is P(plays in at
+least one of the GW's fixtures), 1 − Π_f (1 − p_play_f) with the fixtures independent:
+p_play in a single GW, 0 in a blank, defined in a double too (for the optimizer's bench
+weights, Phase 5b Task 8; not scored); the `POINT_COLUMNS` follow it, summed (not scored,
+and before the calibration's xp map). The frame keeps the standard xP columns and dtypes first
 (`XP_DTYPES`); then `GW_COMPONENTS`, the ones `fplopt.evaluate.metrics.COMPONENTS` scores,
 and `GW_EXTRAS`. The backtester and policies read player_key, gw, gw_index, horizon and
 xp; the optimizer also reads p_play, p_play_gw and e_minutes (`fplopt.optimize.minutes`).
@@ -173,12 +174,15 @@ GW_PROBABILITIES = (
     "p_min_60",
     "p_cs",
     "p_goal",
+    "p_defcon",
 )
-GW_SUMS = ("e_minutes", "e_goals", "e_assists")
+GW_SUMS = ("e_minutes", "e_goals", "e_assists", "e_bonus")
 GW_COMPONENTS = (*GW_PROBABILITIES, *GW_SUMS)
 # Per player-GW columns after the components, not scored: P(plays in >= 1 of the GW's
-# fixtures), defined in doubles (the optimizer's bench weights).
-GW_EXTRAS = ("p_play_gw",)
+# fixtures), defined in doubles (the optimizer's bench weights), and the `POINT_COLUMNS`
+# summed over the GW's fixtures (before the xp map of the calibration, so they add up to the
+# uncalibrated xP; for reading which component a miss came from).
+GW_EXTRAS = ("p_play_gw", *POINT_COLUMNS)
 POISSON_CAP = 40  # Poisson sums run over N = 0..40 (tail < 1e-15 for rates below 10)
 SHORT_MAX_FRACTION = 59.0 / 90.0
 SAVES_FOR_BONUS = 3  # the bonus regression's `saves3` = saves // 3
@@ -513,7 +517,7 @@ def gw_frame(view: AsOfView, fixtures: pd.DataFrame) -> pd.DataFrame:
     )
     keys = ["player_key", "gw", "gw_index", "horizon"]
     grouped = rows.groupby(keys, sort=True)
-    sums = grouped[["xp", *GW_SUMS]].sum()
+    sums = grouped[["xp", *GW_SUMS, *POINT_COLUMNS]].sum()
     firsts = grouped[list(GW_PROBABILITIES)].first()
     counts = grouped.size().rename("n")
     # NaN P(play) in any fixture leaves the GW's unknown (prod() would skip it, i.e. treat it
