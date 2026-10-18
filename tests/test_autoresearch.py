@@ -88,15 +88,35 @@ def test_frozen_paths(path, frozen):
     assert (guard.check_path(path) is not None) == frozen
 
 
-def test_the_hook_blocks_with_exit_2():
-    event = {"tool_name": "Bash", "tool_input": {"command": "uv run fplopt holdout run"}}
-    done = subprocess.run(
+def hook(event):
+    return subprocess.run(
         [sys.executable, str(ROOT / "guard.py")],
         input=json.dumps(event),
         text=True,
         capture_output=True,
     )
+
+
+CLONE = "C:\\Users\\samin\\Documents\\GitHub\\fpl-autoresearch"
+MAIN = "C:\\Users\\samin\\Documents\\GitHub\\fpl-optimizer"
+
+
+def test_the_hook_blocks_with_exit_2_in_the_research_clone():
+    command = {"command": "uv run fplopt holdout run"}
+    done = hook({"tool_name": "Bash", "tool_input": command, "cwd": CLONE})
     assert done.returncode == 2 and "holdout" in done.stderr
+    # A session started in the main checkout that works in the clone is guarded too.
+    command = {"command": f"cd {CLONE} && uv run fplopt holdout run"}
+    assert hook({"tool_name": "Bash", "tool_input": command, "cwd": MAIN}).returncode == 2
+    path = {"file_path": CLONE + "\\autoresearch\\judge.py"}
+    assert hook({"tool_name": "Edit", "tool_input": path, "cwd": MAIN}).returncode == 2
+
+
+def test_the_hook_leaves_other_work_alone():
+    command = {"command": "uv run fplopt backtest compare --seasons 2023-2024"}
+    assert hook({"tool_name": "Bash", "tool_input": command, "cwd": MAIN}).returncode == 0
+    path = {"file_path": MAIN + "\\autoresearch\\judge.py"}
+    assert hook({"tool_name": "Edit", "tool_input": path, "cwd": MAIN}).returncode == 0
 
 
 def metrics(mse_h0, mse_h15=4.68, seasons=None, **extra):

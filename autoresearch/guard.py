@@ -13,6 +13,7 @@ import re
 import sys
 
 ALLOWED_SEASONS = set(range(2016, 2023))  # develop only
+CLONE = "documents/github/fpl-autoresearch"  # the research clone, lower case
 FROZEN = (
     r"autoresearch/(program\.md|judge\.py|model_eval\.sh|guard\.py|develop_data\.py|sync\.sh"
     r"|weekly\.sh|README\.md)$",
@@ -124,14 +125,27 @@ def check_path(path: str) -> str | None:
     return None
 
 
+def in_clone(path: str) -> bool:
+    """`path` is inside the research clone (case- and slash-insensitive)."""
+    flat = path.replace("\\", "/").lower()
+    return CLONE in flat
+
+
 def main() -> None:
     event = json.load(sys.stdin)
     tool = event.get("tool_name", "")
     data = event.get("tool_input") or {}
+    cwd = str(event.get("cwd") or "")
     if tool in ("Bash", "PowerShell"):
-        why = check_command(str(data.get("command", "")))
+        command = str(data.get("command", ""))
+        # The loop's sessions start in the main checkout (scheduled tasks can't pick a
+        # folder), so the hook is installed there too and acts only on the loop's work:
+        # commands run in, or naming, the research clone.
+        active = in_clone(cwd) or in_clone(command)
+        why = check_command(command) if active else None
     elif tool in ("Edit", "Write", "NotebookEdit", "MultiEdit"):
-        why = check_path(str(data.get("file_path") or data.get("notebook_path") or ""))
+        path = str(data.get("file_path") or data.get("notebook_path") or "")
+        why = check_path(path) if in_clone(path) else None
     else:
         why = None
     if why:
