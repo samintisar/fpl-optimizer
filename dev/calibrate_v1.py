@@ -67,7 +67,6 @@ from fplopt.models.calibration import (
     to_table,
 )
 from fplopt.models.fitted import refit_deadline
-from fplopt.models.minutes import MinutesParams
 
 DEVELOP = range(2017, 2023)  # scored seasons (2016/17 is burn-in)
 LAST_FIT_SEASON = 2024  # validate rows are fitted on, never scored
