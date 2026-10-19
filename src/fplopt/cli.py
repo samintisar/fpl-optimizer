@@ -179,6 +179,8 @@ POLICY_PARAMS: dict[str, dict[str, Callable[[str], Any]]] = {
         # chips=1 with the estimated terminal values (config/chips/terminal-values.json)
         # times this shrink factor (chip pre-registration §3), instead of the placeholders
         "chip_shrink": float,
+        # ft_value = DEFAULT_FT_VALUE times this factor (autoresearch ideas.md, FT value)
+        "ft_scale": float,
     },
 }
 # The chip study's policies (docs/superpowers/plans/2026-10-11-chip-policy.md): the
@@ -274,6 +276,13 @@ class PolicySpec:
         from fplopt.backtest.policies import GreedyPolicy, OptimizerPolicy, RollPolicy
 
         params = dict(self.params)
+        scale = params.pop("ft_scale", None)
+        if scale is not None:
+            from fplopt.optimize.params import DEFAULT_FT_VALUE
+
+            if scale < 0:
+                raise ValueError(f"ft_scale must be >= 0, got {scale}")
+            params["ft_value"] = {n: v * scale for n, v in DEFAULT_FT_VALUE.items()}
         if self.name == "optimizer":
             from fplopt.optimize import OptimizerParams
 

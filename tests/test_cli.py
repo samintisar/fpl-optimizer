@@ -457,6 +457,24 @@ def test_parse_optimizer_policy_spec():
     assert itb.name == "optimizer(rolling,mh=0,m=0.0,itb=0.08)" and not itb.chips
 
 
+def test_parse_optimizer_ft_scale():
+    from fplopt.optimize.params import DEFAULT_FT_VALUE
+
+    spec = cli.parse_policy_spec("optimizer:v1:ft_scale=1.5")
+    assert spec.params == (("ft_scale", 1.5),) and cli.parse_policy_spec(str(spec)) == spec
+    policy = spec.build()
+    assert dict(policy.params.ft_value) == {n: 1.5 * v for n, v in DEFAULT_FT_VALUE.items()}
+    assert "ftv=" in policy.name
+    same = cli.parse_policy_spec("optimizer:v1:ft_scale=1").build()
+    assert same.name == cli.parse_policy_spec("optimizer:v1").build().name
+    rules = cli.parse_policy_spec("chiprules:v1:ft_scale=0.5,t_tc=5").build()
+    assert dict(rules.params.ft_value) == {n: 0.5 * v for n, v in DEFAULT_FT_VALUE.items()}
+    with pytest.raises(argparse.ArgumentTypeError, match="ft_scale must be >= 0"):
+        cli.parse_policy_spec("optimizer:v1:ft_scale=-1")
+    with pytest.raises(argparse.ArgumentTypeError, match="no parameter 'ft_scale'"):
+        cli.parse_policy_spec("greedy:v1:ft_scale=2")
+
+
 def test_parse_optimizer_minutes_keys():
     """Phase 5b Task 8: the minutes-based bench weights can be switched off and the
     expected-minutes floor set from a spec; the defaults keep the name unchanged."""
