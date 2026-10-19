@@ -475,6 +475,15 @@ def test_parse_optimizer_ft_scale():
         cli.parse_policy_spec("greedy:v1:ft_scale=2")
 
 
+def test_parse_optimizer_mip_gap():
+    spec = cli.parse_policy_spec("optimizer:v1:mip_gap=0.0005")
+    assert spec.params == (("mip_gap", 0.0005),) and cli.parse_policy_spec(str(spec)) == spec
+    policy = spec.build()
+    assert policy.params.mip_gap == 0.0005 and policy.name == "optimizer(v1,mh=0,m=0.0,gap=0.0005)"
+    with pytest.raises(argparse.ArgumentTypeError, match="mip_gap must be in"):
+        cli.parse_policy_spec("optimizer:v1:mip_gap=1")
+
+
 def test_parse_optimizer_minutes_keys():
     """Phase 5b Task 8: the minutes-based bench weights can be switched off and the
     expected-minutes floor set from a spec; the defaults keep the name unchanged."""

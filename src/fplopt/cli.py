@@ -175,6 +175,7 @@ POLICY_PARAMS: dict[str, dict[str, Callable[[str], Any]]] = {
         "itb_value": float,
         "bench_from_minutes": parse_flag,
         "min_minutes": float,
+        "mip_gap": float,  # HiGHS mip_rel_gap (autoresearch ideas.md, solver gap)
         "chips": parse_flag,
         # chips=1 with the estimated terminal values (config/chips/terminal-values.json)
         # times this shrink factor (chip pre-registration §3), instead of the placeholders
