@@ -10,7 +10,8 @@ Subcommands:
   and the points re-scored under the season's backtest rules. A player without a row in a
   played fixture scored nothing in 0 minutes; fixtures not played (postponed beyond the
   data) are dropped. One parquet per season in `--out`. `--ban-residual` uses
-  `MinutesParams(ban_residual=True)`; `--back-split` uses `V1Params(back_split=True)`.
+  `ban_residual=True`; `--back-split` uses `back_split=True`; otherwise the code's own
+  `V1Params()` defaults (`walk_params`), so a changed default is what gets walked.
 - `fit`: from a `walk` directory, the expanding-window calibrations: for each season S of
   `--apply` the maps fitted on the walk-forward rows of the seasons in [`--first-fit`, S)
   (`fplopt.models.calibration`). Effects are reported on develop seasons only (2017/18–
@@ -181,13 +182,23 @@ def realized(tables: dict[str, pd.DataFrame], season: int) -> tuple[pd.DataFrame
     return outcomes, against
 
 
+def walk_params(ban_residual: bool, back_split: bool, calibrate: bool = True) -> V1Params:
+    """The walk's settings: the code's own `V1Params()` defaults (so a candidate that flips
+    a default is scored with it), plus `--ban-residual` / `--back-split` when given."""
+    params = dataclasses.replace(V1Params(), calibrate=calibrate)
+    if ban_residual:
+        minutes = dataclasses.replace(params.minutes, ban_residual=True)
+        params = dataclasses.replace(params, minutes=minutes)
+    if back_split:
+        params = dataclasses.replace(params, back_split=True)
+    return params
+
+
 def walk_season(job: tuple) -> dict:
     data_dir, season, out_dir, ban_residual, back_split = job
     tables = load_tables(Path(data_dir), 2016, season)
     store = DataStore(tables=tables)
-    params = V1Params(
-        minutes=MinutesParams(ban_residual=ban_residual), back_split=back_split, calibrate=False
-    )
+    params = walk_params(ban_residual, back_split, calibrate=False)
     outcomes, against = realized(tables, season)
     gameweeks = tables["gameweek"]
     gameweeks = gameweeks[gameweeks["season"] == season].sort_values("gw_index")
@@ -221,9 +232,7 @@ def walk(args) -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     jobs = [(str(args.data_dir), s, str(out), args.ban_residual, args.back_split) for s in seasons]
-    params = V1Params(
-        minutes=MinutesParams(ban_residual=args.ban_residual), back_split=args.back_split
-    )
+    params = walk_params(args.ban_residual, args.back_split)
     (out / "params.txt").write_text(calibration_fingerprint(params), encoding="utf-8")
     start = time.perf_counter()
     with ProcessPoolExecutor(max_workers=min(args.jobs, len(jobs))) as pool:
