@@ -147,10 +147,18 @@ def test_thin_back_cells_keep_the_plain_mapping(league, fits, monkeypatch):
     v = view(league)
     fit = fit_availability(v, minutes, back_split=True)
     assert fit.back_split and fit.back_slopes == ()
-    assert (fit.slope, fit.offsets) == (plain.slope, plain.offsets)
+    # The same mapping up to the solver's tolerance: the unused back cells' parameters
+    # (regularized to 0) change the trust-region steps in the last digits.
+    assert [(c, b) for c, b, _ in fit.offsets] == [(c, b) for c, b, _ in plain.offsets]
+    np.testing.assert_allclose(
+        [fit.slope, *(o for _, _, o in fit.offsets)],
+        [plain.slope, *(o for _, _, o in plain.offsets)],
+        rtol=1e-6,
+        atol=1e-8,
+    )
     predicted = predict_minutes(v, minutes)
     pd.testing.assert_frame_equal(
-        adjust_minutes(v, predicted, fit), adjust_minutes(v, predicted, plain)
+        adjust_minutes(v, predicted, fit), adjust_minutes(v, predicted, plain), rtol=1e-6
     )
 
 
