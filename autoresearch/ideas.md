@@ -12,8 +12,11 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      walk: same direction, 3–4 pp in GW2–12, largest in 2021/22 (0.787 vs 0.833) and
      2022/23 (0.784 vs 0.849).
    - Tried: global sharpening `start_sharpen=1.15` (DISCARD: helps 2021–22, hurts 2017–20);
-     `club_continuity` feature (KEEP, MSE h0 −0.0017). Re-slice the develop walk at the new
-     head first: how much of the band gap is left, by team-continuity quartile and season.
+     `club_continuity` feature (KEEP, MSE h0 −0.0017). Re-sliced at f9bd7f1: the band gaps
+     barely moved (GW2–6 0.7–0.8 0.756 vs 0.800; 2022/23 regulars 0.783 vs 0.847), the
+     continuity-quartile residuals only narrowed (−0.016 … +0.039 from −0.021 … +0.042;
+     corr 0.68 from 0.72). Most of the compression is still there; recency is the open
+     lead (2021–22 and live are the worst, 2017–20 calibrated).
    - Candidates if a gap remains: continuity over a longer window or within the season
      only; the player's own share of the club's last 5 XIs (a stability-weighted start
      rate). One per night; judge with `model_eval.sh`.
