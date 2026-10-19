@@ -547,8 +547,9 @@ def test_cli_policy_and_model_names_match_the_backtester():
     assert set(cli.POLICY_PARAMS["greedy"]) == greedy
     from fplopt.optimize import OptimizerParams
 
+    derived = {"ft_scale"}  # sets OptimizerParams.ft_value
     optimizer = set(cli.POLICY_PARAMS["optimizer"]) - {"chips", "chip_shrink"}
-    assert optimizer <= {f.name for f in fields(OptimizerParams)}
+    assert optimizer - derived <= {f.name for f in fields(OptimizerParams)}
     from fplopt.backtest.policies import ChipRulePolicy
 
     rule_keys = {f.name for f in fields(ChipRulePolicy)} - {"xp_model", "params"}
