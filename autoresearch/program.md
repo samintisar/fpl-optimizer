@@ -93,7 +93,10 @@ Take the top idea in `ideas.md` you can test tonight. One change per experiment.
    `ssh fplopt-server 'cd ~/fpl-research && bash ~/fpl-harness/autoresearch/model_eval.sh'` at the
    `research` head (~3 min; reused if already scored). It prints the metrics dir.
 2. `git checkout -b try/<id>` from `research`, make the change, run the tests it touches
-   (`uv run pytest tests/test_models_*.py -q` at least) and commit.
+   (`uv run pytest tests/test_models_*.py -q` at least) and commit. A change that flips a
+   `V1Params` default (e.g. `back_split=True`, #39) makes
+   `test_the_calibration_table_matches_the_default_settings` fail by design: the table is
+   only regenerated at promotion. That one test is exempt; say so in the ledger notes.
 3. `bash autoresearch/sync.sh try try/<id>`, then the same `model_eval.sh` command: the
    candidate's metrics dir.
 4. `ssh fplopt-server 'cd ~/fpl-research && ~/.local/bin/uv run python ~/fpl-harness/autoresearch/judge.py compare results/research/<base>/metrics.json results/research/<cand>/metrics.json'`.
