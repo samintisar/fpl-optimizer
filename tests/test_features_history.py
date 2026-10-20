@@ -213,6 +213,12 @@ def test_club_continuity_is_the_share_of_starters_kept():
     assert row(frame, 35, 3)["club_continuity"] == pytest.approx(7 / 11)
 
 
+def test_club_fixtures_season_counts_the_clubs_earlier_fixtures():
+    frame = frame_at(league(history_rows()), 12)
+    assert [row(frame, 1, gw)["club_fixtures_season"] for gw in (1, 2, 7)] == [0, 1, 6]
+    assert row(frame, 5, 8)["club_fixtures_season"] == 7
+
+
 def test_a_planted_future_row_changes_no_earlier_feature():
     rows = history_rows()
     base = frame_at(league(rows), 12)

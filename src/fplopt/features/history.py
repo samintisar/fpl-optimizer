@@ -45,7 +45,9 @@ the as-of schedule) and the keys differ per fixture.
   a new signing, also when the pool's club differs from his last row's club);
 - `club_continuity`: how settled his club's XI is: over the club's last
   `CONTINUITY_WINDOW` fixtures before the deadline (any season), the mean share of its 11
-  starters who also started its previous fixture (NaN before its second fixture).
+  starters who also started its previous fixture (NaN before its second fixture);
+- `club_fixtures_season`: his club's league fixtures this season before the GW (the phase
+  of the season: early on, the lag windows still hold last season's rows).
 
 **Dropped (no source):** European/cup matches (no data; rest days count league fixtures
 only), manager tenure, age. `team_join_date` is not a feature: the snapshot carries it only
@@ -142,6 +144,7 @@ LAG_FEATURES = (
     "comp_rank",
     "fixtures_at_club",
     "club_continuity",
+    "club_fixtures_season",
 )
 TARGETS = ("minutes", "start", "sixty", "sub")
 TRAINING_KEYS = (
@@ -453,6 +456,7 @@ def training_frame(view: AsOfView) -> pd.DataFrame:
     )
     frame = _competition(frame, ["fixture_key", "team_key"])
     frame["club_continuity"] = _club_continuity(matches, frame)
+    frame["club_fixtures_season"] = frame["_club_fixtures"]
     minutes = frame["minutes"]
     frame = frame.assign(
         sixty=(minutes >= 60).astype("float64"),
@@ -559,6 +563,7 @@ def prediction_frame(view: AsOfView) -> pd.DataFrame:
     with np.errstate(invalid="ignore", divide="ignore"):
         share = frame["_club_starts"] / club_fixtures
     frame["start_share_season"] = share.where(club_fixtures > 0)
+    frame["club_fixtures_season"] = club_fixtures
     frame = _competition(frame, ["team_key"])
     frame["club_continuity"] = _club_continuity(matches, frame.assign(ref_time=view.deadline))
     horizon = _horizon_fixtures(view, season)
