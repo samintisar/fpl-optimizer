@@ -6,31 +6,29 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
 
 ## Open
 
-1. **P(start) still compressed: next steps after `club_continuity`** (model).
+1. **P(start) still compressed: next steps** (model).
    - Live GW2–6 (report 2026-10-19-gw6): by band ≤0.3 0.069 vs 0.037, 0.7–0.8 0.754 vs
      0.859, 0.8–0.9 0.855 vs 0.929; regulars 0.763 vs 0.824 every GW from GW2. Develop
      walk: same direction, 3–4 pp in GW2–12, largest in 2021/22 (0.787 vs 0.833) and
-     2022/23 (0.784 vs 0.849).
-   - Tried: global sharpening `start_sharpen=1.15` (DISCARD: helps 2021–22, hurts 2017–20);
-     `club_continuity` feature (KEEP, MSE h0 −0.0017). Re-sliced at f9bd7f1: the band gaps
-     barely moved (GW2–6 0.7–0.8 0.756 vs 0.800; 2022/23 regulars 0.783 vs 0.847), the
-     continuity-quartile residuals only narrowed (−0.016 … +0.039 from −0.021 … +0.042;
-     corr 0.68 from 0.72). Most of the compression is still there; recency is the open
-     lead (2021–22 and live are the worst, 2017–20 calibrated).
-   - Candidates if a gap remains: continuity over a longer window or within the season
-     only; the player's own share of the club's last 5 XIs (a stability-weighted start
-     rate). One per night; judge with `model_eval.sh`.
-2. **#39 `back_split` on** (model; unblocked 2026-10-19).
-   - Flip `V1Params.back_split` to True. The pinned harness's walk now uses the code's own
-     `V1Params()` defaults (`walk_params`, 00e32da), so the flip is scored.
-     `test_the_calibration_table_matches_the_default_settings` fails by design for a flipped
-     default (program.md, step 2): exempt, note it in the ledger.
-   - Develop evidence (manual walk 2026-10-14, before club_continuity): MSE h0 4.2609 →
-     4.2590, h1–5 4.6863 → 4.6855, 2021 and 2022 better, 2017–2020 identical. Rerun now on
-     the current `research` head: club_continuity also moves P(start), so the gain may differ.
-   - Live GW1–6 caveat: players back from a 0-minute GW started 0.095 vs 0.155 predicted (n
-     346; p_start > 0.3: 0.333 vs 0.402, n 45), over-predicted. Not the #39 cell (`a`/`a100`
-     flag after a miss), but read that cell live before calling it a candidate.
+     2022/23 (0.784 vs 0.849); the ≤0.3 band is over-predicted too (GW2–6 0.078 vs 0.065).
+   - Tried: `start_sharpen=1.15` (DISCARD); `club_continuity` (KEEP); `club_fixtures_season`
+     (KEEP 2026-10-20, MSE h0 −0.0013, 5 of 6 seasons better); `five_subs` rule indicator
+     (DISCARD: 2022 MSE +0.003, though minutes log loss −0.33 %, see idea 2).
+   - Ruled out (diagnostic 2026-10-20, `~/fpl-research/results/research/diag-norm.txt`): the
+     team normalization. The GBM's raw P(start) sums to 11.0–11.2 per club at h0 and the
+     median logit shift is ±0.05 (2019/2021/2022 × GW4/10/22), so the shift moves a regular
+     by < 0.01. The compression is in the GBM itself.
+   - Open leads: label noise from inferred starts (before 2022/23 GW16; 569 of the 1,016
+     wrong rows are 45-minute half-time ties, a coin flip between a regular and a sub):
+     weight 0 for training rows tied at the 11th/12th spot of an inferred fixture. Re-slice
+     the P(start) bands after tonight's keeps first: they may have moved the gap.
+2. **Five subs: better minutes likelihood, worse points MSE** (model; new 2026-10-20).
+   - `five_subs` (2019/20 GW39+, 2022/23 on) as a minutes feature: minutes_ll_h0 −0.33 %
+     (the biggest minutes gain of any change so far), |mean xP − points| 0.0110 → 0.0092,
+     but MSE h0 +0.0005, all of it 2022/23 (+0.0029). In the 60+/sub parts only: the same
+     (the gain is there, not in P(start)). Before another variant, find which rows' error
+     grows in 2022/23 (by position and minutes band; appearance vs goal points): probably the
+     points assembly reacting to the new P(60+). Diagnostic first, no variant.
 3. **Defcon calibration** (model; the measurement is kept on `research`, 243c39f).
    - Live check (PLAN §6.5, GW2–5, horizon 0): DEF 0.088 predicted vs 0.104 realized, MID
      0.047 vs 0.038. Weekly monitor GW1–6 realized: DEF 0.104 (60+ min 0.266), MID 0.043
@@ -39,27 +37,32 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
    - Develop has no defcon points, so test on develop via P(threshold reached) on
      2016/17–2018/19 rows that carry the old detailed stats only if their definitions
      match (PLAN §3, VERIFY); otherwise live-evidence-only: write the case for the user.
-4. **#43 finishing above xG** (model).
-   - A long-window goals − npxG term, shrunk hard (empirical Bayes), in `shares`. Live
-     GW1–6 over-performers: João Pedro +3.3, Cherki +3.2, Rogers +3.0, Haaland +2.5 (noise
-     at 6 GWs). Test on develop with `model_eval.sh` (goals_ll_h0 is in the judge).
-5. **Bonus season weighting** (model).
+4. **Bonus season weighting** (model; low value on develop).
    - BPS changed in 2026/27; the bonus fit weights 4 seasons by 0.7 per year. Develop can
-     only test the weighting itself (current-season data weighted more), not the new rules.
-     `e_bonus` is now scored by the xP evaluation (243c39f): read it on develop first.
-6. **Free-transfer value** (decision; `ft_scale` key on `research`, c6eb489).
+     only test the weighting itself (current-season data weighted more), not the new rules,
+     and `season_decay` is shared with saves and cards. `e_bonus` is now scored by the xP
+     evaluation (243c39f): read it on develop first.
+5. **Free-transfer value** (decision; `ft_scale` key on `research`, c6eb489). **Blocked on
+   `research`** since `back_split` is on: calibrated v1 raises (fingerprint), so every
+   `optimizer:v1` backtest at the head fails until the table is regenerated (*Needs the
+   user*).
    - 1.5: DISCARD on realized (+0.045/GW, CI [−0.318, +0.429]) but xG-scored +0.446/GW,
      CI [+0.051, +0.842], p 0.073; seasons split 4–3. Next value: 2.0 (the xG signal says
      higher), then 0.5 only if 2.0 is flat. Two values left under the 3-value rule.
-7. **P(CS) team level** (model; watch).
+6. **P(CS) team level** (model; watch).
    - Live GW1–6: team P(CS) 0.25 predicted vs 0.27–0.33 realized by position, but GW to GW
      0.13–0.40: a few team-weeks. Recheck at GW10; brier_cs on develop is flat so far.
 
 ## Needs the user (not the loop's to do)
 
-- **Calibration table after `club_continuity`**: the table was fitted on walks without the
-  feature; the fingerprint doesn't see feature changes. Regenerate (`dev/calibrate_v1.py
-  walk` + `fit --write`) as part of promoting it.
+- **The calibration table on `research`** (blocks decision experiments): with
+  `back_split=True` and `finishing_prior=25` the fingerprint no longer matches, so
+  calibrated v1 raises at the `research` head. 5 model tests fail by design (the table test
+  and 4 that call calibrated v1), and `optimizer:v1` backtests can't run there. The features
+  kept since the table (`club_continuity`, `club_fixtures_season`) change predictions
+  without changing the fingerprint. Regenerating the table on `research` (the calibration
+  walk + fit --write, frozen for the loop) would unblock decision experiments; otherwise it
+  happens at promotion.
 - European / cup fixtures for rotation risk: no source in `raw/`; a new adapter and build
   change.
 - Shadow-policy scoring of the bot's live recommendations (PLAN §8): reads the bot's
@@ -67,6 +70,16 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
 
 ## Done
 
+- **#39 `back_split` on** (model, KEEP 2026-10-20, fe3e683): MSE h0 −0.0019, h1–5 −0.0008;
+  2021 −0.0102, 2022 −0.0013, 2017–2020 identical. Live caveat stands: read the `a`/`a100`
+  back-from-a-miss cell at the next weekly monitor before promoting (GW1–6: players back from
+  a 0-minute GW started 0.095 vs 0.155 predicted, n 346; not exactly this cell).
+- **Season phase** (model, KEEP 2026-10-20, 2161931): `club_fixtures_season` in
+  `LAG_FEATURES`; MSE h0 −0.0013, h1–5 −0.0007, 5 seasons better (2019 +0.0014).
+- **#43 finishing above npxG** (model, KEEP 2026-10-20, 7da0e49): goal share × (np goals +
+  25) / (npxG + 25) over his own-npxG rows; MSE h0 −0.0020, h1–5 −0.0026, 5 seasons better,
+  goal Brier −0.11 %. k = 12: flat (DISCARD). FPL assists over xA, same form: flat (DISCARD).
+  A third value only if a re-slice says the multiplier over-reacts.
 - **Measure defcon and bonus** (tooling, KEEP 2026-10-18, 243c39f + 31a9115): `p_defcon`,
   `e_bonus` components and the summed `pts_*` columns in the GW frame; the xP evaluation
   joins realized bonus and defcon and scores them. model_eval metrics identical.
