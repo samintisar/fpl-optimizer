@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The weekly live monitor (autoresearch/program.md), on fplopt-server, run from the pinned
-# harness in ~/fpl-live (main, the code the bot runs; raw/ synced from botbox by sync.sh):
+# harness in ~/fpl-live (main, the code the bot runs; raw/ copied from the live archive
+# ~/fpl-optimizer/raw by sync.sh raw):
 # 1. `fplopt build all` -> data/ (every season, incl. 2026/27 so far);
 # 2. v1 and FPL's ep_next on 2026/27 so far (`models eval`: predictions, regrets, metrics per
 #    horizon and band, components) -> results/live/<stamp>/;
@@ -12,6 +13,10 @@
 set -euo pipefail
 harness=~/fpl-harness
 test -d raw && test -f pyproject.toml || { echo "run it in ~/fpl-live" >&2; exit 2; }
+# One research job at a time: weekly.sh replaces ~/fpl-research/data, which a running
+# walk reads (waits up to 3 h for the other to finish).
+exec 9>"$HOME/.fpl-research.lock"
+flock -w 10800 9 || { echo "another research job holds ~/.fpl-research.lock" >&2; exit 2; }
 # The live bot and archiver share this box: research runs at low priority.
 uv="nice -n 15 $HOME/.local/bin/uv"
 stamp=$(date -u +%Y-%m-%dT%H%MZ)

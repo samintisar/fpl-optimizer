@@ -53,6 +53,8 @@ HIGHER_IS_BETTER = ("goals_ll_h0",)
 def summarize(path: str, sha: str, seconds: str) -> dict:
     report = json.loads(open(path, encoding="utf-8").read())
     rows = [r for r in report["rows"] if r["variant"] == "chosen"]
+    if not rows:
+        sys.exit(f"{path}: no chosen rows")
     per_season = {str(r["season"]): {m: r[m] for m in METRICS} for r in rows}
     mean = {m: sum(r[m] for r in rows) / len(rows) for m in METRICS}
     return {"sha": sha, "seconds": int(seconds), "mean": mean, "per_season": per_season}
@@ -71,6 +73,10 @@ def compare(base: dict, cand: dict) -> tuple[bool, list[str]]:
     rule(gain >= MIN_GAIN, f"MSE h0 {b['mse_h0']:.5f} -> {c['mse_h0']:.5f} (gain {gain:+.5f})")
     d15 = c["mse_h15"] - b["mse_h15"]
     rule(d15 <= SLACK_H15, f"MSE h1-5 {b['mse_h15']:.5f} -> {c['mse_h15']:.5f} ({d15:+.5f})")
+    missing = sorted(set(base["per_season"]) - set(cand["per_season"]))
+    rule(not missing, f"candidate has every baseline season (missing: {missing or 'none'})")
+    if missing:
+        return False, reasons
     deltas = {
         s: cand["per_season"][s]["mse_h0"] - base["per_season"][s]["mse_h0"]
         for s in base["per_season"]

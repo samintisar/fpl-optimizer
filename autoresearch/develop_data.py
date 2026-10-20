@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from fplopt.build.tables import TABLES
+
 LAST_DEVELOP_SEASON = 2022
 
 
@@ -30,8 +32,10 @@ def main() -> None:
             frame = frame[frame["season"] <= LAST_DEVELOP_SEASON].reset_index(drop=True)
             kept = sorted(frame["season"].unique().tolist())
             print(f"{path.name}: {len(frame)} rows, seasons {kept[:1]}..{kept[-1:]}")
-        else:
+        elif path.stem in TABLES and TABLES[path.stem].kind == "static":
             print(f"{path.name}: static, {len(frame)} rows")
+        else:  # a dated table without seasons would carry every season across
+            sys.exit(f"{path.name} has no season column and is not a static table")
         frame.to_parquet(tmp / path.name, index=False)
     (tmp / "DEVELOP_ONLY").write_text(
         f"seasons <= {LAST_DEVELOP_SEASON} only (autoresearch/develop_data.py)\n", encoding="utf-8"

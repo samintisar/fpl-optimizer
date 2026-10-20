@@ -9,8 +9,14 @@
 #   cd ~/fpl-research && bash ~/fpl-harness/autoresearch/model_eval.sh
 set -euo pipefail
 harness=~/fpl-harness
+# One research job at a time: weekly.sh replaces ~/fpl-research/data, which a running
+# walk reads (waits up to 3 h for the other to finish).
+exec 9>"$HOME/.fpl-research.lock"
+flock -w 10800 9 || { echo "another research job holds ~/.fpl-research.lock" >&2; exit 2; }
 test -f data/DEVELOP_ONLY || { echo "data/ is not the develop-only copy" >&2; exit 2; }
-test -z "$(git status --porcelain -- src)" || { echo "uncommitted code" >&2; exit 2; }
+# Scored and cached by HEAD: any uncommitted change but the loop's notes and logs.
+dirty=$(git status --porcelain -- . ":!results" ":!autoresearch")
+test -z "$dirty" || { echo "uncommitted changes:" >&2; echo "$dirty" >&2; exit 2; }
 sha=$(git rev-parse --short=10 HEAD)
 # Keyed by code and data: a rebuilt develop copy (weekly.sh) makes every baseline stale.
 data=$(cat data/*.parquet | sha256sum | cut -c1-8)
@@ -28,7 +34,9 @@ $uv run python "$harness/dev/calibrate_v1.py" --data-dir data walk --seasons 201
 $uv run python "$harness/dev/calibrate_v1.py" fit --walk "$out/walk" --parts p_start:1+ \
   > "$out/fit.log" 2>&1
 $uv run python "$harness/autoresearch/judge.py" summarize \
-  "$out/walk/calibration-2016-0.json" "$sha" "$(( $(date +%s) - start ))" > "$out/metrics.json"
+  "$out/walk/calibration-2016-0.json" "$sha" "$(( $(date +%s) - start ))" \
+  > "$out/metrics.json.tmp"
+mv "$out/metrics.json.tmp" "$out/metrics.json"  # never a partial "already scored"
 rm -f "$out"/walk/*.parquet  # ~100 MB per commit; metrics.json and the logs stay
 echo "scored: $out"
 cat "$out/metrics.json"

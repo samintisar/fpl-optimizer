@@ -45,6 +45,9 @@ judge = load("judge")
         "git checkout try/x -- src/fplopt/backtest/scoring.py",
         "ssh fplopt-server 'cd ~/fpl-harness && git checkout -q try/x'",
         "cp guard.py C:/Users/samin/.fpl-harness/guard.py",
+        "python -c \"from pathlib import Path; Path('autoresearch/judge.py').write_bytes(b'')\"",
+        "python -c \"import shutil; shutil.copy('x.py', 'autoresearch/judge.py')\"",
+        "python -c \"import os; os.replace('x.py', 'dev/calibrate_v1.py')\"",
     ],
 )
 def test_the_guard_refuses(command):
@@ -152,3 +155,28 @@ def test_the_judge_discards_a_worse_component():
     base = metrics(4.2609)
     ok, reasons = judge.compare(base, metrics(4.2590, brier_start_h0=1.01))
     assert not ok and any("brier_start_h0" in r and r.startswith("FAIL") for r in reasons)
+
+
+def test_the_judge_refuses_a_candidate_missing_a_season():
+    base = metrics(4.2609)
+    cand = metrics(4.2590)
+    del cand["per_season"]["2020"]
+    ok, reasons = judge.compare(base, cand)
+    assert not ok and reasons[-1].startswith("FAIL  candidate has every baseline season")
+
+
+def test_develop_data_keeps_develop_seasons_and_refuses_unknown_undated_tables(tmp_path):
+    import pandas as pd
+
+    source, out = tmp_path / "full", tmp_path / "dev"
+    source.mkdir()
+    pd.DataFrame({"season": [2021, 2022, 2023, 2026]}).to_parquet(source / "player_gw.parquet")
+    pd.DataFrame({"player_key": ["p1"]}).to_parquet(source / "player_dim.parquet")
+    script = str(ROOT / "develop_data.py")
+    run = [sys.executable, script, str(source), str(out)]
+    assert subprocess.run(run, capture_output=True).returncode == 0
+    assert pd.read_parquet(out / "player_gw.parquet")["season"].tolist() == [2021, 2022]
+    assert len(pd.read_parquet(out / "player_dim.parquet")) == 1
+    pd.DataFrame({"snapshot_at": [1]}).to_parquet(source / "new_snapshot.parquet")
+    result = subprocess.run(run, capture_output=True, text=True)
+    assert result.returncode != 0 and "new_snapshot.parquet has no season" in result.stderr

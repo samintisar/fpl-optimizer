@@ -39,11 +39,14 @@ PINNED_CALLS = (
 )
 # A shell command that writes a frozen file: a redirect into it (`>`, `>>`, `2>`; not
 # `2>&1`), or a command that writes the files it names (in place, copy/move/delete,
-# git restore, PowerShell and Python file writes).
+# git restore, PowerShell and Python file writes). A script file the loop writes and
+# runs is out of its sight: the scoring files run from the pinned harness, so editing
+# the clone's copies changes nothing that is judged.
 REDIRECT_TARGET = r"\d?>>?\s*(?!&)([^\s|;&<>]+)"
 WRITES = (
     r"\b(sed|perl)\s+-\w*i|\btee\b|\b(mv|cp|rm|truncate|install)\b|\bgit\s+(checkout|restore)\s"
-    r"|Set-Content|Out-File|Add-Content|Remove-Item|Move-Item|Copy-Item|write_text|open\("
+    r"|Set-Content|Out-File|Add-Content|Remove-Item|Move-Item|Copy-Item|open\("
+    r"|\b(write_text|write_bytes)\b|\.(unlink|rename|replace)\(|\bshutil\.|\bos\.(remove|rename|replace|unlink)\b"
 )
 COMMANDS = (
     (r"botbox", "botbox is gone (wiped Oct 17); the bot runs in ~/fpl-optimizer"),
