@@ -45,6 +45,10 @@ variant, the league average of his position (Σ X / Σ D) for players with histo
 price prior for new players only (no played minute in the window), is
 `price_prior_all=False`; it scored a little worse on develop.
 
+**Finishing** (#43): g is multiplied by (np goals + k) / (npxG + k) over his window rows
+that carry his own npxG (unweighted; k = `finishing_prior` pseudo-npxG at par, hard
+shrinkage: 10 goals above 20 npxG give × 1.22 at k = 25). Fallback rows don't count.
+
 **Team consistency** (`predict_shares`, per team-fixture over the club's pool players, f =
 e_minutes / 90 from the minutes frame, the expected XI by minutes):
 - λ_np = max(λ_for · (1 − `own_goal_fraction`) − E[team penalty goals], 0) with λ_for from
@@ -182,12 +186,17 @@ class SharesParams:
     pen_team_prior: float = 38.0  # pseudo team-matches at the league's penalty rate
     conversion_prior: float = 20.0  # pseudo attempts at the league's conversion
     taker_prior: float = 1.0  # history takers: q = s / (s + taker_prior)
+    # Finishing (#43): g × (np goals + k) / (npxG + k) over his window rows with his own
+    # npxG, unweighted; k pseudo-npxG at par (hard shrinkage). None: off.
+    finishing_prior: float | None = 25.0
 
     def __post_init__(self) -> None:
         if not self.season_weights or any(w < 0 for w in self.season_weights):
             raise ValueError("season_weights must be non-empty and >= 0")
         if self.prior_minutes <= 0:
             raise ValueError("prior_minutes must be > 0")
+        if self.finishing_prior is not None and self.finishing_prior <= 0:
+            raise ValueError("finishing_prior must be > 0 or None")
 
 
 @dataclass(frozen=True)
@@ -570,9 +579,10 @@ def marcel_shares(
     w_goals = base * np.where(window["fb_goals"], params.goals_weight, 1.0)
     w_assists = base * np.where(window["fb_assists"], params.goals_weight, 1.0)
     d = window["d"].to_numpy(dtype="float64")
-    attempts = np.nan_to_num(window["pen_goals"].to_numpy(dtype="float64")) + np.nan_to_num(
-        window["penalties_missed"].to_numpy(dtype="float64")
-    )
+    pen_goals = np.nan_to_num(window["pen_goals"].to_numpy(dtype="float64"))
+    attempts = pen_goals + np.nan_to_num(window["penalties_missed"].to_numpy(dtype="float64"))
+    own_xg = ~window["fb_goals"].to_numpy(dtype=bool)
+    np_goals = np.nan_to_num(window["goals_scored"].to_numpy(dtype="float64")) - pen_goals
     sums = (
         pd.DataFrame(
             {
@@ -583,6 +593,8 @@ def marcel_shares(
                 "da": w_assists * d,
                 "minutes": window["on_pitch"].to_numpy(dtype="float64"),
                 "attempts": base * attempts,
+                "fin_goals": np.where(own_xg, np.maximum(np_goals, 0.0), 0.0),
+                "fin_xg": np.where(own_xg, window["x_goals"].to_numpy(dtype="float64"), 0.0),
             }
         )
         .groupby("player_key")
@@ -591,7 +603,8 @@ def marcel_shares(
     out = pool[["player_key", "team_key", "element_type", "price"]].merge(
         sums, left_on="player_key", right_index=True, how="left"
     )
-    out = out.fillna({c: 0.0 for c in ("xg", "dg", "xa", "da", "minutes", "attempts")})
+    sums_columns = ("xg", "dg", "xa", "da", "minutes", "attempts", "fin_goals", "fin_xg")
+    out = out.fillna({c: 0.0 for c in sums_columns})
     element_type = out["element_type"].to_numpy(dtype="float64")
     price = out["price"].to_numpy(dtype="float64")
     new = out["minutes"].to_numpy() <= 0
@@ -611,8 +624,14 @@ def marcel_shares(
         np.isnan(prior_a), _position_prior(fit.position_assist, element_type), prior_a
     )
     d0 = params.prior_minutes / 90.0 * fit.team_output
-    return out.assign(
-        g=(out["xg"] + prior_g * d0) / (out["dg"] + d0),
+    k = params.finishing_prior
+    finishing = (
+        np.ones(len(out))
+        if k is None
+        else ((out["fin_goals"] + k) / (out["fin_xg"] + k)).to_numpy(dtype="float64")
+    )
+    return out.drop(columns=["fin_goals", "fin_xg"]).assign(
+        g=(out["xg"] + prior_g * d0) / (out["dg"] + d0) * finishing,
         a=(out["xa"] + prior_a * d0) / (out["da"] + d0),
         prior_g=prior_g,
         prior_a=prior_a,
