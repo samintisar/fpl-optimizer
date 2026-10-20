@@ -199,7 +199,7 @@ class V1Params:
     components: ComponentsParams = field(default_factory=ComponentsParams)
     # The flag layer's own cells for an available player who missed his last match
     # (`availability` module docstring, issue #39).
-    back_split: bool = False
+    back_split: bool = True
     calibrate: bool = True  # apply the season's calibration_table entry
 
 
