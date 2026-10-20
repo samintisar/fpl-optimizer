@@ -7,6 +7,7 @@ import pytest
 from synthetic_season import synthetic_tables
 
 from fplopt.features.store import DataStore
+from fplopt.models import availability
 from fplopt.models.availability import (
     AvailabilityFit,
     adjust_minutes,
@@ -106,6 +107,59 @@ def test_the_fit_is_deterministic_and_uses_only_visible_flags(league, fits):
     snaps.loc[future, "chance_of_playing_next_round"] = 0
     snaps.loc[future, "news"] = "Expected back 01 Jan"
     assert fit_availability(view(tables), minutes) == fit
+
+
+def test_back_cells_are_available_players_who_missed_their_last_match():
+    category = pd.Series(["a", "a100", "a100", "d50", "i", ""])
+    absent = pd.Series([1.0, 2.0, 0.0, 1.0, 3.0, np.nan])
+    regular = pd.Series([0.9, np.nan, 1.0, 0.8, 0.2, 0.5])
+    labels, x = availability._back(category, absent, regular)
+    assert list(labels) == ["a_back", "a100_back", "a100", "d50", "i", ""]
+    np.testing.assert_allclose(x, [0.4, -0.5, 0.0, 0.0, 0.0, 0.0])
+
+
+def test_back_split_off_is_the_plain_fit(league, fits):
+    minutes, fit = fits
+    assert fit_availability(view(league), minutes, back_split=False) == fit
+    assert not fit.back_split and fit.back_slopes == ()
+
+
+def test_back_split_fits_its_own_cells(league, fits, monkeypatch):
+    minutes, plain = fits
+    monkeypatch.setattr(availability, "MIN_BACK_ROWS", 0)
+    v = view(league)
+    fit = fit_availability(v, minutes, back_split=True)
+    assert fit == fit_availability(v, minutes, back_split=True)  # deterministic
+    # The synthetic flags are a, d50 and i only, so a_back is the one back cell.
+    assert {c for c, _, _ in fit.offsets} == {"a", "a_back", "d50", "i"}
+    assert {c for c, _, _ in fit.back_slopes} == {"a_back"}
+    predicted = predict_minutes(v, minutes)
+    adjusted = adjust_minutes(v, predicted, fit)
+    assert list(adjusted.columns) == list(MINUTES_COLUMNS)
+    assert not adjusted["p_start"].equals(adjust_minutes(v, predicted, plain)["p_start"])
+    sums = adjusted.groupby(["fixture_key", "team_key"])["p_start"].sum()
+    assert (sums - 11).abs().median() < 1e-6
+
+
+def test_thin_back_cells_keep_the_plain_mapping(league, fits, monkeypatch):
+    minutes, plain = fits
+    monkeypatch.setattr(availability, "MIN_BACK_ROWS", 10**9)
+    v = view(league)
+    fit = fit_availability(v, minutes, back_split=True)
+    assert fit.back_split and fit.back_slopes == ()
+    # The same mapping up to the solver's tolerance: the unused back cells' parameters
+    # (regularized to 0) change the trust-region steps in the last digits.
+    assert [(c, b) for c, b, _ in fit.offsets] == [(c, b) for c, b, _ in plain.offsets]
+    np.testing.assert_allclose(
+        [fit.slope, *(o for _, _, o in fit.offsets)],
+        [plain.slope, *(o for _, _, o in plain.offsets)],
+        rtol=1e-6,
+        atol=1e-8,
+    )
+    predicted = predict_minutes(v, minutes)
+    pd.testing.assert_frame_equal(
+        adjust_minutes(v, predicted, fit), adjust_minutes(v, predicted, plain), rtol=1e-6
+    )
 
 
 def test_without_snapshots_nothing_is_fitted_or_adjusted():

@@ -199,6 +199,26 @@ def test_lags_use_only_earlier_gameweeks():
     assert first["n_long"] == 0
 
 
+def test_club_continuity_is_the_share_of_starters_kept():
+    rows = []
+    for gw in (1, 2, 3):
+        rows += team(1, gw, [90] * 11 + [0])  # the same XI every week
+    rows += team(2, 1, [90] * 11 + [0] * 4, first_player=21)  # 21-31 start
+    rows += team(2, 2, [0] * 4 + [90] * 11, first_player=21)  # 25-35: 7 kept
+    rows += team(2, 3, [90] * 15, first_player=21)
+    frame = frame_at(league(rows), 6)
+    assert np.isnan(row(frame, 1, 2)["club_continuity"])  # one earlier fixture only
+    assert row(frame, 1, 3)["club_continuity"] == pytest.approx(1.0)
+    assert row(frame, 21, 3)["club_continuity"] == pytest.approx(7 / 11)
+    assert row(frame, 35, 3)["club_continuity"] == pytest.approx(7 / 11)
+
+
+def test_club_fixtures_season_counts_the_clubs_earlier_fixtures():
+    frame = frame_at(league(history_rows()), 12)
+    assert [row(frame, 1, gw)["club_fixtures_season"] for gw in (1, 2, 7)] == [0, 1, 6]
+    assert row(frame, 5, 8)["club_fixtures_season"] == 7
+
+
 def test_a_planted_future_row_changes_no_earlier_feature():
     rows = history_rows()
     base = frame_at(league(rows), 12)

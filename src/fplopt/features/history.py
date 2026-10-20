@@ -42,7 +42,12 @@ the as-of schedule) and the keys differ per fixture.
   the other registered players of that team-fixture; the pool's club-mates when
   predicting); `comp_rank`: his rank by `start_rate_l5` among them (1 = highest);
 - `fixtures_at_club`: his consecutive earlier rows at his current club (capped at 10; 0 for
-  a new signing, also when the pool's club differs from his last row's club).
+  a new signing, also when the pool's club differs from his last row's club);
+- `club_continuity`: how settled his club's XI is: over the club's last
+  `CONTINUITY_WINDOW` fixtures before the deadline (any season), the mean share of its 11
+  starters who also started its previous fixture (NaN before its second fixture);
+- `club_fixtures_season`: his club's league fixtures this season before the GW (the phase
+  of the season: early on, the lag windows still hold last season's rows).
 
 **Dropped (no source):** European/cup matches (no data; rest days count league fixtures
 only), manager tenure, age. `team_join_date` is not a feature: the snapshot carries it only
@@ -97,6 +102,7 @@ CLUB_CAP = 10
 ABSENCE_RUN = 3  # 0-minute rows before an appearance that make it a return
 RETURN_WINDOW = 3
 RED_WINDOW = 3
+CONTINUITY_WINDOW = 5  # club fixtures in club_continuity
 # (yellow cards this season, last gw_index at which reaching them bans, matches banned).
 # Simplified from the Premier League rules: the real cut-offs are the club's 19th / 32nd
 # league match (here gw_index 19 / 32), cup and European cards and matches don't count, and
@@ -137,6 +143,8 @@ LAG_FEATURES = (
     "comp_start_sum",
     "comp_rank",
     "fixtures_at_club",
+    "club_continuity",
+    "club_fixtures_season",
 )
 TARGETS = ("minutes", "start", "sixty", "sub")
 TRAINING_KEYS = (
@@ -241,6 +249,47 @@ def _team_fixtures(matches: pd.DataFrame) -> pd.DataFrame:
     return fixtures.sort_values(
         ["team_key", "kickoff_time", "fixture_key"], kind="mergesort"
     ).reset_index(drop=True)
+
+
+def _club_continuity(matches: pd.DataFrame, rows: pd.DataFrame) -> np.ndarray:
+    """Per row (team_key, ref_time): the mean over the team's last `CONTINUITY_WINDOW`
+    fixtures before ref_time of the share of its 11 starters who started its previous
+    fixture (any season; NaN before the team's second fixture)."""
+    fixtures = _team_fixtures(matches)
+    fixtures["order"] = fixtures.groupby("team_key").cumcount()
+    starters = matches.loc[matches["start"] >= 0.5, ["team_key", "fixture_key", "player_key"]]
+    starters = starters.merge(
+        fixtures[["team_key", "fixture_key", "order"]], on=["team_key", "fixture_key"]
+    )
+    previous = starters[["team_key", "player_key", "order"]].assign(order=lambda d: d["order"] + 1)
+    kept = starters.merge(
+        previous.assign(kept=1.0), on=["team_key", "player_key", "order"], how="left"
+    )
+    share = kept.groupby(["team_key", "order"])["kept"].sum() / N_STARTERS
+    fixtures = fixtures.merge(
+        share.rename("continuity").reset_index(), on=["team_key", "order"], how="left"
+    )
+    fixtures.loc[fixtures["order"] == 0, "continuity"] = np.nan
+    fixtures["mean"] = fixtures.groupby("team_key")["continuity"].transform(
+        lambda s: s.rolling(CONTINUITY_WINDOW, min_periods=1).mean()
+    )
+    right = fixtures[["team_key", "kickoff_time", "mean"]]
+    right = right.astype({"team_key": "int64", "kickoff_time": UTC_US})
+    right = right.sort_values("kickoff_time", kind="mergesort")
+    left = rows[["team_key", "ref_time"]].assign(_row=np.arange(len(rows)))
+    left = left.astype({"team_key": "int64", "ref_time": UTC_US})
+    left = left.sort_values("ref_time", kind="mergesort")
+    merged = pd.merge_asof(
+        left,
+        right,
+        left_on="ref_time",
+        right_on="kickoff_time",
+        by="team_key",
+        allow_exact_matches=False,
+    )
+    out = np.full(len(rows), np.nan)
+    out[merged["_row"].to_numpy()] = merged["mean"].to_numpy(dtype="float64")
+    return out
 
 
 def _fixtures_before(fixtures: pd.DataFrame, rows: pd.DataFrame) -> np.ndarray:
@@ -406,6 +455,8 @@ def training_frame(view: AsOfView) -> pd.DataFrame:
         validate="many_to_one",
     )
     frame = _competition(frame, ["fixture_key", "team_key"])
+    frame["club_continuity"] = _club_continuity(matches, frame)
+    frame["club_fixtures_season"] = frame["_club_fixtures"]
     minutes = frame["minutes"]
     frame = frame.assign(
         sixty=(minutes >= 60).astype("float64"),
@@ -512,7 +563,9 @@ def prediction_frame(view: AsOfView) -> pd.DataFrame:
     with np.errstate(invalid="ignore", divide="ignore"):
         share = frame["_club_starts"] / club_fixtures
     frame["start_share_season"] = share.where(club_fixtures > 0)
+    frame["club_fixtures_season"] = club_fixtures
     frame = _competition(frame, ["team_key"])
+    frame["club_continuity"] = _club_continuity(matches, frame.assign(ref_time=view.deadline))
     horizon = _horizon_fixtures(view, season)
     out = frame.merge(
         horizon[

@@ -25,6 +25,13 @@ Fixtures in a predicted ban (`banned`) are left out of the mapping: they keep th
 model's ban residual, which was fitted on rule-banned rows whatever their flags. Then the
 team normalization (`finish_minutes`) runs again, with zeroed and banned players fixed.
 
+**Back from an absence** (`back_split`, issue #39): a player flagged `a` or `a100` who missed
+his club's last match (`absent_run` ≥ 1) gets his own cells, `a_back` / `a100_back`, and
+those cells add β · (`start_rate_l10` − 0.5), one β per cell: how regular he was. The minutes
+model reads the miss without the flag; once FPL says he is available, a regular starter's
+miss says less than a fringe player's (develop 2021/22–2022/23, horizon 0, `a100` after a
+miss: `start_rate_l10` > 0.8 started 71% against 0.54 predicted, < 0.3 19% against 0.26).
+
 **Fit (`fit_availability(view, minutes_fit)`), leak-free and walk-forward:** every GW
 deadline d of the visible seasons with a player snapshot before d, before the view's
 deadline. The flags are those of the newest snapshot before d (`view.earlier(d)`, exactly
@@ -45,14 +52,14 @@ validate-season row is ever used for a validate-season prediction it precedes).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from scipy.special import expit, logit
 
-from fplopt.features.history import training_frame
+from fplopt.features.history import prediction_frame, training_frame
 from fplopt.features.store import AsOfView
 from fplopt.models.minutes import (
     EPS,
@@ -72,6 +79,13 @@ __all__ = (
 
 UTC_US = pd.DatetimeTZDtype("us", "UTC")
 CATEGORIES = ("a", "a100", "d25", "d50", "d75", "i", "s", "u", "n")
+BACK_CATEGORIES = ("a", "a100")  # `back_split`: own cells after a missed match
+BACK_SUFFIX = "_back"
+REGULAR_CENTER = 0.5  # start_rate_l10 at which β adds nothing
+# Fit rows (all horizons) a back category needs for its own cells; fewer (the first weeks
+# of flags, 2020/21 GW32-38: ~1,000) and it keeps the plain category's. Set after seeing
+# develop 2020/21 get worse without it.
+MIN_BACK_ROWS = 2000
 HORIZON_BUCKETS = 4  # offsets for h = 0, 1, 2 and 3+
 LOOKAHEAD = 5  # horizon GWs after the deadline's GW used in the fit
 MIN_ROWS = 500
@@ -92,7 +106,8 @@ FLAG_COLUMNS = (
 
 @dataclass(frozen=True)
 class AvailabilityFit:
-    """The fitted mapping: logit p' = slope · logit p + offset[(category, bucket)]."""
+    """The fitted mapping: logit p' = slope · logit p + offset[(category, bucket)], plus
+    β[(category, bucket)] · (start_rate_l10 − 0.5) in the `back_split` cells (`back_slopes`)."""
 
     slope: float
     offsets: tuple[tuple[str, int, float], ...]
@@ -100,6 +115,8 @@ class AvailabilityFit:
     max_shift: float
     max_scale: float
     n_rows: int
+    back_split: bool = False
+    back_slopes: tuple[tuple[str, int, float], ...] = ()
 
 
 def flag_category(status: pd.Series, chance: pd.Series) -> pd.Series:
@@ -177,6 +194,18 @@ def _identity(minutes_fit: MinutesFit, n_rows: int = 0) -> AvailabilityFit:
     )
 
 
+def _back(category: pd.Series, absent_run: pd.Series, regular: pd.Series) -> tuple:
+    """(the categories with `BACK_SUFFIX` where an `a`/`a100` player missed his last match,
+    the β covariate start_rate_l10 − 0.5 there and 0 elsewhere)."""
+    category = category.fillna("").astype("str").to_numpy()
+    back = np.isin(category, BACK_CATEGORIES) & (
+        absent_run.fillna(0).to_numpy(dtype="float64") >= 1
+    )
+    labels = np.where(back, np.char.add(category.astype("str"), BACK_SUFFIX), category)
+    x = np.where(back, regular.fillna(0.0).to_numpy(dtype="float64") - REGULAR_CENTER, 0.0)
+    return labels.astype("object"), x
+
+
 def _fit_rows(
     view: AsOfView, minutes_fit: MinutesFit, rows: pd.DataFrame | None = None
 ) -> pd.DataFrame:
@@ -204,7 +233,9 @@ def _fit_rows(
     n_long = rows["n_long"].to_numpy(dtype="float64")
     starts_long = np.nan_to_num(rows["start_rate_long"].to_numpy(dtype="float64")) * n_long
     long_run = (starts_long + params.long_run_prior * p_model) / (n_long + params.long_run_prior)
-    bases = rows[["player_key", "season", "gw_index"]].assign(p_model=p_model, long_run=long_run)
+    bases = rows[["player_key", "season", "gw_index", "absent_run", "start_rate_l10"]].assign(
+        p_model=p_model, long_run=long_run
+    )
     bases = bases.drop_duplicates(["player_key", "season", "gw_index"], keep="first")
     bases = bases.rename(columns={"gw_index": "base_index"})
     flags = flags.merge(
@@ -225,47 +256,92 @@ def _fit_rows(
 
 
 def fit_availability(
-    view: AsOfView, minutes_fit: MinutesFit, rows: pd.DataFrame | None = None
+    view: AsOfView,
+    minutes_fit: MinutesFit,
+    rows: pd.DataFrame | None = None,
+    back_split: bool = False,
 ) -> AvailabilityFit:
     """Fit the flag mapping walk-forward on the view (see the module docstring). `rows`:
-    `training_frame(view)` if the caller already built it (not modified)."""
+    `training_frame(view)` if the caller already built it (not modified). `back_split`:
+    the cells after a missed match (module docstring)."""
     rows = _fit_rows(view, minutes_fit, rows)
     if len(rows) < MIN_ROWS:
-        return _identity(minutes_fit, len(rows))
-    cells = pd.MultiIndex.from_product([CATEGORIES, range(HORIZON_BUCKETS)])
+        return replace(_identity(minutes_fit, len(rows)), back_split=back_split)
+    categories: tuple[str, ...] = CATEGORIES
+    backs: tuple[str, ...] = ()
+    x = np.zeros(len(rows))
+    if back_split:
+        labels, x = _back(rows["category"], rows["absent_run"], rows["start_rate_l10"])
+        for name in BACK_CATEGORIES:  # too few rows: keep the plain category's cells
+            thin = labels == name + BACK_SUFFIX
+            if thin.sum() < MIN_BACK_ROWS:
+                labels = np.where(thin, name, labels)
+                x = np.where(thin, 0.0, x)
+        rows = rows.assign(category=labels)
+        backs = tuple(c + BACK_SUFFIX for c in BACK_CATEGORIES)
+        categories = (*CATEGORIES, *backs)
+    cells = pd.MultiIndex.from_product([categories, range(HORIZON_BUCKETS)])
     cell = cells.get_indexer(pd.MultiIndex.from_arrays([rows["category"], rows["bucket"]]))
     z = logit(np.clip(rows["base"].to_numpy(dtype="float64"), EPS, 1 - EPS))
     y = rows["start"].to_numpy(dtype="float64")
     n_cells = len(cells)
+    # One β per back cell (category and horizon bucket); each row's β index (rows outside
+    # the back cells have x = 0, so their index doesn't matter).
+    back_cells = [k for k, (category, _) in enumerate(cells) if category in backs]
+    n_back = len(back_cells)
+    position = np.zeros(n_cells, dtype="int64")
+    position[back_cells] = np.arange(n_back)
+    bcell = position[cell]
+    n_theta = 1 + n_cells + n_back
 
     n = len(y)  # the objective is per row, so the tolerance does not depend on the sample
 
+    def eta_of(theta: np.ndarray) -> np.ndarray:
+        eta = theta[0] * z + theta[1 : 1 + n_cells][cell]
+        if n_back:
+            eta = eta + theta[1 + n_cells :][bcell] * x
+        return eta
+
     def loss(theta: np.ndarray) -> tuple[float, np.ndarray]:
-        slope, offsets = theta[0], theta[1:]
-        eta = slope * z + offsets[cell]
+        eta = eta_of(theta)
         p = expit(eta)
         # Log loss in a numerically stable form: log(1 + e^eta) - y * eta.
         value = float(np.sum(np.logaddexp(0.0, eta) - y * eta))
-        value += float(0.5 * np.sum(offsets**2) / OFFSET_SD**2)
+        value += float(0.5 * np.sum(theta[1:] ** 2) / OFFSET_SD**2)
         residual = p - y
-        grad_offsets = np.bincount(cell, weights=residual, minlength=n_cells)
-        grad_offsets += offsets / OFFSET_SD**2
-        grad = np.concatenate([[float(np.sum(residual * z))], grad_offsets])
+        grad = np.empty(n_theta)
+        grad[0] = float(np.sum(residual * z))
+        grad[1 : 1 + n_cells] = np.bincount(cell, weights=residual, minlength=n_cells)
+        if n_back:
+            grad[1 + n_cells :] = np.bincount(bcell, weights=residual * x, minlength=n_back)
+        grad[1:] += theta[1:] / OFFSET_SD**2
         return value / n, grad / n
 
     def hessian(theta: np.ndarray) -> np.ndarray:
-        p = expit(theta[0] * z + theta[1:][cell])
+        p = expit(eta_of(theta))
         w = p * (1.0 - p)
-        out = np.zeros((n_cells + 1, n_cells + 1))
+        out = np.zeros((n_theta, n_theta))
         out[0, 0] = float(np.sum(w * z * z))
         cross = np.bincount(cell, weights=w * z, minlength=n_cells)
-        out[0, 1:] = cross
-        out[1:, 0] = cross
-        diagonal = np.bincount(cell, weights=w, minlength=n_cells) + 1.0 / OFFSET_SD**2
+        out[0, 1 : 1 + n_cells] = cross
+        out[1 : 1 + n_cells, 0] = cross
+        diagonal = np.bincount(cell, weights=w, minlength=n_cells)
         out[np.arange(1, n_cells + 1), np.arange(1, n_cells + 1)] = diagonal
+        if n_back:
+            b = slice(1 + n_cells, n_theta)
+            zx = np.bincount(bcell, weights=w * z * x, minlength=n_back)
+            out[0, b] = zx
+            out[b, 0] = zx
+            joint = np.bincount(
+                cell * n_back + bcell, weights=w * x, minlength=n_cells * n_back
+            ).reshape(n_cells, n_back)
+            out[1 : 1 + n_cells, b] = joint
+            out[b, 1 : 1 + n_cells] = joint.T
+            out[b, b] = np.diag(np.bincount(bcell, weights=w * x * x, minlength=n_back))
+        out[np.arange(1, n_theta), np.arange(1, n_theta)] += 1.0 / OFFSET_SD**2
         return out / n
 
-    start = np.concatenate([[1.0], np.zeros(n_cells)])
+    start = np.concatenate([[1.0], np.zeros(n_theta - 1)])
     result = minimize(
         loss, start, jac=True, hess=hessian, method="trust-exact", options={"gtol": 1e-9}
     )
@@ -284,6 +360,12 @@ def fit_availability(
         max_shift=params.max_shift,
         max_scale=params.max_scale,
         n_rows=len(rows),
+        back_split=back_split,
+        back_slopes=tuple(
+            (str(cells[k][0]), int(cells[k][1]), float(theta[1 + n_cells + j]))
+            for j, k in enumerate(back_cells)
+            if used[k]
+        ),
     )
 
 
@@ -311,15 +393,31 @@ def adjust_minutes(view: AsOfView, minutes: pd.DataFrame, fit: AvailabilityFit) 
     offsets = {(category, bucket): value for category, bucket, value in fit.offsets}
     bucket = np.minimum(rows["horizon"].to_numpy(dtype="int64"), HORIZON_BUCKETS - 1)
     category = rows["category"].fillna("").astype("str").to_numpy()
+    beta = np.zeros(len(rows))
+    if fit.back_split:
+        lags = prediction_frame(view)[["player_key", "fixture_key", "absent_run", "start_rate_l10"]]
+        lags = rows[["player_key", "fixture_key"]].merge(
+            lags, on=["player_key", "fixture_key"], how="left", validate="one_to_one"
+        )
+        category, x = _back(pd.Series(category), lags["absent_run"], lags["start_rate_l10"])
+        slopes = {(c, b): value for c, b, value in fit.back_slopes}
+        beta = x * np.array(
+            [slopes.get((c, int(b)), 0.0) for c, b in zip(category, bucket, strict=True)],
+            dtype="float64",
+        )
     offset = np.array(
-        [offsets.get((c, int(b)), np.nan) for c, b in zip(category, bucket, strict=True)],
+        [
+            # A back cell the fit never saw falls back to its plain category.
+            offsets.get((c, int(b)), offsets.get((c.removesuffix(BACK_SUFFIX), int(b)), np.nan))
+            for c, b in zip(category, bucket, strict=True)
+        ],
         dtype="float64",
     )
     # Predicted bans keep their residual P(start) (fitted on rule-banned rows, flags
     # included); the mapping is for players the minutes model predicts freely.
     banned = cond["banned"].to_numpy(dtype=bool)
     mapped = back.isna().to_numpy(dtype=bool) & ~np.isnan(offset) & (p > 0) & ~banned
-    adjusted = expit(fit.slope * logit(np.clip(p, EPS, 1 - EPS)) + np.nan_to_num(offset))
+    adjusted = expit(fit.slope * logit(np.clip(p, EPS, 1 - EPS)) + np.nan_to_num(offset) + beta)
     ratio = np.where(p > 0, adjusted / np.where(p > 0, p, 1.0), 1.0)
     new_p = np.where(mapped, adjusted, p)
     new_csub = np.where(mapped, csub * np.minimum(ratio, 1.0), csub)
