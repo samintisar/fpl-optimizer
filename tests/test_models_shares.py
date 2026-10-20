@@ -158,6 +158,7 @@ def toy_fit(**params):
         "prior_minutes": 480.0,
         "season_weights": (3.0, 2.0, 1.0, 1.0),
         "price_prior_all": False,
+        "finishing_prior": None,
         **params,
     }
     return SharesFit(
@@ -184,8 +185,11 @@ def toy_fit(**params):
     )
 
 
-def share_rows(player_key, team_key, season, n, x_per_match, xa_per_match=0.1, fallback=False):
-    """n full matches with team output 1.5 per match and the given npxG / xA per match."""
+def share_rows(
+    player_key, team_key, season, n, x_per_match, xa_per_match=0.1, fallback=False, goals=None
+):
+    """n full matches with team output 1.5 per match and the given npxG / xA per match;
+    np goals per match `goals` (default: the npxG, finishing at par)."""
     return pd.DataFrame(
         {
             "player_key": player_key,
@@ -197,6 +201,7 @@ def share_rows(player_key, team_key, season, n, x_per_match, xa_per_match=0.1, f
             "on_pitch": 1.0,
             "fb_goals": fallback,
             "fb_assists": fallback,
+            "goals_scored": x_per_match if goals is None else goals,
             "pen_goals": 0.0,
             "penalties_missed": 0.0,
         },
@@ -276,6 +281,24 @@ def test_club_change_keeps_the_old_share_with_extra_shrinkage():
     assert 0.3 < out.loc[4, "g"] < out.loc[5, "g"] < 0.5
     same = marcel_shares(rows, POOL, toy_fit(club_change_weight=1.0), SEASON)
     assert same.set_index("player_key").loc[4, "g"] == pytest.approx(out.loc[5, "g"])
+
+
+def test_finishing_scales_the_goal_share_with_hard_shrinkage():
+    rows = pd.concat(
+        [
+            share_rows(1, 10, 2023, 40, 0.5, goals=0.75),  # 30 np goals from 20 npxG
+            share_rows(2, 10, 2023, 40, 0.5, goals=0.75, fallback=True),  # no xG of his
+            share_rows(5, 20, 2023, 40, 0.5),  # at par
+        ],
+        ignore_index=True,
+    )
+    off = marcel_shares(rows, POOL, toy_fit(), SEASON).set_index("player_key")
+    on = marcel_shares(rows, POOL, toy_fit(finishing_prior=25.0), SEASON).set_index("player_key")
+    assert on.loc[1, "g"] == pytest.approx(off.loc[1, "g"] * (30 + 25) / (20 + 25))
+    assert on.loc[2, "g"] == pytest.approx(off.loc[2, "g"])  # fallback rows don't count
+    assert on.loc[5, "g"] == pytest.approx(off.loc[5, "g"])
+    assert on.loc[3, "g"] == pytest.approx(off.loc[3, "g"])  # new player
+    assert "fin_goals" not in on.columns
 
 
 # --- the synthetic league -------------------------------------------------------------------
@@ -451,4 +474,6 @@ def test_params_validate():
         SharesParams(season_weights=())
     with pytest.raises(ValueError):
         SharesParams(prior_minutes=0)
+    with pytest.raises(ValueError):
+        SharesParams(finishing_prior=0.0)
     assert dataclasses.replace(SharesParams(), prior_minutes=240.0).prior_minutes == 240.0
