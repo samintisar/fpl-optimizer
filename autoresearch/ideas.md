@@ -18,10 +18,19 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      team normalization. The GBM's raw P(start) sums to 11.0–11.2 per club at h0 and the
      median logit shift is ±0.05 (2019/2021/2022 × GW4/10/22), so the shift moves a regular
      by < 0.01. The compression is in the GBM itself.
-   - Open leads: label noise from inferred starts (before 2022/23 GW16; 569 of the 1,016
-     wrong rows are 45-minute half-time ties, a coin flip between a regular and a sub):
-     weight 0 for training rows tied at the 11th/12th spot of an inferred fixture. Re-slice
-     the P(start) bands after tonight's keeps first: they may have moved the gap.
+   - Live GW1–7 with the promoted model (report 2026-10-21-gw7): regulars 0.773 vs 0.818;
+     0.8–0.9 band 0.855 vs 0.928; by GW 0.79 vs 0.82–0.87 from GW2 (GW7 0.799 vs 0.824,
+     the smallest gap yet). The promotion (back_split, continuity, season phase, the
+     calibration refit) did not close it.
+   - Tried 2026-10-21: tie label noise (`tied_start_weight=0`, DISCARD: brier_start_h0
+     unchanged, so the ties are not the cause); `start_per_app_l10` (DISCARD: the GBM
+     already has it). Develop walk (`diag-pstart.txt`): **regulars are under-predicted in
+     2021 and 2022 in every phase** (2021 GW7–12 0.795 vs 0.842; 2022 GW13+ 0.766 vs 0.815),
+     while 2017–2020 are within ±0.02. That points to an era shift, not the early season.
+   - Next lead: what changed from 2021/22? Diagnostic first, no variant: the regulars'
+     residual by season against pool size per club (more registered fringe players), the
+     COVID-season 2020/21 rows' weight in the 2021 fit (they are the heaviest, at age 1),
+     and comp_start_sum. A variant only with a mechanism.
 2. **Five subs: better minutes likelihood, worse points MSE** (model; new 2026-10-20).
    - `five_subs` (2019/20 GW39+, 2022/23 on) as a minutes feature: minutes_ll_h0 −0.33 %
      (the biggest minutes gain of any change so far), |mean xP − points| 0.0110 → 0.0092,
@@ -29,6 +38,15 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      (the gain is there, not in P(start)). Before another variant, find which rows' error
      grows in 2022/23 (by position and minutes band; appearance vs goal points): probably the
      points assembly reacting to the new P(60+). Diagnostic first, no variant.
+   - Diagnostic 2026-10-21 (2022/23 walks with and without the feature,
+     `~/fpl-research/results/research/diag-5subs.txt`): at h0 the feature mainly raises
+     **P(play)**. Sub appearances are under-predicted in every band without it (MID p_start
+     0.5–0.8: P(play) 0.827 vs 0.908 realized; with five_subs 0.864), and the Brier of P(play)
+     improves 0.0841 → 0.0833 (P(60+) 0.0852 → 0.0850). Appearance-point bias −0.035 →
+     −0.023, but appearance-point MSE 0.2451 → 0.2454. Deadlines 1–4 are identical (no
+     five-sub rows in the fit until the first refit). The walk has no per-row xP, so the
+     +0.003 points MSE in 2022 isn't located yet. Next: per-row xP from the walk's
+     components (the bonus and goal terms scale with p_play) to find the rows.
 3. **Defcon calibration** (model; the measurement is kept on `research`, 243c39f).
    - Live check (PLAN §6.5, GW2–5, horizon 0): DEF 0.088 predicted vs 0.104 realized, MID
      0.047 vs 0.038. Weekly monitor GW1–6 realized: DEF 0.104 (60+ min 0.266), MID 0.043
@@ -49,12 +67,30 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
    - 1.5: DISCARD on realized (+0.045/GW, CI [−0.318, +0.429]) but xG-scored +0.446/GW,
      CI [+0.051, +0.842], p 0.073; seasons split 4–3. Next value: 2.0 (the xG signal says
      higher), then 0.5 only if 2.0 is flat. Two values left under the 3-value rule.
-6. **P(CS) team level** (model; watch).
-   - Live GW1–6: team P(CS) 0.25 predicted vs 0.27–0.33 realized by position, but GW to GW
-     0.13–0.40: a few team-weeks. Recheck at GW10; brier_cs on develop is flat so far.
+6. **Clean sheet while on the pitch** (model; new 2026-10-21, two variants DISCARD, narrowly).
+   - Mechanism: FPL credits a clean sheet to a 60+ player whose team concedes none *while he
+     is on*, so a player subbed off before a late goal keeps it. v1 uses the full-match team
+     clean sheet (the plan's documented approximation). Live GW1–7 (60+ minutes, single
+     fixture): realized minus team P(CS) by position is GK +0.023 (never subbed), DEF +0.036,
+     MID +0.082, FWD +0.073. The excess grows with how often the position is subbed.
+   - Develop 2022/23 team level: e^−λ 0.273 vs realized 0.272, so the team model is
+     calibrated and the gap is the player-level credit.
+   - `cs-while-on` (P(CS)^(m_sixty/90)): MSE h0 −0.00033, h1–5 −0.00084, 2020–22 better,
+     |mean xP − points| 0.0110 → 0.0004. `cs-while-on-bypos` (plus E[min | 60+] per
+     position): MSE h0 −0.00047, h1–5 −0.00066, worst season +0.0001, bias 0.0061. Both
+     fail only the minimum gain. **For the user**: a principled correction of a known
+     approximation that is consistently small on develop. Live matters more than develop
+     here (defcon era: DEF bias −0.134 per player-GW at h0). Don't run a third variant
+     without a new mechanism; the user may want to judge it on its merits.
+   - Team-level live P(CS) stays a watch item (GW to GW 0.13–0.40). Recheck at GW10.
 
 ## Needs the user (not the loop's to do)
 
+- **Merge `main` into `research`** (new 2026-10-21): PR #47 promoted back_split,
+  club_continuity, season phase and finishing with a refit calibration table
+  (064b07d) and harness fixes. `research` still has the stale table: the loop can't merge
+  it (calibration_table.py is frozen). After the merge, the item below is resolved, and
+  decision experiments (idea 5) can run again.
 - **The calibration table on `research`** (blocks decision experiments): with
   `back_split=True` and `finishing_prior=25` the fingerprint no longer matches, so
   calibrated v1 raises at the `research` head. 5 model tests fail by design (the table test
