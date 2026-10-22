@@ -10,7 +10,9 @@ bot and the alert job can both write.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -26,7 +28,12 @@ __all__ = (
     "UserStore",
 )
 
+log = logging.getLogger(__name__)
+
 STATUSES = ("pending", "active", "blocked")
+# Waits (seconds) before retrying a connection that hit SQLite's "disk I/O error": seen twice
+# on ubuntuworker (2026-10-21) opening the database, transient (the next run was fine).
+OPEN_RETRIES = (1.0, 3.0)
 # Recommendation kinds: the 24-hour alert, the silent re-run before the deadline, /plan.
 KINDS = ("alert24", "alert2", "plan")
 
@@ -145,14 +152,33 @@ class UserStore:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(self._open()) as db:
+            # WAL is a property of the database file: set once here, not on every connection
+            # (switching it needs a write lock).
+            db.execute("PRAGMA journal_mode=WAL")
         with self._connect() as db:
             db.executescript(SCHEMA)
 
+    def _open(self) -> sqlite3.Connection:
+        """A connection that has read the database (its journal mode), retrying a transient
+        disk I/O error (`OPEN_RETRIES`)."""
+        for wait in (*OPEN_RETRIES, None):
+            db = sqlite3.connect(self.path, timeout=30)
+            try:
+                db.execute("PRAGMA journal_mode").fetchone()
+                return db
+            except sqlite3.OperationalError as exc:
+                db.close()
+                if wait is None or "disk I/O error" not in str(exc):
+                    raise
+                log.warning("bot database: %s; retrying in %.0f s", exc, wait)
+                time.sleep(wait)
+        raise AssertionError("unreachable")
+
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        with closing(sqlite3.connect(self.path, timeout=30)) as db:
+        with closing(self._open()) as db:
             db.row_factory = sqlite3.Row
-            db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA foreign_keys=ON")
             with db:  # one transaction: commit on success, roll back on error
                 yield db

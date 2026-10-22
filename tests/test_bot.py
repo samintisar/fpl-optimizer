@@ -699,6 +699,89 @@ def test_build_application_registers_the_commands(service):
     assert commands == set(COMMANDS)
 
 
+def test_parse_command_reads_a_pasted_command():
+    from fplopt.bot.app import parse_command
+
+    assert parse_command("/transfer Saka -> Mbeumo") == ("transfer", ["Saka", "->", "Mbeumo"])
+    assert parse_command("  /PLAN@fplopt_bot ") == ("plan", [])
+    assert parse_command("/nope x") is None
+    assert parse_command("transfer Saka") is None
+    assert parse_command("") is None and parse_command(None) is None
+
+
+def test_a_pasted_command_runs_instead_of_unknown(service, monkeypatch):
+    from telegram.ext import MessageHandler
+
+    from fplopt.bot.app import build_application
+
+    calls = []
+    monkeypatch.setattr(
+        service, "transfer", lambda chat_id, args: calls.append((chat_id, args)) or []
+    )
+    monkeypatch.setattr(
+        service, "unknown", lambda chat_id: calls.append(("unknown", chat_id)) or []
+    )
+    application = build_application("123456:TEST", service)
+    (unknown,) = [
+        h for hs in application.handlers.values() for h in hs if isinstance(h, MessageHandler)
+    ]
+
+    class Chat:
+        id = 7
+
+    class Message:
+        def __init__(self, text):
+            self.text = text
+
+    class Update:
+        def __init__(self, text):
+            self.effective_chat = Chat()
+            self.effective_message = Message(text)
+
+    class Ctx:
+        bot = None
+
+    asyncio.run(unknown.callback(Update("/transfer Saka -> Mbeumo"), Ctx()))
+    asyncio.run(unknown.callback(Update("hello"), Ctx()))
+    assert calls == [(7, ["Saka", "->", "Mbeumo"]), ("unknown", 7)]
+
+
+def test_user_store_retries_a_transient_disk_io_error(tmp_path, monkeypatch):
+    import sqlite3
+
+    from fplopt.bot import store
+
+    users = UserStore(tmp_path / "bot.sqlite")
+    real = sqlite3.connect
+    failures = iter([True, False])
+
+    class Flaky:
+        def __init__(self, db):
+            self.db = db
+
+        def execute(self, sql, *args):
+            if sql == "PRAGMA journal_mode" and next(failures, False):
+                raise sqlite3.OperationalError("disk I/O error")
+            return self.db.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self.db, name)
+
+        def __enter__(self):
+            return self.db.__enter__()
+
+        def __exit__(self, *exc):
+            return self.db.__exit__(*exc)
+
+    monkeypatch.setattr(store.sqlite3, "connect", lambda *a, **k: Flaky(real(*a, **k)))
+    monkeypatch.setattr(store, "OPEN_RETRIES", (0.0, 0.0))
+    assert users.user(1) is None  # one failure, then the retry works
+    monkeypatch.setattr(store, "OPEN_RETRIES", ())
+    failures = iter([True])
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        users.user(1)
+
+
 def test_send_replies_splits_long_messages():
     from fplopt.bot.app import send_replies
     from fplopt.bot.service import Reply
