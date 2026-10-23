@@ -27,10 +27,32 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      already has it). Develop walk (`diag-pstart.txt`): **regulars are under-predicted in
      2021 and 2022 in every phase** (2021 GW7–12 0.795 vs 0.842; 2022 GW13+ 0.766 vs 0.815),
      while 2017–2020 are within ±0.02. That points to an era shift, not the early season.
-   - Next lead: what changed from 2021/22? Diagnostic first, no variant: the regulars'
-     residual by season against pool size per club (more registered fringe players), the
-     COVID-season 2020/21 rows' weight in the 2021 fit (they are the heaviest, at age 1),
-     and comp_start_sum. A variant only with a mechanism.
+   - **Found 2026-10-23: what changed from 2021/22 is the flag layer** (FPL flags exist from
+     2020/21 GW32). `diag-avail.txt` (18 deadlines 2021–22, h0): the layer fits one logit
+     slope (0.73–0.83) for every flagged player, plain `a` included; a raw 0.93 became
+     0.90–0.91 against 0.94–0.96 realized, the ≤ 0.3 band 0.05 → 0.07 against 0.04–0.06.
+     Overall Brier still improves (the i/u/d cells), but regulars are compressed.
+   - Why the slope is low (`diag-slopes.txt`, `diag-slope-h.txt`, `diag-oof.txt`): not the
+     other categories (plain `a` alone fits 0.79) but **the horizon**. Raw P(start) is
+     over-confident at longer horizons: recal slope of the real raw predictions for plain
+     `a` 1.06 at h0, 0.91 h1, 0.84 h2, 0.73 h3+ (a100 1.00 → 0.67); the fit rows (out-of-fold
+     base) show the same (0.96–1.01 → 0.71–0.75), so the base is fine. h3+ is half the fit
+     rows, so the one slope is set by them and over-compresses h0 (after the layer: recal
+     slope 1.19 at h0, 0.91 at h3+).
+   - **And h ≥ 1 is corrected twice**: the harness calibrates P(start) isotonically at h ≥ 1
+     only (`--parts p_start:1+`, h0 left as is), with maps learned on earlier seasons'
+     walks, mostly pre-flag. So a layer slope fitted to h ≥ 1 outcomes double-counts there.
+   - Tried 2026-10-23: `category_slopes` (KEEP: MSE h0 −0.00088, 2022 −0.0047); per
+     (category, bucket) cell slopes (DISCARD: MSE h0 −0.0029, 2021 −0.0068, 2022 −0.0108,
+     brier_start_h0 −0.39 %, but h1–5 +0.0012); own slope at h0 and one for h ≥ 1 per
+     category (DISCARD: h0 the same −0.0029, h1–5 +0.0009). Three values of the slope
+     setting: closed for the loop.
+   - **Next (needs the user's OK: a 4th variant of the slope setting):** per category an
+     h0 slope and slope 1 (offsets only) at h ≥ 1, leaving h ≥ 1's regression to the
+     isotonic calibration. Expected: the h0 gain (−0.0029) without the h1–5 loss. Or the
+     user decides to calibrate p_start at h0 too (harness `--parts`), which changes the
+     scoring and is the user's. Either way the live h0 compression (regulars 0.77 vs 0.82)
+     is the same mechanism and is not fixed by `category_slopes` alone.
 2. **Five subs: better minutes likelihood, worse points MSE** (model; new 2026-10-20).
    - `five_subs` (2019/20 GW39+, 2022/23 on) as a minutes feature: minutes_ll_h0 −0.33 %
      (the biggest minutes gain of any change so far), |mean xP − points| 0.0110 → 0.0092,
@@ -86,6 +108,15 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
 
 ## Needs the user (not the loop's to do)
 
+- **Flag-layer h0 slope, 4th variant** (new 2026-10-23, idea 1): OK a 4th value of the slope
+  setting (h0 slope per category, slope 1 at h ≥ 1), or calibrate p_start at h0 in the
+  harness (`--parts p_start` pooled or split instead of `p_start:1+`). Evidence in idea 1.
+- **Guard false positives** (2026-10-23, no harm): the guard refuses any command whose text
+  contains `data/<file>` (a read in a diagnostic script; worked around by reading through
+  `DataStore("data")`, the sanctioned interface) or mentions `calibrate_v1.py` in a grep
+  without `--seasons`. Worth a look if the reads should be allowed.
+- Still pending since 2026-10-21: merging `main` into `research` (below).
+
 - **Merge `main` into `research`** (new 2026-10-21): PR #47 promoted back_split,
   club_continuity, season phase and finishing with a refit calibration table
   (064b07d) and harness fixes. `research` still has the stale table: the loop can't merge
@@ -106,6 +137,11 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
 
 ## Done
 
+- **Flag-layer slope per category** (model, KEEP 2026-10-23, 3dca529): `category_slopes`, one
+  slope per flag category (prior N(1, 1)); MSE h0 −0.00088, h1–5 −0.00050, 2021 −0.0009,
+  2022 −0.0047, 2017–2019 identical (no flags). Small: plain `a` alone still fits ~0.79,
+  because the compression is the horizon (idea 1). Changes the calibration fingerprint
+  (same 5 by-design test failures; regenerate the table at promotion).
 - **#39 `back_split` on** (model, KEEP 2026-10-20, fe3e683): MSE h0 −0.0019, h1–5 −0.0008;
   2021 −0.0102, 2022 −0.0013, 2017–2020 identical. Live caveat stands: read the `a`/`a100`
   back-from-a-miss cell at the next weekly monitor before promoting (GW1–6: players back from
