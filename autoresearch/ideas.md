@@ -54,6 +54,15 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      scoring and is the user's. Either way the live h0 compression (regulars 0.77 vs 0.82)
      is the same mechanism and is not fixed by `category_slopes` alone.
 2. **Five subs: better minutes likelihood, worse points MSE** (model; new 2026-10-20).
+   - **Located 2026-10-23** (`diag-5subs-rows.txt`: per-row uncalibrated xP from the 2022
+     walks via `fixture_points`, h0; MSE 3.6405 → 3.6427): the change is `pts_appearance`
+     (+0.036 per row in the P(play) 0.5–0.8 band, other components < 0.005). The loss sits in
+     the 0.1–0.8 bands (DEF/MID/FWD: rows whose xP rose and who then got 0 or 1–59 minutes,
+     +375 total), against a gain on 60+ rows (−351). In that band v1 already over-predicts
+     (xP 1.80 vs 1.70 realized) while 0.8–1 under-predicts (2.91 vs 3.09): the 2022 xP is
+     compressed (idea 1, the flag layer's h0 slope), so more appearance probability lands
+     where xP is too high. **Retest `five_subs` only after the h0 compression is fixed**
+     (idea 1's 4th variant); it may then pass.
    - `five_subs` (2019/20 GW39+, 2022/23 on) as a minutes feature: minutes_ll_h0 −0.33 %
      (the biggest minutes gain of any change so far), |mean xP − points| 0.0110 → 0.0092,
      but MSE h0 +0.0005, all of it 2022/23 (+0.0029). In the 60+/sub parts only: the same
