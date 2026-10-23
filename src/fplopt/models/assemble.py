@@ -204,6 +204,9 @@ class V1Params:
     # The flag layer's own cells for an available player who missed his last match
     # (`availability` module docstring, issue #39).
     back_split: bool = True
+    # One flag-layer slope per category instead of a shared one (`availability` module
+    # docstring): the shared slope compressed every plain `a` player.
+    category_slopes: bool = True
     calibrate: bool = True  # apply the season's calibration_table entry
 
 
@@ -223,8 +226,9 @@ def calibration_fingerprint(params: V1Params) -> str:
     `calibrate` (its repr; frozen dataclasses of numbers and strings). `calibration_table.
     CALIBRATION_PARAMS` holds the fingerprint of the walk it was fitted on."""
     text = repr(replace(params, calibrate=True))
-    # `back_split` came after the table; off, it is the setting the table was fitted with.
-    return text.replace(", back_split=False", "")
+    # `back_split` and `category_slopes` came after the table; off, they are the settings
+    # the table was fitted with.
+    return text.replace(", back_split=False", "").replace(", category_slopes=False", "")
 
 
 def fit_v1(view: AsOfView, params: V1Params | None = None) -> V1Fit:
@@ -233,7 +237,13 @@ def fit_v1(view: AsOfView, params: V1Params | None = None) -> V1Fit:
     team = fit_team(view, params.team)
     history = training_frame(view)  # shared by the minutes and availability fits
     minutes = fit_minutes(view, params.minutes, history)
-    availability = fit_availability(view, minutes, history, back_split=params.back_split)
+    availability = fit_availability(
+        view,
+        minutes,
+        history,
+        back_split=params.back_split,
+        category_slopes=params.category_slopes,
+    )
     shares = fit_shares(view, params.shares)
     components = fit_components(view, params.components)
     return V1Fit(view.deadline, params, team, minutes, availability, shares, components)

@@ -162,6 +162,41 @@ def test_thin_back_cells_keep_the_plain_mapping(league, fits, monkeypatch):
     )
 
 
+def test_category_slopes_off_is_the_shared_slope(league, fits):
+    minutes, fit = fits
+    assert fit_availability(view(league), minutes, category_slopes=False) == fit
+    assert fit.slopes == ()
+
+
+def test_category_slopes_fit_one_slope_per_category(league, fits):
+    minutes, plain = fits
+    v = view(league)
+    fit = fit_availability(v, minutes, category_slopes=True)
+    assert fit == fit_availability(v, minutes, category_slopes=True)  # deterministic
+    slopes = dict(fit.slopes)
+    assert set(slopes) == {c for c, _, _ in fit.offsets} == {"a", "d50", "i"}
+    assert fit.slope == 1.0 and all(0.1 < s < 5 for s in slopes.values())
+    assert len(set(slopes.values())) == 3  # free, not tied to one value
+    offsets = {(c, b): o for c, b, o in fit.offsets}
+    assert offsets[("i", 0)] < -2
+    predicted = predict_minutes(v, minutes)
+    adjusted = adjust_minutes(v, predicted, fit)
+    assert list(adjusted.columns) == list(MINUTES_COLUMNS)
+    assert not adjusted["p_start"].equals(adjust_minutes(v, predicted, plain)["p_start"])
+    sums = adjusted.groupby(["fixture_key", "team_key"])["p_start"].sum()
+    assert (sums - 11).abs().median() < 1e-6
+
+
+def test_category_slopes_with_back_cells(league, fits, monkeypatch):
+    minutes, _ = fits
+    monkeypatch.setattr(availability, "MIN_BACK_ROWS", 0)
+    v = view(league)
+    fit = fit_availability(v, minutes, back_split=True, category_slopes=True)
+    assert set(dict(fit.slopes)) == {"a", "a_back", "d50", "i"}
+    adjusted = adjust_minutes(v, predict_minutes(v, minutes), fit)
+    assert adjusted["p_start"].between(0, 1).all()
+
+
 def test_without_snapshots_nothing_is_fitted_or_adjusted():
     tables = synthetic_tables(seasons=(2022, 2023), n_clubs=10, seed=2, snapshots=False)
     v = view(tables)

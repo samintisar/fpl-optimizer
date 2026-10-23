@@ -25,6 +25,12 @@ Fixtures in a predicted ban (`banned`) are left out of the mapping: they keep th
 model's ban residual, which was fitted on rule-banned rows whatever their flags. Then the
 team normalization (`finish_minutes`) runs again, with zeroed and banned players fixed.
 
+**One slope per category** (`category_slopes`): logit p' = slope[category] · logit p +
+γ[category, min(h, 3)], each slope with a Gaussian prior around 1 (sd `SLOPE_SD`). The shared
+slope is set by the flagged categories (develop 2021/22–2022/23 cutoffs: 0.73–0.83) and
+compresses every plain `a` player with them: a raw 0.93 became 0.90–0.91 against 0.94–0.96
+realized, and the ≤ 0.3 band was pushed up (results/research/diag-avail.txt).
+
 **Back from an absence** (`back_split`, issue #39): a player flagged `a` or `a100` who missed
 his club's last match (`absent_run` ≥ 1) gets his own cells, `a_back` / `a100_back`, and
 those cells add β · (`start_rate_l10` − 0.5), one β per cell: how regular he was. The minutes
@@ -90,6 +96,7 @@ HORIZON_BUCKETS = 4  # offsets for h = 0, 1, 2 and 3+
 LOOKAHEAD = 5  # horizon GWs after the deadline's GW used in the fit
 MIN_ROWS = 500
 OFFSET_SD = 4.0
+SLOPE_SD = 1.0  # `category_slopes`: prior sd of each category's slope around 1
 PAST_DAYS = 60
 YEAR_DAYS = 366
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
@@ -107,7 +114,9 @@ FLAG_COLUMNS = (
 @dataclass(frozen=True)
 class AvailabilityFit:
     """The fitted mapping: logit p' = slope · logit p + offset[(category, bucket)], plus
-    β[(category, bucket)] · (start_rate_l10 − 0.5) in the `back_split` cells (`back_slopes`)."""
+    β[(category, bucket)] · (start_rate_l10 − 0.5) in the `back_split` cells (`back_slopes`).
+    With `category_slopes`, `slopes` holds each category's slope (a back category the fit
+    never saw uses its plain one, an unseen category `slope`, then 1)."""
 
     slope: float
     offsets: tuple[tuple[str, int, float], ...]
@@ -117,6 +126,7 @@ class AvailabilityFit:
     n_rows: int
     back_split: bool = False
     back_slopes: tuple[tuple[str, int, float], ...] = ()
+    slopes: tuple[tuple[str, float], ...] = ()
 
 
 def flag_category(status: pd.Series, chance: pd.Series) -> pd.Series:
@@ -260,10 +270,12 @@ def fit_availability(
     minutes_fit: MinutesFit,
     rows: pd.DataFrame | None = None,
     back_split: bool = False,
+    category_slopes: bool = False,
 ) -> AvailabilityFit:
     """Fit the flag mapping walk-forward on the view (see the module docstring). `rows`:
     `training_frame(view)` if the caller already built it (not modified). `back_split`:
-    the cells after a missed match (module docstring)."""
+    the cells after a missed match; `category_slopes`: one slope per category (module
+    docstring)."""
     rows = _fit_rows(view, minutes_fit, rows)
     if len(rows) < MIN_ROWS:
         return replace(_identity(minutes_fit, len(rows)), back_split=back_split)
@@ -292,14 +304,28 @@ def fit_availability(
     position = np.zeros(n_cells, dtype="int64")
     position[back_cells] = np.arange(n_back)
     bcell = position[cell]
-    n_theta = 1 + n_cells + n_back
+    # The slopes come first in θ: one shared, or one per category (a cell's category is
+    # cell // HORIZON_BUCKETS, the product's order).
+    n_s = len(categories) if category_slopes else 1
+    cell_slope = (
+        np.arange(n_cells) // HORIZON_BUCKETS
+        if category_slopes
+        else np.zeros(n_cells, dtype="int64")
+    )
+    sidx = cell_slope[cell]
+    n_theta = n_s + n_cells + n_back
+
+    def per_slope(weights: np.ndarray) -> np.ndarray:
+        if n_s == 1:  # the shared slope: summed as before
+            return np.array([np.sum(weights)])
+        return np.bincount(sidx, weights=weights, minlength=n_s)
 
     n = len(y)  # the objective is per row, so the tolerance does not depend on the sample
 
     def eta_of(theta: np.ndarray) -> np.ndarray:
-        eta = theta[0] * z + theta[1 : 1 + n_cells][cell]
+        eta = theta[:n_s][sidx] * z + theta[n_s : n_s + n_cells][cell]
         if n_back:
-            eta = eta + theta[1 + n_cells :][bcell] * x
+            eta = eta + theta[n_s + n_cells :][bcell] * x
         return eta
 
     def loss(theta: np.ndarray) -> tuple[float, np.ndarray]:
@@ -307,54 +333,62 @@ def fit_availability(
         p = expit(eta)
         # Log loss in a numerically stable form: log(1 + e^eta) - y * eta.
         value = float(np.sum(np.logaddexp(0.0, eta) - y * eta))
-        value += float(0.5 * np.sum(theta[1:] ** 2) / OFFSET_SD**2)
+        value += float(0.5 * np.sum(theta[n_s:] ** 2) / OFFSET_SD**2)
         residual = p - y
         grad = np.empty(n_theta)
-        grad[0] = float(np.sum(residual * z))
-        grad[1 : 1 + n_cells] = np.bincount(cell, weights=residual, minlength=n_cells)
+        grad[:n_s] = per_slope(residual * z)
+        grad[n_s : n_s + n_cells] = np.bincount(cell, weights=residual, minlength=n_cells)
         if n_back:
-            grad[1 + n_cells :] = np.bincount(bcell, weights=residual * x, minlength=n_back)
-        grad[1:] += theta[1:] / OFFSET_SD**2
+            grad[n_s + n_cells :] = np.bincount(bcell, weights=residual * x, minlength=n_back)
+        grad[n_s:] += theta[n_s:] / OFFSET_SD**2
+        if category_slopes:
+            value += float(0.5 * np.sum((theta[:n_s] - 1.0) ** 2) / SLOPE_SD**2)
+            grad[:n_s] += (theta[:n_s] - 1.0) / SLOPE_SD**2
         return value / n, grad / n
 
     def hessian(theta: np.ndarray) -> np.ndarray:
         p = expit(eta_of(theta))
         w = p * (1.0 - p)
         out = np.zeros((n_theta, n_theta))
-        out[0, 0] = float(np.sum(w * z * z))
+        out[np.arange(n_s), np.arange(n_s)] = per_slope(w * z * z)
         cross = np.bincount(cell, weights=w * z, minlength=n_cells)
-        out[0, 1 : 1 + n_cells] = cross
-        out[1 : 1 + n_cells, 0] = cross
+        offset_index = np.arange(n_s, n_s + n_cells)
+        out[cell_slope, offset_index] = cross
+        out[offset_index, cell_slope] = cross
         diagonal = np.bincount(cell, weights=w, minlength=n_cells)
-        out[np.arange(1, n_cells + 1), np.arange(1, n_cells + 1)] = diagonal
+        out[offset_index, offset_index] = diagonal
         if n_back:
-            b = slice(1 + n_cells, n_theta)
+            b = slice(n_s + n_cells, n_theta)
+            back_index = np.arange(n_s + n_cells, n_theta)
             zx = np.bincount(bcell, weights=w * z * x, minlength=n_back)
-            out[0, b] = zx
-            out[b, 0] = zx
+            out[cell_slope[back_cells], back_index] = zx
+            out[back_index, cell_slope[back_cells]] = zx
             joint = np.bincount(
                 cell * n_back + bcell, weights=w * x, minlength=n_cells * n_back
             ).reshape(n_cells, n_back)
-            out[1 : 1 + n_cells, b] = joint
-            out[b, 1 : 1 + n_cells] = joint.T
+            out[n_s : n_s + n_cells, b] = joint
+            out[b, n_s : n_s + n_cells] = joint.T
             out[b, b] = np.diag(np.bincount(bcell, weights=w * x * x, minlength=n_back))
-        out[np.arange(1, n_theta), np.arange(1, n_theta)] += 1.0 / OFFSET_SD**2
+        out[np.arange(n_s, n_theta), np.arange(n_s, n_theta)] += 1.0 / OFFSET_SD**2
+        if category_slopes:
+            out[np.arange(n_s), np.arange(n_s)] += 1.0 / SLOPE_SD**2
         return out / n
 
-    start = np.concatenate([[1.0], np.zeros(n_theta - 1)])
+    start = np.concatenate([np.ones(n_s), np.zeros(n_theta - n_s)])
     result = minimize(
         loss, start, jac=True, hess=hessian, method="trust-exact", options={"gtol": 1e-9}
     )
     theta = result.x
     used = np.bincount(cell, minlength=n_cells) > 0
     offsets = tuple(
-        (str(category), int(bucket), float(theta[1 + k]))
+        (str(category), int(bucket), float(theta[n_s + k]))
         for k, (category, bucket) in enumerate(cells)
         if used[k]
     )
+    used_categories = np.bincount(sidx, minlength=n_s) > 0
     params = minutes_fit.params
     return AvailabilityFit(
-        slope=float(theta[0]),
+        slope=1.0 if category_slopes else float(theta[0]),
         offsets=offsets,
         minutes_sub=minutes_fit.minutes_sub,
         max_shift=params.max_shift,
@@ -362,10 +396,17 @@ def fit_availability(
         n_rows=len(rows),
         back_split=back_split,
         back_slopes=tuple(
-            (str(cells[k][0]), int(cells[k][1]), float(theta[1 + n_cells + j]))
+            (str(cells[k][0]), int(cells[k][1]), float(theta[n_s + n_cells + j]))
             for j, k in enumerate(back_cells)
             if used[k]
         ),
+        slopes=tuple(
+            (str(category), float(theta[j]))
+            for j, category in enumerate(categories)
+            if used_categories[j]
+        )
+        if category_slopes
+        else (),
     )
 
 
@@ -416,8 +457,18 @@ def adjust_minutes(view: AsOfView, minutes: pd.DataFrame, fit: AvailabilityFit) 
     # Predicted bans keep their residual P(start) (fitted on rule-banned rows, flags
     # included); the mapping is for players the minutes model predicts freely.
     banned = cond["banned"].to_numpy(dtype=bool)
+    slope: float | np.ndarray = fit.slope
+    if fit.slopes:
+        by_category = dict(fit.slopes)
+        slope = np.array(
+            [
+                by_category.get(c, by_category.get(c.removesuffix(BACK_SUFFIX), fit.slope))
+                for c in category
+            ],
+            dtype="float64",
+        )
     mapped = back.isna().to_numpy(dtype=bool) & ~np.isnan(offset) & (p > 0) & ~banned
-    adjusted = expit(fit.slope * logit(np.clip(p, EPS, 1 - EPS)) + np.nan_to_num(offset) + beta)
+    adjusted = expit(slope * logit(np.clip(p, EPS, 1 - EPS)) + np.nan_to_num(offset) + beta)
     ratio = np.where(p > 0, adjusted / np.where(p > 0, p, 1.0), 1.0)
     new_p = np.where(mapped, adjusted, p)
     new_csub = np.where(mapped, csub * np.minimum(ratio, 1.0), csub)
