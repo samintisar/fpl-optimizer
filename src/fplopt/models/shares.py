@@ -47,7 +47,14 @@ price prior for new players only (no played minute in the window), is
 
 **Finishing** (#43): g is multiplied by (np goals + k) / (npxG + k) over his window rows
 that carry his own npxG (unweighted; k = `finishing_prior` pseudo-npxG at par, hard
-shrinkage: 10 goals above 20 npxG give × 1.22 at k = 25). Fallback rows don't count.
+shrinkage: 10 goals above 20 npxG give × 1.22 at k = 25). Fallback rows don't count. With
+`position_par`, par is his position's np goals / npxG over the last `FIT_SEASONS` seasons'
+own-npxG rows (`SharesFit.position_finishing`, shrunk toward 1 with `PAR_PRIOR`
+pseudo-npxG) instead of 1: (np goals + k · par) / (npxG + k). Understat npxG over-states
+forwards' and defenders' goals (develop 2016/17–2022/23 np goals / npxG: FWD 0.89, 0.82–0.88
+every season from 2018/19; DEF 0.87; MID 1.01), and with par 1 the team normalization gave
+their goals to forwards (E[goals] / realized FWD 0.94, MID 1.06 at h0;
+results/research/diag-finish-pos.txt, diag-goals-pos.txt).
 
 **Team consistency** (`predict_shares`, per team-fixture over the club's pool players, f =
 e_minutes / 90 from the minutes frame, the expected XI by minutes):
@@ -115,6 +122,7 @@ __all__ = (
 FPL_PEN_XG = 0.79  # Opta's xG of a penalty (FPL expected_goals)
 US_PEN_XG = 0.76  # Understat's xG of a penalty (team us_xg − us_npxg per attempt)
 FIT_SEASONS = 3  # seasons of rows behind the league-level parameters
+PAR_PRIOR = 25.0  # pseudo-npxG at 1 behind each position's finishing par
 DEFAULT_PEN_RATE = 0.13  # penalty attempts per team-match (EPL long run)
 DEFAULT_CONVERSION = 0.78
 DEFAULT_ASSIST_FRACTION = 0.88
@@ -189,6 +197,8 @@ class SharesParams:
     # Finishing (#43): g × (np goals + k) / (npxG + k) over his window rows with his own
     # npxG, unweighted; k pseudo-npxG at par (hard shrinkage). None: off.
     finishing_prior: float | None = 25.0
+    # Finishing par per position (np goals / npxG of the position) instead of 1.
+    position_par: bool = True
 
     def __post_init__(self) -> None:
         if not self.season_weights or any(w < 0 for w in self.season_weights):
@@ -226,6 +236,7 @@ class SharesFit:
     taker_q: float
     n_rows: int
     coverage: tuple[tuple[int, float, float], ...] = field(default=())  # season, xG, xA share
+    position_finishing: tuple[tuple[int, float], ...] = field(default=())  # np goals / npxG
 
 
 # --- inputs ---------------------------------------------------------------------------------
@@ -625,10 +636,14 @@ def marcel_shares(
     )
     d0 = params.prior_minutes / 90.0 * fit.team_output
     k = params.finishing_prior
+    par = np.ones(len(out))
+    if params.position_par:
+        lookup = dict(fit.position_finishing)
+        par = np.array([lookup.get(int(e), 1.0) if e == e else 1.0 for e in element_type])
     finishing = (
         np.ones(len(out))
         if k is None
-        else ((out["fin_goals"] + k) / (out["fin_xg"] + k)).to_numpy(dtype="float64")
+        else ((out["fin_goals"] + k * par) / (out["fin_xg"] + k)).to_numpy(dtype="float64")
     )
     return out.drop(columns=["fin_goals", "fin_xg"]).assign(
         g=(out["xg"] + prior_g * d0) / (out["dg"] + d0) * finishing,
@@ -699,9 +714,25 @@ def fit_shares(view: AsOfView, params: SharesParams | None = None) -> SharesFit:
     recent = share_rows[share_rows["season"] > season - FIT_SEASONS]
     team_output = _ratio(recent["d"], recent["on_pitch"], 1.3)
     position_goal, position_assist, price_goal, price_assist = [], [], [], []
+    position_finishing = []
     for position, group in recent.groupby("element_type", sort=True):
         if position != position:
             continue
+        own = group[~group["fb_goals"].to_numpy(dtype=bool)]
+        np_goals = np.nan_to_num(own["goals_scored"].to_numpy(dtype="float64")) - np.nan_to_num(
+            own["pen_goals"].to_numpy(dtype="float64")
+        )
+        position_finishing.append(
+            (
+                int(position),
+                _shrunk_ratio(
+                    float(np.maximum(np_goals, 0.0).sum()),
+                    float(own["x_goals"].sum()),
+                    1.0,
+                    PAR_PRIOR,
+                ),
+            )
+        )
         wg = np.where(group["fb_goals"], params.goals_weight, 1.0)
         wa = np.where(group["fb_assists"], params.goals_weight, 1.0)
         mean_goal = _ratio(group["x_goals"] * wg, group["d"] * wg, 0.0)
@@ -797,6 +828,7 @@ def fit_shares(view: AsOfView, params: SharesParams | None = None) -> SharesFit:
         taker_q=taker_q,
         n_rows=len(share_rows),
         coverage=coverage,
+        position_finishing=tuple(position_finishing),
     )
 
 
