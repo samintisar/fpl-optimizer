@@ -47,13 +47,28 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      brier_start_h0 −0.39 %, but h1–5 +0.0012); own slope at h0 and one for h ≥ 1 per
      category (DISCARD: h0 the same −0.0029, h1–5 +0.0009). Three values of the slope
      setting: closed for the loop.
-   - **Next (needs the user's OK: a 4th variant of the slope setting):** per category an
-     h0 slope and slope 1 (offsets only) at h ≥ 1, leaving h ≥ 1's regression to the
-     isotonic calibration. Expected: the h0 gain (−0.0029) without the h1–5 loss. Or the
-     user decides to calibrate p_start at h0 too (harness `--parts`), which changes the
-     scoring and is the user's. Either way the live h0 compression (regulars 0.77 vs 0.82)
-     is the same mechanism and is not fixed by `category_slopes` alone.
-2. **Five subs: better minutes likelihood, worse points MSE** (model; new 2026-10-20).
+   - **Fixed at the source 2026-10-24: `horizon_shrink` (KEEP, 8eaf71c).** The over-confidence
+     at h ≥ 1 is in the minutes model: a regular's P(start) stays ~0.90 at every horizon (the
+     decay can't go below his long-run rate) while his realized rate falls 0.91 → 0.82 by
+     h3+. logit p_start × 0.92^h after the decay (minutes model and the flag fit's base):
+     MSE h0 −0.00193, h1–5 −0.00234, 2021 −0.0028, 2022 −0.0087, every component better.
+     The flag-layer slopes it then fits (`diag-shrink-sums.txt`): plain `a` 0.79–0.80 →
+     0.96–0.97, a100 0.74–0.76 → 0.88–0.91; real club sums stay exactly 11 at every horizon.
+     2021–22 h0 calibration (`diag-shrink-cal.txt`): 0.95–1 band 0.958/0.989 → 0.961/0.963,
+     0.9–0.95 0.921/0.951 → 0.924/0.935, 0.3–0.5 0.401/0.334 → 0.397/0.372. 0.88: flat h0,
+     h1–5 +0.0034 (DISCARD); no 3rd value planned. This supersedes the 4th slope variant
+     request (the slope is ~1 now); the user's h0 isotonic option stays open.
+   - What's left at h0 (head walk 2021–22): MID p_start > 0.5 0.767 vs 0.788; first-choice
+     GK 0.899 vs 0.935 (minutes model −1.5 pp, the layer another −1.5 pp; club GK sums are
+     already ≈ 1, `diag-gk-layer.txt`, small n). **Live check at GW8**: does the regulars
+     gap (0.77 vs 0.82) shrink once horizon_shrink is promoted? (Live is h0, where the
+     shrink acts only through the flag layer's slopes.)
+2. **Five subs: closed 2026-10-24** (model). Retest of the full feature on top of the shrink:
+   2022 still +0.0025 (DISCARD); in the 60+ part only: 2022 +0.0013, minutes_ll −0.06 % (the
+   −0.32 % gain was the sub part; DISCARD). Three variants: closed. Remaining fact: in
+   2022/23 sub appearances are under-predicted (non-starters 0.111 vs 0.165,
+   `diag-sub-season.txt`), so live (five subs) P(play) is likely low too.
+   Older notes:
    - **Located 2026-10-23** (`diag-5subs-rows.txt`: per-row uncalibrated xP from the 2022
      walks via `fixture_points`, h0; MSE 3.6405 → 3.6427): the change is `pts_appearance`
      (+0.036 per row in the P(play) 0.5–0.8 band, other components < 0.005). The loss sits in
@@ -114,12 +129,34 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      here (defcon era: DEF bias −0.134 per player-GW at h0). Don't run a third variant
      without a new mechanism; the user may want to judge it on its merits.
    - Team-level live P(CS) stays a watch item (GW to GW 0.13–0.40). Recheck at GW10.
+   - Head walk 2021–22 (`diag-components.txt`), starters (p_start > 0.8): P(CS)·P(60+) vs
+     realized CS·60+: GK 0.261/0.272, DEF 0.236/0.246, MID 0.235/0.260, FWD 0.219/0.255.
+     The same subbing pattern on develop.
+7. **The flag layer cuts sub appearances** (model; new 2026-10-24, one variant DISCARD on
+   min gain). In 2021 the minutes model's P(sub) is calibrated before the layer (0.082 vs
+   0.082 realized) and low after it (0.065). Players whose P(start) the flag raised lose
+   sub appearances they make (0.153 before → 0.127 after vs 0.199 realized;
+   `diag-sub-layer.txt`). `keep_sub` (a/a100 keep the unconditional P(sub)): MSE h0
+   −0.00009, 2021 −0.0005, 2022 −0.0003, 2020 +0.0002; minutes_ll −0.15 %, bias 0.0100 →
+   0.0080. **For the user**, like idea 6: right mechanism, small in points. Commit 68519f9 on
+   the server hub (`try/keep-sub`). Don't retry without a new angle.
+8. **Penalties and assists: looked at, no lead** (2026-10-24). Penalty goals swing with the
+   league's season rate (2020: 102 realized vs 74 predicted) and the main-taker split flips
+   sign between seasons (`diag-pens.txt`). Assists: FPL assists / xA by position (FWD 1.41,
+   MID 1.20, DEF 1.13) as a share multiplier: DISCARD (4 of 6 seasons worse).
 
 ## Needs the user (not the loop's to do)
 
-- **Flag-layer h0 slope, 4th variant** (new 2026-10-23, idea 1): OK a 4th value of the slope
-  setting (h0 slope per category, slope 1 at h ≥ 1), or calibrate p_start at h0 in the
-  harness (`--parts p_start` pooled or split instead of `p_start:1+`). Evidence in idea 1.
+- **Two new keeps on `research`** (2026-10-24): `horizon_shrink=0.92` (8eaf71c) and
+  `position_par` (c5a10d2). Each also breaks one synthetic test, not a by-design one:
+  `test_flags_move_p_start_and_teams_stay_normalized` (a small synthetic pool sums to 11.67
+  at a far horizon fixture; real clubs sum to exactly 11, `diag-shrink-sums.txt`) and
+  `test_planted_shares_are_recovered` (the planted DEF has npxG without goals, the same
+  artifact as finishing-12). Both tests need a decision at promotion (adjust the fixture or
+  the assertion).
+- **Flag-layer h0 slope, 4th variant** (2026-10-23, idea 1): **probably moot** after
+  horizon_shrink (plain `a` slope now 0.96–0.97). The h0 isotonic option in the harness
+  (`--parts p_start` instead of `p_start:1+`) is still yours.
 - **Guard false positives** (2026-10-23, no harm): the guard refuses any command whose text
   contains `data/<file>` (a read in a diagnostic script; worked around by reading through
   `DataStore("data")`, the sanctioned interface) or mentions `calibrate_v1.py` in a grep
@@ -146,6 +183,15 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
 
 ## Done
 
+- **P(start) horizon shrink** (model, KEEP 2026-10-24, 8eaf71c): `MinutesParams.horizon_shrink
+  = 0.92`, logit p_start × 0.92^h after the horizon decay; MSE h0 −0.00193, h1–5 −0.00234,
+  2021 −0.0028, 2022 −0.0087, 2017–2020 identical; brier_start h0 −0.31 %, h1–5 −0.23 %. 0.88
+  over-shrinks (DISCARD). Details in idea 1.
+- **Finishing par per position** (model, KEEP 2026-10-24, c5a10d2): `SharesParams.position_par`,
+  finishing shrinks toward the position's np goals / npxG (FWD ~0.89, DEF ~0.87, MID ~1.0;
+  fitted walk-forward over 3 seasons) instead of 1. MSE h0 −0.00094, h1–5 −0.00097, all 6
+  seasons better, goals_ll +0.05 %. Understat npxG over-states forwards' goals in every
+  develop season from 2018/19.
 - **Flag-layer slope per category** (model, KEEP 2026-10-23, 3dca529): `category_slopes`, one
   slope per flag category (prior N(1, 1)); MSE h0 −0.00088, h1–5 −0.00050, 2021 −0.0009,
   2022 −0.0047, 2017–2019 identical (no flags). Small: plain `a` alone still fits ~0.79,
