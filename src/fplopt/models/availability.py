@@ -46,9 +46,9 @@ the player's club fixtures in GWs gw_index(d) … + 5, minus deterministic bans 
 with a parsed return date. The base p_start is an out-of-fold P(start) on his GW-d training
 row (lags as of d; `minutes.out_of_fold_start`: the start part refitted on the other
 season parity, since the minutes fit's own predictions on its training rows are sharper
-than its predictions at a new deadline and would bias the mapping), horizon-decayed as
-`predict_minutes` does (normalization not applied). Weighted log loss with a Gaussian prior
-on the offsets (sd `OFFSET_SD`), minimized from slope 1 and offsets 0 (Newton,
+than its predictions at a new deadline and would bias the mapping), horizon-decayed and
+shrunk as `predict_minutes` does (normalization not applied). Weighted log loss with a
+Gaussian prior on the offsets (sd `OFFSET_SD`), minimized from slope 1 and offsets 0 (Newton,
 `trust-exact` with the exact Hessian; deterministic). Fewer than `MIN_ROWS` rows: the
 identity mapping (return dates still apply). PLAN §4 fixes the fit seasons as
 2021/22–2022/23 with a check on 2023/24–2024/25; walk-forward refits use every snapshot
@@ -72,6 +72,7 @@ from fplopt.models.minutes import (
     MinutesFit,
     conditionals,
     finish_minutes,
+    horizon_start,
     out_of_fold_start,
 )
 
@@ -258,8 +259,12 @@ def _fit_rows(
     out = expanded.merge(
         outcomes, on=["player_key", "season", "gw_index"], how="inner", validate="many_to_many"
     )
-    weight = np.power(params.horizon_decay, out["horizon"].to_numpy(dtype="float64"))
-    out["base"] = weight * out["p_model"] + (1.0 - weight) * out["long_run"]
+    out["base"] = horizon_start(
+        out["p_model"].to_numpy(dtype="float64"),
+        out["long_run"].to_numpy(dtype="float64"),
+        out["horizon"].to_numpy(dtype="float64"),
+        params,
+    )
     out["bucket"] = out["horizon"].clip(upper=HORIZON_BUCKETS - 1)
     sort_by = ["season", "base_index", "player_key", "gw_index", "horizon"]
     return out.sort_values(sort_by, kind="mergesort").reset_index(drop=True)

@@ -5,6 +5,7 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.special import expit, logit
 from synthetic_season import synthetic_tables
 
 from fplopt.features.history import prediction_frame
@@ -123,7 +124,7 @@ def test_horizon_decay_moves_later_gws_to_the_long_run_rate(league, fitted):
     v = view(league)
     frame = prediction_frame(v)
     p_model = fitted.start.predict(frame)
-    still = dataclasses.replace(PARAMS, max_shift=0.0, max_scale=1.0)
+    still = dataclasses.replace(PARAMS, max_shift=0.0, max_scale=1.0, horizon_shrink=1.0)
     flat = predict_minutes(
         v, dataclasses.replace(fitted, params=dataclasses.replace(still, horizon_decay=1.0))
     )
@@ -140,6 +141,16 @@ def test_horizon_decay_moves_later_gws_to_the_long_run_rate(league, fitted):
     )
     w = 0.5 ** frame["horizon"].to_numpy()
     np.testing.assert_allclose(half["p_start"], w * p_model + (1 - w) * long_run, rtol=1e-9)
+    shrunk = predict_minutes(
+        v,
+        dataclasses.replace(
+            fitted, params=dataclasses.replace(still, horizon_decay=0.5, horizon_shrink=0.8)
+        ),
+    )
+    h = frame["horizon"].to_numpy()
+    expected = expit(0.8**h * logit(w * p_model + (1 - w) * long_run))
+    np.testing.assert_allclose(shrunk["p_start"], expected, rtol=1e-6)
+    assert (shrunk["p_start"][h == 0].to_numpy() == half["p_start"][h == 0].to_numpy()).all()
 
 
 def regular_starter(tables, season=2023, gw=4):

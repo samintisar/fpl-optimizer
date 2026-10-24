@@ -30,7 +30,12 @@ probabilities are unconditional: `p_60` = P(minutes ≥ 60) = p_start · P(60+ |
 **Post-processing**, in this order:
 1. Horizon decay (h ≥ 1; every horizon fixture has the lags as of the deadline): p_start =
    w · p_model + (1 − w) · long_run, w = `horizon_decay ** h`, long_run = the start rate
-   over his last 38 rows shrunk toward p_model with `long_run_prior` pseudo-rows.
+   over his last 38 rows shrunk toward p_model with `long_run_prior` pseudo-rows. Then
+   logit p_start ×= `horizon_shrink ** h`: the decay can't take a regular below his
+   long-run rate, but his realized start rate keeps falling with the horizon (injuries,
+   rotation; develop 2021/22–2022/23 flag-layer fit rows, plain `a` with base > 0.8:
+   predicted 0.90 at every horizon against 0.91 realized at h0 and 0.82 at h3+, recal
+   slope 1.0 / 0.86 / 0.81 / 0.73 at h0 / 1 / 2 / 3+, results/research/diag-slope-h.txt).
 2. Suspensions (`fplopt.features.history.BAN_RULES`, `RED_BAN`): the first `ban_remaining`
    fixtures of his club in the horizon get p_start = p_sub = 0 (so every probability and
    e_minutes are 0); with `ban_residual`, p_start and P(sub | no start) are instead the
@@ -74,6 +79,7 @@ __all__ = (
     "conditionals",
     "finish_minutes",
     "fit_minutes",
+    "horizon_start",
     "predict_minutes",
 )
 
@@ -105,6 +111,7 @@ class MinutesParams:
     sub: GbmParams = field(default_factory=GbmParams)
     season_decay: float = 0.7  # training weight per season of age
     horizon_decay: float = 0.85  # weight of the model's p_start at horizon h: decay ** h
+    horizon_shrink: float = 0.92  # logit p_start × shrink ** h after the decay (1: off)
     long_run_prior: float = 5.0  # pseudo-rows of the model's p_start in the long-run rate
     max_shift: float = 1.0  # |logit shift| bound of the team normalization
     max_scale: float = 1.25  # bound of the team minutes scaling
@@ -210,6 +217,19 @@ def out_of_fold_start(rows: pd.DataFrame, season: int, params: MinutesParams) ->
     return out
 
 
+def horizon_start(
+    p_model: np.ndarray, long_run: np.ndarray, horizon: np.ndarray, params: MinutesParams
+) -> np.ndarray:
+    """P(start) at each row's horizon: the decay toward `long_run`, then the logit shrink
+    (post-processing step 1)."""
+    weight = np.power(params.horizon_decay, horizon)
+    p_start = weight * p_model + (1.0 - weight) * long_run
+    if params.horizon_shrink == 1.0:
+        return p_start
+    z = logit(np.clip(p_start, EPS, 1.0 - EPS))
+    return expit(np.power(params.horizon_shrink, horizon) * z)
+
+
 # --- post-processing ---------------------------------------------------------------------
 
 
@@ -313,8 +333,8 @@ def predict_minutes(view: AsOfView, fit: MinutesFit) -> pd.DataFrame:
     n_long = frame["n_long"].to_numpy(dtype="float64")
     starts_long = np.nan_to_num(frame["start_rate_long"].to_numpy(dtype="float64")) * n_long
     long_run = (starts_long + params.long_run_prior * p_model) / (n_long + params.long_run_prior)
-    weight = np.power(params.horizon_decay, frame["horizon"].to_numpy(dtype="float64"))
-    p_start = weight * p_model + (1.0 - weight) * long_run
+    horizon = frame["horizon"].to_numpy(dtype="float64")
+    p_start = horizon_start(p_model, long_run, horizon, params)
 
     banned = frame["club_fixture_order"].to_numpy() < frame["ban_remaining"].to_numpy()
     p_start = np.where(banned, fit.ban_start, p_start)
