@@ -331,3 +331,19 @@ def test_module_constants_match_the_cli():
 
     assert {m for m in run.FIRST_SEASON} == set(cli.EP_NEXT_MODELS)
     assert set(run.FIRST_SEASON.values()) == {cli.EP_NEXT_FIRST_SEASON}
+
+
+def test_realized_defcon_reached_by_position():
+    rules = backtest_rules(2023)
+    keeper = next(e for e, t in rules.defcon_threshold.items() if t is None)
+    defender = next(e for e, t in rules.defcon_threshold.items() if t is not None)
+    t = rules.defcon_threshold[defender]
+    totals = pd.DataFrame(
+        {
+            "element_type": [defender, defender, defender, keeper],
+            "defensive_contribution": pd.array([t, t - 1, None, 30], dtype="Int64"),
+        }
+    )
+    out = run._with_defcon(totals, rules)
+    assert out["defcon"].tolist()[:2] == [1.0, 0.0]
+    assert out["defcon"].iloc[2:].isna().all()  # no stat, no threshold
