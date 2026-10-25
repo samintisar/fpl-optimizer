@@ -63,6 +63,9 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      already ≈ 1, `diag-gk-layer.txt`, small n). **Live check at GW8**: does the regulars
      gap (0.77 vs 0.82) shrink once horizon_shrink is promoted? (Live is h0, where the
      shrink acts only through the flag layer's slopes.)
+   - Tried 2026-10-25: `position_minutes` (E[minutes | start, 60+ / <60] per position, in
+     e_minutes and m_sixty; GK e_minutes 82.3 vs 86.5 at p_start > 0.8): DISCARD, MSE h0
+     +0.00007, 2 of 6 seasons better. The GK minutes gap costs nothing in points. Not a lead.
 2. **Five subs: closed 2026-10-24** (model). Retest of the full feature on top of the shrink:
    2022 still +0.0025 (DISCARD); in the 60+ part only: 2022 +0.0013, minutes_ll −0.06 % (the
    −0.32 % gain was the sub part; DISCARD). Three variants: closed. Remaining fact: in
@@ -106,6 +109,12 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      only test the weighting itself (current-season data weighted more), not the new rules,
      and `season_decay` is shared with saves and cards. `e_bonus` is now scored by the xP
      evaluation (243c39f): read it on develop first.
+   - Player term, 2026-10-25: a player's bonus residual vs the position regression persists
+     (corr 0.13–0.30 into the next season in every develop season, MID 0.32; best k ≈ 80
+     pseudo matches, next-season residual SSE −7 %, `diag-bonus-player.txt`). As an offset on
+     `b_play` (`bonus_player_prior=80`): DISCARD, MSE h0 +0.00001, 3–3 seasons. Real but
+     ~0.03 points per played match after shrinkage: too small to see. Don't retry the
+     offset; the season weighting is the only bonus item left, and it is low value.
 5. **Free-transfer value** (decision; `ft_scale` key on `research`, c6eb489). **Blocked on
    `research`** since `back_split` is on: calibrated v1 raises (fingerprint), so every
    `optimizer:v1` backtest at the head fails until the table is regenerated (*Needs the
@@ -161,7 +170,15 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
   contains `data/<file>` (a read in a diagnostic script; worked around by reading through
   `DataStore("data")`, the sanctioned interface) or mentions `calibrate_v1.py` in a grep
   without `--seasons`. Worth a look if the reads should be allowed.
-- Still pending since 2026-10-21: merging `main` into `research` (below).
+- Still pending since 2026-10-21: merging `main` into `research` (below). As of 2026-10-25
+  `main` also has #46 (measure-bonus-defcon) and #48 (bot fixes) that `research` lacks.
+- **The model ideas are thin** (2026-10-25): every open model line is closed under the
+  3-value rule, waiting on you (ideas 6, 7) or blocked (idea 5, the calibration table). The
+  next real leads will come from the GW8+ monitor (does live P(start) close after the
+  promotion; the CS/defcon bias, now that main's frames carry p_defcon).
+- Guard false positive, 2026-10-25: one Bash command that appends to `ledger.tsv` (`>>`)
+  and also runs `bash autoresearch/sync.sh` is refused as a write to the frozen sync.sh.
+  Separate commands work.
 
 - **Merge `main` into `research`** (new 2026-10-21): PR #47 promoted back_split,
   club_continuity, season phase and finishing with a refit calibration table
