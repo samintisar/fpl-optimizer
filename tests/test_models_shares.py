@@ -243,6 +243,21 @@ def test_marcel_recovers_planted_shares_and_shrinks_small_samples():
     assert abs(strong.set_index("player_key").loc[1, "g"] - 0.3) < abs(out.loc[1, "g"] - 0.3)
 
 
+def test_price_par_sets_the_finishing_par_by_price():
+    rows = share_rows(1, 10, 2023, 10, 0.75, goals=0.75)  # 7.5 npxG, finishing at 1
+    table = ((4, np.log(0.8), 0.5, 70.0),)
+    base = toy_fit(finishing_prior=25.0, position_par=True, price_par=True)
+    fit = dataclasses.replace(base, position_finishing=((4, 0.9),), price_finishing=table)
+    out = marcel_shares(rows, POOL, fit, SEASON).set_index("player_key")
+    no_fin = marcel_shares(rows, POOL, toy_fit(), SEASON).set_index("player_key")
+    par = 0.8 * np.exp(0.5 * (90 - 70) / 10)  # player 1 costs 90
+    assert out.loc[1, "g"] == pytest.approx(no_fin.loc[1, "g"] * (7.5 + 25 * par) / (7.5 + 25))
+    # Without the table (or price_par off): the position par.
+    plain = dataclasses.replace(fit, price_finishing=())
+    out = marcel_shares(rows, POOL, plain, SEASON).set_index("player_key")
+    assert out.loc[1, "g"] == pytest.approx(no_fin.loc[1, "g"] * (7.5 + 25 * 0.9) / (7.5 + 25))
+
+
 def test_season_weights_and_goal_fallback():
     rows = pd.concat(
         [

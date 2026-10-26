@@ -54,7 +54,10 @@ pseudo-npxG) instead of 1: (np goals + k · par) / (npxG + k). Understat npxG ov
 forwards' and defenders' goals (develop 2016/17–2022/23 np goals / npxG: FWD 0.89, 0.82–0.88
 every season from 2018/19; DEF 0.87; MID 1.01), and with par 1 the team normalization gave
 their goals to forwards (E[goals] / realized FWD 0.94, MID 1.06 at h0;
-results/research/diag-finish-pos.txt, diag-goals-pos.txt).
+results/research/diag-finish-pos.txt, diag-goals-pos.txt). With `price_par` the par is
+also by price: per position a quasi-Poisson np goals ~ npxG·exp(a + b·z) over the same
+rows' player-seasons (`SharesFit.price_finishing`, like the price prior; positions with
+under `PAR_PRIOR` npxG keep the position par).
 
 **Team consistency** (`predict_shares`, per team-fixture over the club's pool players, f =
 e_minutes / 90 from the minutes frame, the expected XI by minutes):
@@ -199,6 +202,10 @@ class SharesParams:
     finishing_prior: float | None = 25.0
     # Finishing par per position (np goals / npxG of the position) instead of 1.
     position_par: bool = True
+    # With position_par: the par also by price (SharesFit.price_finishing): cheap players
+    # finish below npxG, premium ones above (develop 2021-22 h0: bench MID <= 5.0 np goals /
+    # npxG 0.74, MID >= 9.5 1.10, FWD >= 9.5 1.06; results/research/diag-goals-price.txt).
+    price_par: bool = True
 
     def __post_init__(self) -> None:
         if not self.season_weights or any(w < 0 for w in self.season_weights):
@@ -237,6 +244,8 @@ class SharesFit:
     n_rows: int
     coverage: tuple[tuple[int, float, float], ...] = field(default=())  # season, xG, xA share
     position_finishing: tuple[tuple[int, float], ...] = field(default=())  # np goals / npxG
+    # np goals / npxG by position and price: (element_type, a, b, center), as `price_goal`
+    price_finishing: tuple[tuple[int, float, float, float], ...] = field(default=())
 
 
 # --- inputs ---------------------------------------------------------------------------------
@@ -640,6 +649,9 @@ def marcel_shares(
     if params.position_par:
         lookup = dict(fit.position_finishing)
         par = np.array([lookup.get(int(e), 1.0) if e == e else 1.0 for e in element_type])
+        if params.price_par and fit.price_finishing:
+            by_price = _price_prior(fit.price_finishing, element_type, price)
+            par = np.where(np.isnan(by_price), par, by_price)
     finishing = (
         np.ones(len(out))
         if k is None
@@ -714,7 +726,7 @@ def fit_shares(view: AsOfView, params: SharesParams | None = None) -> SharesFit:
     recent = share_rows[share_rows["season"] > season - FIT_SEASONS]
     team_output = _ratio(recent["d"], recent["on_pitch"], 1.3)
     position_goal, position_assist, price_goal, price_assist = [], [], [], []
-    position_finishing = []
+    position_finishing, price_finishing = [], []
     for position, group in recent.groupby("element_type", sort=True):
         if position != position:
             continue
@@ -744,6 +756,24 @@ def fit_shares(view: AsOfView, params: SharesParams | None = None) -> SharesFit:
             .dropna(subset=["price"])
             .drop_duplicates(["player_key", "season"])[["player_key", "season", "price"]]
         )
+        finishing_seasons = (
+            pd.DataFrame(
+                {
+                    "player_key": own["player_key"].to_numpy(),
+                    "season": own["season"].to_numpy(),
+                    "fin": np.maximum(np_goals, 0.0),
+                    "fin_xg": own["x_goals"].to_numpy(dtype="float64"),
+                }
+            )
+            .groupby(["player_key", "season"])[["fin", "fin_xg"]]
+            .sum()
+            .reset_index()
+            .merge(first_price, on=["player_key", "season"], how="left")
+        )
+        if finishing_seasons["fin_xg"].sum() >= PAR_PRIOR:  # keepers: no par by price
+            price_finishing.append(
+                (int(position), *_price_model(finishing_seasons, "fin", "fin_xg"))
+            )
         seasons = (
             group.assign(
                 xg=group["x_goals"] * wg,
@@ -829,6 +859,7 @@ def fit_shares(view: AsOfView, params: SharesParams | None = None) -> SharesFit:
         n_rows=len(share_rows),
         coverage=coverage,
         position_finishing=tuple(position_finishing),
+        price_finishing=tuple(price_finishing),
     )
 
 
