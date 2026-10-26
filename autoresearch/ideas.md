@@ -109,6 +109,11 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      only test the weighting itself (current-season data weighted more), not the new rules,
      and `season_decay` is shared with saves and cards. `e_bonus` is now scored by the xP
      evaluation (243c39f): read it on develop first.
+   - 2026-10-26: teammates competing (`team_goals` feature, the club's goals in the match):
+     starters' residual at λ_for > 2 is negative everywhere (GK −0.10, DEF −0.02, MID −0.03,
+     FWD −0.05; `diag-bonus-lambda.txt`); DISCARD on the min gain (MSE h0 −0.00018, 5 of 6
+     seasons better, 2021 +0.0012). Premium MIDs (≥ 9.5) get 0.09 less bonus per start than
+     predicted in 5 of 6 seasons (`diag-bonus-price.txt`). See idea 10 for the keeper term.
    - Player term, 2026-10-25: a player's bonus residual vs the position regression persists
      (corr 0.13–0.30 into the next season in every develop season, MID 0.32; best k ≈ 80
      pseudo matches, next-season residual SSE −7 %, `diag-bonus-player.txt`). As an offset on
@@ -153,8 +158,60 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
    league's season rate (2020: 102 realized vs 74 predicted) and the main-taker split flips
    sign between seasons (`diag-pens.txt`). Assists: FPL assists / xA by position (FWD 1.41,
    MID 1.20, DEF 1.13) as a share multiplier: DISCARD (4 of 6 seasons worse).
+   - 2026-10-26: penalties realized / expected by season 0.69, 1.10, 1.02, 1.18, 0.96, 0.81
+     (2017–22), 458 vs 442 overall: noise around the right level (`diag-pens-walk.txt`).
+     A season's over-prediction lowers λ_np (team goals minus penalties), so open-play
+     goals move the other way. FPL assists by price: no trend (premium MID 0.90, FWD 0.89
+     realized / expected; `diag-assists-price.txt`).
+9. **Goalkeepers' P(start) at longer horizons** (model; new 2026-10-26, one variant DISCARD
+   by the h0 rule). `horizon_shrink` (logit × 0.92^h) pulls every P(start) toward 0.5, but
+   first-choice keepers are rarely rotated: develop 2017–22, p_start > 0.5, predicted 0.917
+   → 0.796 from h0 to h5 against 0.928 → 0.857 realized; outfield within 0.01
+   (`diag-horizon-components.txt`: keeper starters' xP under by +0.09 at h0 → +0.31 at h5,
+   from starts, clean sheets and appearance). `keeper-shrink` (no shrink for keepers):
+   **MSE h1–5 −0.00339, every season better (−0.0014 to −0.0043)**, the largest h1–5 gain
+   in the ledger; h0 +0.00008 (unchanged before flags; 2022 +0.0007 through the flag
+   layer's refit slopes). The judge needs an h0 gain, which an h ≥ 1 fix can't give.
+   **For the user** (commit d018641 on the server hub). The planner's horizon is 6 GWs.
+10. **Goalkeeper bonus: clean sheet *and* saves** (model; new 2026-10-26, DISCARD on the min
+    gain, all 6 seasons better). Predicted keeper bonus is flat in λ_against (0.23–0.26),
+    realized 0.17 for strong-team keepers, 0.34 mid, 0.26 weak (`diag-gk-saves.txt`). The
+    additive indicators miss the conjunction: 2018–22 keepers 60+, CS without 3 saves 0.20
+    realized vs 0.61 additive, CS with 3–5 saves 1.39 vs 1.02; the product cs × saves//3
+    cuts the bonus SSE 20 % (`diag-gk-bonus-cells.txt`). `keeper-cs-saves`: MSE h0 −0.00024,
+    h1–5 −0.00018, all 6 seasons better, worst −0.00001. Keepers are ~11 % of rows, so the
+    pooled MSE dilutes it. **For the user** (commit 4098778). The defender analogue (CS ×
+    goal / assist: realized bonus SSE −4.8 %) is flat in xP (DISCARD): the products'
+    expectations are tiny.
+11. **Goals: what's left after `price_par`** (model; 2026-10-26).
+    - Before it (head walk 2021–22 h0, `diag-np-pen-ast.txt`): E[np goals] split MID 54.6 % /
+      FWD 31.2 % / DEF 14.2 % against realized 57.1 / 29.3 / 13.6, short of even the
+      par-implied split (56.1 / 30.0 / 13.9). Finishing tracks price (`diag-goals-price.txt`):
+      `price_par` KEEP (see Done).
+    - Tried and flat: FWD goal-share prior 960 instead of 1920 (`fwd-goal-prior`; the FWD
+      starters' goals slope 1.17 is not shrinkage); `finishing_prior` 50 (third value: the
+      setting is closed at 25); season-weighted finishing sums (`finishing-weighted`).
+    - Still there with price_par (2017–22, `diag-horizon-components.txt`,
+      `diag-goals-price-pp.txt`): FWD starters' goals over-predicted ~6 % at every horizon
+      (−0.016 at h0, −0.021 to −0.026 goals per row at h1–5; 5 of 6 seasons), concentrated in
+      mid-price starters (£5.0–8.0m: E[np] / npxG 0.86–0.89 vs realized 0.80–0.81; premium
+      FWDs on target). A log-linear price par may be too flat for FWDs (fitted +2.5–4 % per
+      £1m). Bench players (p_start ≤ 0.5) over-predicted 10–25 % (cheap bench MID 0.73,
+      DEF 0.78): they convert below npxG, but they're rarely picked.
 
 ## Needs the user (not the loop's to do)
+
+- **New keep on `research`** (2026-10-26): `price_par` (e81e161), finishing par by position
+  and price. Same 7 test failures as the head (no new one).
+- **Two judge-DISCARDs worth your look** (2026-10-26): `keeper-shrink` (idea 9: h1–5
+  −0.0034, every season; the h0 rule can't see an h ≥ 1 fix) and `keeper-cs-saves`
+  (idea 10: all 6 seasons better, below the min gain because keepers are 11 % of rows).
+  Maybe the judge needs an h1–5 path, or a per-position view.
+- **Process race** (2026-10-26, no harm done): `sync.sh try` checks the candidate out in
+  `~/fpl-research` immediately, even while a `model_eval.sh` baseline for the previous head
+  is still walking there. I stopped that run and deleted its partial dir
+  (`84e5a968fb-62719625`). The loop now waits for model_eval before `sync.sh try`; a lock
+  check in sync.sh (frozen) would make it safe.
 
 - **Two new keeps on `research`** (2026-10-24): `horizon_shrink=0.92` (8eaf71c) and
   `position_par` (c5a10d2). Each also breaks one synthetic test, not a by-design one:
@@ -199,6 +256,14 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
   `state/bot.sqlite`.
 
 ## Done
+
+- **Finishing par by price** (model, KEEP 2026-10-26, e81e161): `SharesParams.price_par`,
+  the finishing par per position and price, quasi-Poisson np goals ~ npxG·exp(a + b·z) over
+  the position par's own-npxG player-seasons (`SharesFit.price_finishing`; fitted per +£1m:
+  MID ×1.02–1.03, FWD ×1.03–1.04, DEF ×1.06–1.13 at GW10 of 2018/2020/2022). MSE h0
+  −0.00094, h1–5 −0.00140, 5 of 6 seasons better (2020 +0.0003), goals_ll +0.06 %. Evidence:
+  cheap players finish below npxG (bench MID ≤ 5.0 0.74), premium ones above (MID ≥ 9.5
+  1.10, FWD 1.06).
 
 - **P(start) horizon shrink** (model, KEEP 2026-10-24, 8eaf71c): `MinutesParams.horizon_shrink
   = 0.92`, logit p_start × 0.92^h after the horizon decay; MSE h0 −0.00193, h1–5 −0.00234,
