@@ -4,8 +4,9 @@ earlier fixtures only, targets, suspensions, and the prediction frame."""
 import numpy as np
 import pandas as pd
 import pytest
-from synthetic_season import synthetic_tables
+from synthetic_season import espn_tables, synthetic_tables
 
+from fplopt.build import espn
 from fplopt.features.history import (
     LAG_FEATURES,
     PREDICTION_COLUMNS,
@@ -90,6 +91,7 @@ def league(rows: list[dict], n_gws: int = 12, seasons: tuple[int, ...] = (SEASON
         "player_match": player_match,
         "player_gw": player_gw.reset_index(drop=True),
         "player_season": player_season.reset_index(drop=True),
+        **espn_tables(),
     }
 
 
@@ -313,8 +315,12 @@ def card_rows(cards: dict[int, tuple[int, int]], n_gws: int = 34) -> list[dict]:
     ],
 )
 def test_suspensions(cards, banned_gws):
+    # Without ESPN data a red card is one certain match; yellow bans are certain.
     frame = frame_at(league(card_rows(cards), n_gws=40), 40)
-    assert frame.loc[frame["banned"] == 1, "gw"].tolist() == banned_gws
+    assert frame.loc[frame["ban_kind"] == 2, "gw"].tolist() == banned_gws
+    assert (frame["ban_kind"] != 1).all()
+    assert frame["banned"].equals((frame["ban_kind"] > 0).astype("float64"))
+    assert frame["ban_kind"].dtype == "float64"
 
 
 def test_a_ban_carries_into_the_next_season():
@@ -363,8 +369,10 @@ def test_prediction_lags_match_the_training_rows_of_that_gameweek(synthetic):
         )
 
 
-def test_a_ban_in_the_prediction_frame():
-    rows = card_rows({5: (0, 1)}, n_gws=5)
+def prediction_tables(cards: dict[int, tuple[int, int]]) -> dict:
+    """`league` tables of player 1 (team 1, cards = {gw: (yellows, reds)}) up to GW5, with
+    team 1's schedule (one fixture per GW) and his GW6 registration: predict at GW6."""
+    rows = card_rows(cards, n_gws=5)
     tables = league(rows, n_gws=12)
     gw6 = (
         tables["player_gw"]
@@ -395,14 +403,128 @@ def test_a_ban_in_the_prediction_frame():
     )
     snapshot = synthetic_tables(seasons=(2023,), n_clubs=2)["player_snapshot"].iloc[:0]
     fixture_snapshot = synthetic_tables(seasons=(2023,), n_clubs=2)["fixture_snapshot"]
-    tables = {
+    return {
         **tables,
         "schedule": schedule,
         "player_snapshot": snapshot,
         "fixture_snapshot": fixture_snapshot,
     }
+
+
+def test_a_ban_in_the_prediction_frame():
+    tables = prediction_tables({5: (0, 1)})
     frame = prediction_frame(DataStore(tables=tables).as_of(deadline(6)))
     mine = frame[frame["player_key"] == 1]
-    assert mine["ban_remaining"].tolist() == [1.0] * 6
-    assert mine["club_fixture_order"].tolist() == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    assert mine["ban_kind"].tolist() == [2.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     assert mine["reds_l3"].iloc[0] == 1.0
+
+
+GW5_FIXTURE = SEASON * 10_000 + 5 * 100 + 1
+
+
+def sent_off(tables: dict, second_yellow: bool, cup_days: list[float]) -> dict:
+    """`tables` plus player 1's red card in GW5 on ESPN (mapped; `second_yellow`) and an
+    EFL Cup match of team 1 `days` after the GW5 deadline per entry of `cup_days` (known 10
+    days before kickoff)."""
+    kickoff = deadline(5) + pd.Timedelta(days=1)
+    times = {"event_time": kickoff, "available_at": kickoff + pd.Timedelta(hours=3)}
+    match = {
+        "espn_event_id": 9001,
+        "league": "eng.1",
+        "season": SEASON,
+        "kickoff_time": kickoff,
+        "home_espn_id": "9001",
+        "away_espn_id": "9002",
+        "home_team_key": 1,
+        "away_team_key": 2,
+        "fixture_key": GW5_FIXTURE,
+        "status": "STATUS_FULL_TIME",
+        "extra_time": False,
+        **times,
+    }
+    player = {
+        "espn_athlete_id": 501,
+        "espn_event_id": 9001,
+        "season": SEASON,
+        "league": "eng.1",
+        "team_key": 1,
+        "athlete_name": "Player One",
+        "starter": True,
+        "minute_on": 0,
+        "minute_off": 70,
+        "minutes": 70,
+        "yellows": 2 if second_yellow else 0,
+        "red": True,
+        "second_yellow": second_yellow,
+        **times,
+    }
+    mapping = espn.empty_map()
+    mapping = pd.concat(
+        [mapping, pd.DataFrame({"espn_athlete_id": [501], "player_key": [1], **times})],
+        ignore_index=True,
+    ).astype(mapping.dtypes.to_dict())
+    cups = []
+    for i, days in enumerate(cup_days):
+        cup_kickoff = deadline(5) + pd.Timedelta(days=days)
+        cups.append(
+            {
+                "espn_event_id": 9100 + i,
+                "league": "eng.league_cup",
+                "season": SEASON,
+                "kickoff_time": cup_kickoff,
+                "home_team_key": 1,
+                "away_team_key": None,
+                "played": cup_kickoff < deadline(6),
+                "event_time": cup_kickoff,
+                "available_at": cup_kickoff - pd.Timedelta(days=10),
+            }
+        )
+    return {
+        **tables,
+        "espn_match": espn._frame([match], espn.MATCH_SCHEMA),
+        "espn_player_match": espn._frame([player], espn.PLAYER_SCHEMA),
+        "espn_map": mapping,
+        "club_match": espn._frame(cups, espn.CLUB_MATCH_SCHEMA),
+    }
+
+
+def predicted_kinds(tables: dict) -> list[float]:
+    frame = prediction_frame(DataStore(tables=tables).as_of(deadline(6)))
+    return frame.loc[frame["player_key"] == 1, "ban_kind"].tolist()
+
+
+@pytest.mark.parametrize(
+    ("second_yellow", "cup_days", "kinds"),
+    [
+        (True, [], [2, 0, 0, 0, 0, 0]),
+        (True, [4], [0] * 6),  # the cup tie between GW5 and GW6 serves the ban
+        (False, [], [2, 1, 1, 0, 0, 0]),  # straight red: 1 certain + 2 likely
+        (False, [4], [1, 1, 0, 0, 0, 0]),
+        (False, [4, 9], [1, 0, 0, 0, 0, 0]),  # a scheduled cup match after the deadline
+        (False, [4, 30], [1, 1, 0, 0, 0, 0]),  # ... after the first two horizon fixtures
+        (False, [9], [2, 1, 0, 0, 0, 0]),  # between the first two horizon fixtures
+    ],
+)
+def test_a_domestic_cup_match_serves_a_red_card_ban(second_yellow, cup_days, kinds):
+    tables = sent_off(
+        prediction_tables({5: (1 if second_yellow else 0, 1)}), second_yellow, cup_days
+    )
+    assert predicted_kinds(tables) == [float(k) for k in kinds]
+
+
+def test_a_cup_match_not_yet_known_does_not_serve_the_ban():
+    tables = sent_off(prediction_tables({5: (0, 1)}), False, [9])
+    cups = tables["club_match"]
+    tables["club_match"] = cups.assign(available_at=deadline(6) + pd.Timedelta(hours=1))
+    assert predicted_kinds(tables) == [2.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+
+
+def test_training_rows_carry_the_served_ban():
+    tables = sent_off(league(card_rows({5: (1, 1)}, n_gws=8), n_gws=12), False, [4])
+    frame = frame_at(tables, 9)
+    mine = frame[frame["player_key"] == 1].set_index("gw")
+    assert mine.loc[6:8, "ban_kind"].tolist() == [1.0, 1.0, 0.0]
+    assert mine.loc[6:8, "banned"].tolist() == [1.0, 1.0, 0.0]
+    without = frame_at(sent_off(league(card_rows({5: (1, 1)}, n_gws=8), n_gws=12), False, []), 9)
+    mine = without[without["player_key"] == 1].set_index("gw")
+    assert mine.loc[5:9, "ban_kind"].tolist() == [0.0, 2.0, 1.0, 1.0]

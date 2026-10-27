@@ -394,7 +394,7 @@ Features: recent starts/minutes, starts share of **team** matches, days rest, mi
 
 Post-processing:
 - **Team normalization:** Σ P(start) ≈ 11 and Σ expected minutes ≈ 990 per team per fixture.
-- **Deterministic suspensions:** yellow-card thresholds and red-card bans zero P(start) for the affected GWs.
+- **Deterministic suspensions:** yellow-card thresholds and red-card bans zero P(start) for the affected GWs. Since 2026-10-27 (`fplopt.features.bans`, ESPN data): a domestic red (PL, FA Cup, EFL Cup) bans the club's next *domestic* matches, so a cup tie in between serves part of it; a straight red is 1 certain + 2 likely matches, a second yellow 1; PL yellow bans stay PL-only. Certain and likely banned fixtures each get a fitted start rate (2–7% and about 25% on develop).
 - **Horizon decay:** for GW+2 onward, decay predictions toward the player's long-run start rate.
 
 ### 6.4 Adjustment layer (prediction time only)

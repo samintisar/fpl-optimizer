@@ -31,6 +31,15 @@ Substitution event bringing him on, or `subbedOut` without one taking him off (n
 leaves his `minutes` (and the unknown minute_on/off) null; the count per league is logged. The
 matcher and the minutes check skip null rows.
 
+- `club_match` (event, key `espn_event_id`): every non-league match of a PL club, played
+  (`espn_match`) or scheduled (an `espn_schedule_snapshot` event not played yet; kickoff and
+  sides from its newest snapshot, a small accepted look-ahead on the date of a rescheduled
+  match). `available_at` = when it was known: min(first snapshot listing it, rule time); the
+  rule time per PL side = the kickoff of the club's previous match in the same league and
+  season (the draw follows the previous round), or `kickoff - FIRST_ROUND_NOTICE` without one;
+  the row's rule time is the latest over its PL sides; never after `kickoff - 1 us`.
+  `event_time` = kickoff.
+
 Checks (`espn_problems`, fail the build), for seasons with any `eng.1` match: every finished PL
 fixture that kicked off over `GRACE` (2 days) before the newest ESPN `eng.1` match has one
 (matches are archived daily, so the last days may be missing); for each season before the
@@ -312,7 +321,7 @@ _NULLABLE_INT = (
     "minutes",
 )
 _TIMES = ("kickoff_time", "event_time", "available_at", "snapshot_at")
-_BOOLS = ("extra_time", "starter", "red", "second_yellow")
+_BOOLS = ("extra_time", "starter", "red", "second_yellow", "played")
 
 
 def _frame(rows: list[dict], schema: pa.DataFrameSchema) -> pd.DataFrame:
@@ -330,6 +339,75 @@ def _frame(rows: list[dict], schema: pa.DataFrameSchema) -> pd.DataFrame:
         else:
             df[name] = df[name].astype(str)
     return df
+
+
+FIRST_ROUND_NOTICE = pd.Timedelta(days=14)  # VERIFY (spec §3): a competition's first match
+CLUB_MATCH_COLUMNS = (
+    "espn_event_id",
+    "league",
+    "season",
+    "kickoff_time",
+    "home_team_key",
+    "away_team_key",
+)
+CLUB_MATCH_SCHEMA = pa.DataFrameSchema(
+    {
+        "espn_event_id": pa.Column("int64", unique=True),
+        "league": pa.Column(str, pa.Check.ne("eng.1")),
+        "season": pa.Column("int64"),
+        "kickoff_time": pa.Column(UTC_US),
+        "home_team_key": pa.Column("Int64", nullable=True),
+        "away_team_key": pa.Column("Int64", nullable=True),
+        "played": pa.Column(bool),
+        "event_time": pa.Column(UTC_US),
+        "available_at": pa.Column(UTC_US),
+    },
+    checks=[
+        pa.Check(
+            lambda df: df["available_at"] < df["kickoff_time"],
+            error="a club match is known before it kicks off",
+        )
+    ],
+    strict=True,
+    ordered=True,
+)
+CLUB_MATCH_SORT_BY = ("kickoff_time", "espn_event_id")
+
+
+def club_match(played: pd.DataFrame, schedule: pd.DataFrame) -> pd.DataFrame:
+    """Every non-league match of a PL club: played ones (`espn_match` rows) and scheduled ones
+    (`espn_schedule_snapshot` events not played yet; kickoff and sides from the newest
+    snapshot), with `available_at` = when it was known (module docstring, *club_match*)."""
+    cols = list(CLUB_MATCH_COLUMNS)
+    sort_by = list(CLUB_MATCH_SORT_BY)
+    done = played.loc[played["league"] != "eng.1", cols].assign(played=True)
+    snaps = schedule[schedule["league"] != "eng.1"].sort_values("snapshot_at", kind="mergesort")
+    first_seen = snaps.groupby("espn_event_id")["snapshot_at"].min()
+    pending = snaps.drop_duplicates("espn_event_id", keep="last")
+    pending = pending.loc[~pending["espn_event_id"].isin(done["espn_event_id"]), cols]
+    out = pd.concat([done, pending.assign(played=False)], ignore_index=True)
+    out = out.sort_values(sort_by, kind="mergesort").reset_index(drop=True)
+    # Rule time per PL side: the club's previous match in the league and season.
+    sides = pd.concat(
+        [
+            out[["espn_event_id", "league", "season", "kickoff_time", c]].rename(
+                columns={c: "team_key"}
+            )
+            for c in ("home_team_key", "away_team_key")
+        ]
+    ).dropna(subset=["team_key"])
+    sides = sides.sort_values(sort_by, kind="mergesort")
+    previous = sides.groupby(["team_key", "league", "season"])["kickoff_time"].shift()
+    rule = previous.fillna(sides["kickoff_time"] - FIRST_ROUND_NOTICE)
+    rule = rule.groupby(sides["espn_event_id"]).max()
+    known = pd.Series(rule.reindex(out["espn_event_id"]).to_numpy(), index=out.index)
+    seen = pd.Series(first_seen.reindex(out["espn_event_id"]).to_numpy(), index=out.index)
+    known, seen = pd.to_datetime(known, utc=True), pd.to_datetime(seen, utc=True)
+    known = known.where(~(seen < known), seen)  # NaT compares False: no snapshot, keep the rule
+    latest = pd.to_datetime(out["kickoff_time"], utc=True) - pd.Timedelta(microseconds=1)
+    out["available_at"] = known.where(known < latest, latest)
+    out["event_time"] = out["kickoff_time"]
+    return _frame(out.to_dict("records"), CLUB_MATCH_SCHEMA)
 
 
 def _sides(competitors: list[dict]) -> dict[str, str]:
@@ -616,6 +694,9 @@ def build_espn(ctx: BuildContext) -> pd.DataFrame:
         ctx.forget(name)
     write_table(mapping, "espn_map", MAP_SCHEMA, ctx.data_dir, MAP_SORT_BY)
     ctx.forget("espn_map")
+    clubs = club_match(tables["espn_match"], tables["espn_schedule_snapshot"])
+    write_table(clubs, "club_match", CLUB_MATCH_SCHEMA, ctx.data_dir, CLUB_MATCH_SORT_BY)
+    ctx.forget("club_match")
     log.info(
         "espn_map: %d athletes mapped (%d override row(s)) of %d with PL minutes",
         int(mapping["player_key"].notna().sum()),
