@@ -438,3 +438,28 @@ def test_rebuilding_player_match_alone_reruns_understat(world, caplog):
     assert world.ctx.table("player_match")["us_minutes"].notna().all()
     build(["player_dim"], world.ctx)
     assert world.ctx.table("player_dim")["understat_id"].notna().all()
+
+
+def test_matcher_helpers_take_another_id_column():
+    src = pd.DataFrame({"espn_athlete_id": [7, 7], "fixture_key": [1, 2], "minutes_src": [90, 88]})
+    fpl = pd.DataFrame(
+        {
+            "player_key": [3, 3],
+            "fixture_key": [1, 2],
+            "minutes": [90, 90],
+            "season": [2023, 2023],
+            "goals_scored": [0, 0],
+        }
+    )
+    pairs = candidate_pairs(src, fpl, id_col="espn_athlete_id", minutes_col="minutes_src")
+    assert pairs[["espn_athlete_id", "player_key", "together", "shared"]].values.tolist() == [
+        [7, 3, 2, 2]
+    ]
+    pairs["name_score"] = name_scores(
+        pairs, {7: "Ann Bee"}, {3: {"Ann Bee"}}, id_col="espn_athlete_id"
+    )
+    empty = read_overrides(REPO_CONFIG, source="espn", id_col="espn_athlete_id")
+    assert list(empty.columns) == ["espn_athlete_id", "player_key"]
+    mapping = map_understat(pairs, empty, id_col="espn_athlete_id")
+    assert mapping[["espn_athlete_id", "player_key", "method"]].values.tolist() == [[7, 3, "auto"]]
+    assert list(mapping.columns)[0] == "espn_athlete_id"
