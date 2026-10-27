@@ -88,6 +88,7 @@ TABLES: dict[str, TableSpec] = _specs(
     TableSpec("team_rating", "event", ("team_key", "event_time")),
     TableSpec("espn_match", "event", ("espn_event_id",)),
     TableSpec("espn_player_match", "event", ("espn_athlete_id", "espn_event_id")),
+    TableSpec("club_match", "event", ("espn_event_id",)),
     # snapshot
     TableSpec(
         "player_snapshot", "snapshot", ("snapshot_at", "source", "player_key"), "snapshot_at"

@@ -9,9 +9,11 @@ from test_build_understat import add_understat_season
 from fplopt.build import ORDER, build
 from fplopt.build.espn import (
     AVAILABLE_AFTER,
+    FIRST_ROUND_NOTICE,
     MAP_SCHEMA,
     EspnBuildError,
     build_espn_tables,
+    club_match,
     parse_summary,
 )
 from fplopt.build.teams import team_dim_from_config
@@ -592,3 +594,60 @@ def test_no_espn_data_builds_empty_tables(world):
     mapping = pd.read_parquet(world.ctx.table_path("espn_map"))
     MAP_SCHEMA.validate(mapping)
     assert list(mapping.columns) == list(MAP_SCHEMA.columns)
+
+
+def cup(event_id, kickoff, home, away, league="eng.league_cup"):
+    return {
+        "espn_event_id": event_id,
+        "league": league,
+        "season": 2026,
+        "kickoff_time": pd.Timestamp(kickoff),
+        "home_team_key": home,
+        "away_team_key": away,
+    }
+
+
+def test_club_match_known_after_the_previous_round_or_two_weeks_before_the_first():
+    played = pd.DataFrame(
+        [
+            cup(1, "2026-08-26T18:45Z", 8, None),  # Chelsea's round 2
+            cup(2, "2026-09-23T18:45Z", 8, 14),  # round 3 v Liverpool
+            cup(3, "2026-09-17T19:00Z", 8, None, league="uefa.champions"),
+            cup(9, "2026-09-16T19:00Z", 1, None, league="eng.1"),  # league: not a club match
+        ]
+    )
+    out = club_match(played, pd.DataFrame(columns=["snapshot_at", *played.columns]))
+    out = out.set_index("espn_event_id")
+    assert set(out.index) == {1, 2, 3}
+    assert out.loc[1, "available_at"] == pd.Timestamp("2026-08-26T18:45Z") - FIRST_ROUND_NOTICE
+    # Round 3: known once both clubs' previous league-cup match kicked off (Liverpool: none).
+    assert out.loc[2, "available_at"] == pd.Timestamp("2026-08-26T18:45Z")
+    assert out.loc[3, "available_at"] == pd.Timestamp("2026-09-17T19:00Z") - FIRST_ROUND_NOTICE
+    assert out["played"].all() and (out["event_time"] == out["kickoff_time"]).all()
+
+
+def test_club_match_adds_scheduled_matches_known_from_their_first_snapshot():
+    played = pd.DataFrame([cup(1, "2026-09-23T18:45Z", 8, None)])
+    snaps = pd.DataFrame(
+        [
+            {
+                "snapshot_at": pd.Timestamp("2026-10-01T02:00Z"),
+                **cup(2, "2026-10-28T19:45Z", 14, 8),
+            },
+            {
+                "snapshot_at": pd.Timestamp("2026-10-20T02:00Z"),
+                **cup(2, "2026-10-28T20:00Z", 14, 8),
+            },
+        ]
+    )
+    out = club_match(played, snaps).set_index("espn_event_id")
+    assert not out.loc[2, "played"]
+    assert out.loc[2, "kickoff_time"] == pd.Timestamp("2026-10-28T20:00Z")  # newest snapshot
+    # Rule: Chelsea's previous league-cup match (event 1) kicked off 2026-09-23 < first snapshot.
+    assert out.loc[2, "available_at"] == pd.Timestamp("2026-09-23T18:45Z")
+
+
+def test_club_match_of_nothing_is_an_empty_typed_frame():
+    empty = pd.DataFrame(columns=list(cup(0, "2026-01-01T00:00Z", 1, 2)))
+    out = club_match(empty, empty.assign(snapshot_at=pd.Series(dtype="datetime64[ns, UTC]")))
+    assert out.empty and list(out.columns)[-3:] == ["played", "event_time", "available_at"]
