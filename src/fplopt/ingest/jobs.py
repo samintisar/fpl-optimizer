@@ -125,12 +125,15 @@ def run_daily(
     now: Clock = utc_now,
     *,
     football_data: FootballDataSource | None = None,
-    espn: tuple[Any, frozenset[str]] | None = None,
+    espn: Any | None = None,
+    espn_teams_csv: Path | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Daily archive: FPL, odds, the current football-data CSV (if a source is given), ESPN's
-    recent scoreboards and summaries (if `espn` = (source, club ids) is given), then the
-    post-lockdown step, last so it reads the bootstrap the FPL step just archived."""
+    """Daily archive: FPL, odds, the current football-data CSV (if a source is given), the
+    post-lockdown step (after the FPL step, so it reads the bootstrap just archived), then
+    ESPN's recent scoreboards and summaries (if an `espn` source is given; its club ids are
+    read from `espn_teams_csv` inside the step, so a bad file fails that step only). ESPN
+    comes last: it is the slowest step and post-lockdown does not wait on it."""
     steps: list[tuple[str, Callable[[], object]]] = [
         ("fpl", lambda: snapshot_fpl(store, fpl, now)),
         ("odds", lambda: snapshot_odds(store, odds, now)),
@@ -139,14 +142,19 @@ def run_daily(
         steps.append(
             ("football-data", lambda: snapshot_football_data_current(store, football_data, now))
         )
+    steps.append(("post-lockdown", lambda: snapshot_post_lockdown(store, fpl, now, sleep=sleep)))
     if espn is not None:
+        if espn_teams_csv is None:
+            raise ValueError("an espn source needs espn_teams_csv")
         from fplopt.ingest import espn as espn_ingest  # local: espn imports this module
 
-        source, team_ids = espn
-        steps.append(
-            ("espn", lambda: espn_ingest.snapshot_espn_recent(store, source, team_ids, now, sleep))
-        )
-    steps.append(("post-lockdown", lambda: snapshot_post_lockdown(store, fpl, now, sleep=sleep)))
+        teams_csv = espn_teams_csv
+
+        def espn_step() -> None:
+            team_ids = espn_ingest.espn_team_ids(teams_csv)
+            espn_ingest.snapshot_espn_recent(store, espn, team_ids, now, sleep)
+
+        steps.append(("espn", espn_step))
     run_independently(steps)
 
 

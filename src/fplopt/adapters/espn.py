@@ -26,6 +26,7 @@ LEAGUES = (
 # Red-card bans carry across these (PLAN §6.3).
 DOMESTIC = ("eng.1", "eng.fa", "eng.league_cup")
 SCOREBOARD_LIMIT = "1000"
+ATTEMPTS = 3  # per request: a hanging ESPN costs at most three timeouts
 
 
 def require_key(key: str) -> Callable[[bytes], None]:
@@ -56,10 +57,14 @@ class EspnClient:
         """Every event of a calendar year (`period` 'YYYY') or month ('YYYYMM')."""
         url = self._url(league, "scoreboard")
         params = {"dates": period, "limit": SCOREBOARD_LIMIT}
-        return get_response(self._client, url, params, validate=require_key("events")).content
+        return get_response(
+            self._client, url, params, validate=require_key("events"), attempts=ATTEMPTS
+        ).content
 
     def summary(self, league: str, event_id: str) -> bytes:
         """One match: header, rosters (lineups, substitutes) and key events (subs, cards)."""
         url = self._url(league, "summary")
         params = {"event": event_id}
-        return get_response(self._client, url, params, validate=require_key("header")).content
+        return get_response(
+            self._client, url, params, validate=require_key("header"), attempts=ATTEMPTS
+        ).content

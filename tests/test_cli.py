@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from fplopt import cli
+from fplopt.adapters.espn import EspnClient
 from fplopt.adapters.football_data import FootballDataClient
 from fplopt.adapters.fpl import FplClient
 from fplopt.adapters.odds import OddsClient
@@ -223,6 +224,22 @@ def test_daily_job_archives_football_data(tmp_path, monkeypatch):
     assert isinstance(fpl, FplClient)
     assert odds is None
     assert isinstance(kw["football_data"], FootballDataClient)
+
+
+def test_daily_job_reads_the_espn_club_ids_inside_its_step(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cli.jobs, "run_daily", lambda store, fpl, odds, **kw: calls.append((fpl, odds, kw))
+    )
+
+    def unreadable(path):
+        raise AssertionError("read eagerly")
+
+    monkeypatch.setattr(cli.espn_ingest, "espn_team_ids", unreadable)
+    assert cli.main(["snapshot", "daily"], settings=make_settings(tmp_path)) == 0
+    ((_, _, kw),) = calls
+    assert isinstance(kw["espn"], EspnClient)
+    assert kw["espn_teams_csv"] == cli.TEAMS_CSV
 
 
 def test_sigterm_during_a_job_raises_system_exit_and_handler_is_restored(tmp_path, monkeypatch):

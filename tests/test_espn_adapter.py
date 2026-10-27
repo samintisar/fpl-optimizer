@@ -54,3 +54,17 @@ def test_unknown_league_is_refused():
     client, _ = recording_client(b"{}")
     with pytest.raises(ValueError, match="unknown ESPN league"):
         EspnClient(client).scoreboard("esp.1", "2016")
+
+
+def test_requests_are_tried_at_most_three_times(monkeypatch):
+    seen = []
+
+    def fake_get_response(client, url, params, **kwargs):
+        seen.append(kwargs["attempts"])
+        return httpx.Response(200, content=b"{}")
+
+    monkeypatch.setattr("fplopt.adapters.espn.get_response", fake_get_response)
+    client, _ = recording_client(b"{}")
+    EspnClient(client).scoreboard("eng.1", "2016")
+    EspnClient(client).summary("eng.1", "1")
+    assert seen == [3, 3]
