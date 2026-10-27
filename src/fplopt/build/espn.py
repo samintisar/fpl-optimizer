@@ -23,7 +23,8 @@ Minutes (`parse_summary`): a key-event clock of s seconds is minute min(s // 60 
 120 after extra time else 90: STATUS_FINAL_AET, or STATUS_FINAL_PEN with a non-shoot-out key
 event in period 3+ or a "Start Extra Time" event (an EFL Cup shoot-out straight after 90' has
 neither). A starter is on from 0, a substitute from his substitution (participants [in, out]);
-off at his own substitution, his red card or the end. A red after a yellow for the same player
+off at his own substitution, his red card or the end; a player who came on gets at least 1
+minute (FPL's convention for a stoppage-time substitute). A red after a yellow for the same player
 is a second yellow. Key events are read in (period, clock) order (stable); shoot-out events are
 ignored, as is (logged) a substitution or card without a clock. A roster `subbedIn` without a
 Substitution event bringing him on, or `subbedOut` without one taking him off (nor a red card),
@@ -185,8 +186,10 @@ def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict
                     "starter": bool(entry.get("starter")),
                     "minute_on": start if start is not None else pd.NA,
                     "minute_off": stop if stop is not None else pd.NA,
+                    # A player who came on plays at least a minute (FPL's convention: a
+                    # stoppage-time substitute, on and off at the capped 90', gets 1).
                     "minutes": (
-                        pd.NA if unknown else max(stop - start, 0) if start is not None else 0
+                        pd.NA if unknown else max(stop - start, 1) if start is not None else 0
                     ),
                     "yellows": yellows.get(athlete, 0),
                     "red": athlete in red_at,

@@ -112,6 +112,14 @@ def test_parse_summary_match_row():
     }
 
 
+def test_a_stoppage_time_substitute_plays_one_minute():
+    home = [player(10, "A", True, sub_out=True), player(11, "B", False, sub_in=True)]
+    events = [key_event("Substitution", 5460, "359", 11, 10, period=2)]  # 90'+1
+    payload = summary_payload(5, "2023-08-12T14:00Z", "359", "1000", home, [], events)
+    rows = {p["espn_athlete_id"]: p for p in parse_summary(payload, "eng.1")[1]}
+    assert (rows[10]["minutes"], rows[11]["minutes"], rows[11]["minute_on"]) == (90, 1, 90)
+
+
 def test_parse_summary_minutes_and_cards():
     _, players = parse_summary(palmer_match(), "eng.1")
     rows = {p["espn_athlete_id"]: p for p in players}
