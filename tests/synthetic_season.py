@@ -1008,6 +1008,7 @@ def _build(
             "football_data_name": pd.array([f"Team {t}" for t in teams], dtype="str"),
             "understat_name": pd.array([f"Team {t}" for t in teams], dtype="str"),
             "odds_api_name": pd.array([f"Team {t} FC" for t in teams], dtype="str"),
+            "espn_id": pd.array([str(9000 + t) for t in teams], dtype="str"),
             "in_fpl": True,
             "event_time": EPOCH,
             "available_at": EPOCH,

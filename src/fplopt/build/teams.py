@@ -4,7 +4,8 @@ source, and a cross-source coverage check that fails the build on any unknown cl
 `team_key` is the FPL team `code` (stable per club across seasons); clubs that only appear in
 football-data before 2016/17 (Elo burn-in) get synthetic keys from 1001. Config columns:
 `team_key, short_name, fpl_names (every FPL name for the code, ';'-separated), football_data,
-understat, odds_api` — the last two only where the source has the club (blank otherwise).
+understat, odds_api, espn` — the last three only where the source has the club (blank
+otherwise); `espn` is ESPN's team id.
 
 Coverage (`validate_team_coverage`), all unknowns reported at once:
 - FPL: every `team_code` in vaastav `players_raw` and every bootstrap `teams[].code` is a key;
@@ -48,7 +49,15 @@ from fplopt.seasons import parse_season_label
 log = logging.getLogger(__name__)
 
 CONFIG_FILE = "teams.csv"
-CONFIG_COLUMNS = ("team_key", "short_name", "fpl_names", "football_data", "understat", "odds_api")
+CONFIG_COLUMNS = (
+    "team_key",
+    "short_name",
+    "fpl_names",
+    "football_data",
+    "understat",
+    "odds_api",
+    "espn",
+)
 SYNTHETIC_KEY_MIN = 1000
 UNDERSTAT_AGGREGATE_FILES = frozenset({"understat_player", "understat_team"})
 MAX_WHERE_SHOWN = 3
@@ -58,6 +67,7 @@ _SOURCES = {
     "football_data": ("football_data_name", "football-data"),
     "understat": ("understat_name", "Understat"),
     "odds_api": ("odds_api_name", "Odds API"),
+    "espn": ("espn_id", "ESPN"),
 }
 
 
@@ -73,6 +83,7 @@ SCHEMA = pa.DataFrameSchema(
         "football_data_name": pa.Column(str, unique=True),
         "understat_name": pa.Column(str, pa.Check(_unique_when_present), nullable=True),
         "odds_api_name": pa.Column(str, pa.Check(_unique_when_present), nullable=True),
+        "espn_id": pa.Column(str, pa.Check(_unique_when_present), nullable=True),
         "in_fpl": pa.Column(bool),
         "event_time": pa.Column(UTC_US),
         "available_at": pa.Column(UTC_US),
@@ -130,7 +141,9 @@ def read_teams_config(path: Path) -> pd.DataFrame:
             problems.append(f"team_key {key}: FPL club without fpl_names")
         if not row["football_data"]:
             problems.append(f"team_key {key}: no football_data name")
-        values = [(c, row[c]) for c in ("short_name", "football_data", "understat", "odds_api")]
+        values = [
+            (c, row[c]) for c in ("short_name", "football_data", "understat", "odds_api", "espn")
+        ]
         values = [("team_key", str(key)), *((c, v) for c, v in values if v)]
         values += [("fpl_names", name) for name in names]
         for column, value in values:
@@ -157,6 +170,7 @@ def team_dim_from_config(path: Path) -> pd.DataFrame:
             "football_data_name": config["football_data"],
             "understat_name": config["understat"],
             "odds_api_name": config["odds_api"],
+            "espn_id": config["espn"],
             "in_fpl": config["team_key"] < SYNTHETIC_KEY_MIN,
             "event_time": pd.Series([EPOCH] * n, dtype=UTC_US),
             "available_at": pd.Series([EPOCH] * n, dtype=UTC_US),
@@ -208,6 +222,9 @@ class TeamResolver:
 
     def odds_api(self, name: str) -> int:
         return self._get("odds_api", "Odds API", name)
+
+    def espn(self, team_id: str) -> int:
+        return self._get("espn", "ESPN", team_id)
 
     def fpl_name(self, name: str) -> int:
         return self._get("fpl_name", "FPL", name)
