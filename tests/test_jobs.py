@@ -723,3 +723,21 @@ def test_tick_post_lockdown_failure_does_not_hide_fpl_or_odds(tmp_path):
     assert len(store.times("fpl", "bootstrap-static")) == 3  # daily, tick, tick's summary run
     assert len(store.times("odds", "soccer_epl")) == 1
     assert fpl.summary_calls == [1, 2]
+
+
+def test_run_daily_runs_the_espn_step_when_given(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "fplopt.ingest.espn.snapshot_espn_recent",
+        lambda store, espn, team_ids, now, sleep: calls.append(team_ids),
+    )
+    store = RawStore(tmp_path)
+    run_daily(
+        store,
+        FakeFpl(),
+        None,
+        Clock(DEADLINE - timedelta(hours=8)),
+        espn=(object(), frozenset({"359"})),
+        sleep=lambda s: None,
+    )
+    assert calls == [frozenset({"359"})]

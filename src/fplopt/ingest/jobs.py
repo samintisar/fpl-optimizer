@@ -125,10 +125,12 @@ def run_daily(
     now: Clock = utc_now,
     *,
     football_data: FootballDataSource | None = None,
+    espn: tuple[Any, frozenset[str]] | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Daily archive: FPL, odds, the current football-data CSV (if a source is given), then
-    the post-lockdown step, last so it reads the bootstrap the FPL step just archived."""
+    """Daily archive: FPL, odds, the current football-data CSV (if a source is given), ESPN's
+    recent scoreboards and summaries (if `espn` = (source, club ids) is given), then the
+    post-lockdown step, last so it reads the bootstrap the FPL step just archived."""
     steps: list[tuple[str, Callable[[], object]]] = [
         ("fpl", lambda: snapshot_fpl(store, fpl, now)),
         ("odds", lambda: snapshot_odds(store, odds, now)),
@@ -136,6 +138,13 @@ def run_daily(
     if football_data is not None:
         steps.append(
             ("football-data", lambda: snapshot_football_data_current(store, football_data, now))
+        )
+    if espn is not None:
+        from fplopt.ingest import espn as espn_ingest  # local: espn imports this module
+
+        source, team_ids = espn
+        steps.append(
+            ("espn", lambda: espn_ingest.snapshot_espn_recent(store, source, team_ids, now, sleep))
         )
     steps.append(("post-lockdown", lambda: snapshot_post_lockdown(store, fpl, now, sleep=sleep)))
     run_independently(steps)

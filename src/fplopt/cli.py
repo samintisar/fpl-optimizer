@@ -1,7 +1,8 @@
 """Command-line entry point.
 
 `fplopt snapshot daily|tick` (archiver timers), `fplopt backfill element-summary|football-data|
-vaastav|fplcache` (one-off backfills into raw/; football-data takes `--from-season YEAR`),
+vaastav|fplcache|espn` (one-off backfills into raw/; football-data and espn (ESPN PL/cup/
+European summaries; ~2-3 h) take `--from-season YEAR`),
 `fplopt rules export SEASON [--out DIR]` (config/scoring/<season>.json from an archived
 bootstrap), `fplopt build TABLE|all` (raw/ -> data/<table>.parquet; no network),
 `fplopt check freshness [--max-age-hours H]` (fails if the newest bootstrap snapshot is
@@ -50,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from dotenv import load_dotenv
 
+from fplopt.adapters.espn import EspnClient
 from fplopt.adapters.football_data import FootballDataClient
 from fplopt.adapters.fpl import FplClient
 from fplopt.adapters.fplcache import FplcacheClient
@@ -58,6 +60,7 @@ from fplopt.adapters.odds import OddsClient
 from fplopt.adapters.vaastav import VaastavClient
 from fplopt.alerts import send_admin_alert
 from fplopt.heartbeat import send_heartbeat
+from fplopt.ingest import espn as espn_ingest
 from fplopt.ingest import health, history, jobs
 from fplopt.ingest.raw_store import RawStore
 from fplopt.redact import redact
@@ -1830,14 +1833,26 @@ def _bot_run(c: Context) -> object:
     return None
 
 
+TEAMS_CSV = Path("config/teams.csv")
+
 JOBS: dict[str, Job] = {
     "snapshot daily": lambda c: jobs.run_daily(
-        c.store, c.fpl, c.odds, football_data=FootballDataClient(c.http)
+        c.store,
+        c.fpl,
+        c.odds,
+        football_data=FootballDataClient(c.http),
+        espn=(EspnClient(c.http), espn_ingest.espn_team_ids(TEAMS_CSV)),
     ),
     "snapshot tick": lambda c: jobs.run_tick(c.store, c.fpl, c.odds),
     "backfill element-summary": lambda c: jobs.backfill_element_summaries(c.store, c.fpl),
     "backfill football-data": lambda c: history.backfill_football_data(
         c.store, FootballDataClient(c.http), first_season=c.args.from_season
+    ),
+    "backfill espn": lambda c: espn_ingest.backfill_espn(
+        c.store,
+        EspnClient(c.http),
+        espn_ingest.espn_team_ids(TEAMS_CSV),
+        first_year=c.args.from_season,
     ),
     "backfill vaastav": lambda c: history.backfill_vaastav(c.store, VaastavClient(c.http)),
     "backfill fplcache": lambda c: history.backfill_fplcache(c.store, FplcacheClient(c.http)),
@@ -1870,14 +1885,14 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("command", choices=["daily", "tick"])
     backfill = groups.add_parser("backfill", help="one-off backfills into raw/")
     backfill.add_argument(
-        "command", choices=["element-summary", "football-data", "vaastav", "fplcache"]
+        "command", choices=["element-summary", "football-data", "vaastav", "fplcache", "espn"]
     )
     backfill.add_argument(
         "--from-season",
         type=int,
         default=history.FIRST_SEASON,
         metavar="YEAR",
-        help=f"football-data only: first season's start year (default {history.FIRST_SEASON})",
+        help=(f"football-data, espn: first season's start year (default {history.FIRST_SEASON})"),
     )
     rules_group = groups.add_parser("rules", help="per-season rules config")
     rules_group.add_argument("command", choices=["export"])

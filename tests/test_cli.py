@@ -1273,3 +1273,9 @@ def test_build_subprocess_runs_build_all_with_the_settings_dirs(tmp_path, monkey
     assert seen["cmd"][1:] == ["-m", "fplopt.cli", "build", "all"]
     assert seen["env"]["FPLOPT_RAW_DIR"] == str(tmp_path)
     assert seen["env"]["FPLOPT_DATA_DIR"] == str(tmp_path / "d")
+
+
+def test_backfill_espn_is_a_command():
+    args = cli.build_parser().parse_args(["backfill", "espn", "--from-season", "2020"])
+    assert (args.group, args.command, args.from_season) == ("backfill", "espn", 2020)
+    assert "backfill espn" in cli.JOBS
