@@ -4,7 +4,7 @@ for the as-of store, the leakage harness and the tests (Phase 2 plan, Task 1).
 Kinds (how `available_at` is set and how as-of reads treat the table):
 - `static`: reference data (`available_at` = epoch). The whole table is not as-of: it lists
   future debutants (`player_dim`), clubs' FPL eras (`team_dim.in_fpl`) and match statistics
-  fitted on every season (`understat_map`). Feature code reads it only through
+  fitted on every season (`understat_map`, `espn_map`). Feature code reads it only through
   `AsOfView.lookup`: the `public_columns` (identity: key and names) of keys that are visible
   as of the deadline in `visible_via` (table, column).
 - `schedule`: known from publication (`available_at` = 1 June of the season's start year, or
@@ -66,6 +66,13 @@ TABLES: dict[str, TableSpec] = _specs(
         public_columns=("understat_id", "player_key"),
         visible_via=("understat_player_match", "understat_id"),
     ),
+    TableSpec(
+        "espn_map",
+        "static",
+        ("espn_athlete_id",),
+        public_columns=("espn_athlete_id", "player_key"),
+        visible_via=("espn_player_match", "espn_athlete_id"),
+    ),
     # schedule
     TableSpec("schedule", "schedule", ("fixture_key",)),
     TableSpec("gameweek", "schedule", ("season", "gw")),
@@ -79,11 +86,16 @@ TABLES: dict[str, TableSpec] = _specs(
     TableSpec("player_gw", "event", ("player_key", "season", "gw")),
     TableSpec("player_gw_ownership", "event", ("player_key", "season", "gw")),
     TableSpec("team_rating", "event", ("team_key", "event_time")),
+    TableSpec("espn_match", "event", ("espn_event_id",)),
+    TableSpec("espn_player_match", "event", ("espn_athlete_id", "espn_event_id")),
     # snapshot
     TableSpec(
         "player_snapshot", "snapshot", ("snapshot_at", "source", "player_key"), "snapshot_at"
     ),
     TableSpec("fixture_snapshot", "snapshot", ("snapshot_at", "fixture_key"), "snapshot_at"),
+    TableSpec(
+        "espn_schedule_snapshot", "snapshot", ("snapshot_at", "espn_event_id"), "snapshot_at"
+    ),
     TableSpec(
         "odds_snapshot",
         "snapshot",

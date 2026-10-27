@@ -25,7 +25,7 @@ from pathlib import Path
 import pandas as pd
 import pandera.pandas as pa
 
-from fplopt.build import elo, fixtures, odds, players, snapshots, teams, understat
+from fplopt.build import elo, espn, fixtures, odds, players, snapshots, teams, understat
 from fplopt.build.common import BuildContext, write_table
 
 log = logging.getLogger(__name__)
@@ -79,6 +79,8 @@ BUILDERS: dict[str, Builder] = {
     "team_match": Builder(
         understat.build_team_match, understat.TEAM_MATCH_SCHEMA, understat.TEAM_MATCH_SORT_BY
     ),
+    # Writes espn_match, espn_player_match, espn_schedule_snapshot and espn_map.
+    "espn": Builder(espn.build_espn, None),
     "player_snapshot": Builder(snapshots.build_player_snapshot, None),
     "odds_snapshot": Builder(odds.build_odds_snapshot, odds.SCHEMA, odds.SORT_BY),
     "team_rating": Builder(elo.build_team_rating, elo.SCHEMA, elo.SORT_BY),
@@ -99,6 +101,8 @@ ORDER: list[str] = [
     "player_dim",
     "understat",
     "team_match",
+    # espn needs fixture, player_match and player_season.
+    "espn",
     "fixture_snapshot",
     "odds_snapshot",
     "team_rating",

@@ -9,8 +9,18 @@ from typing import Any
 import pandas as pd
 import pandera.pandas as pa
 
-from fplopt.build.common import UTC_US, BuildContext
+from fplopt.build import understat
+from fplopt.build.common import UTC_US, BuildContext, write_table
 from fplopt.build.teams import TeamResolver
+from fplopt.build.understat import (
+    MINUTES_TOLERANCE,
+    candidate_pairs,
+    fpl_appearances,
+    fpl_name_variants,
+    map_understat,
+    name_scores,
+    read_overrides,
+)
 from fplopt.ingest.raw_store import RawStore
 from fplopt.seasons import season_start_year
 
@@ -306,3 +316,151 @@ def build_espn_tables(ctx: BuildContext) -> dict[str, pd.DataFrame]:
         "espn_player_match": _frame(players, PLAYER_SCHEMA),
         "espn_schedule_snapshot": schedule.drop_duplicates(["snapshot_at", "espn_event_id"]),
     }
+
+
+# --- espn_map and the build checks ---------------------------------------------------------
+
+ID = "espn_athlete_id"
+MIN_MINUTES_AGREEMENT = 0.9  # auto pairs: share of common fixtures with |Δ minutes| <= 5
+MAX_RED_DISAGREEMENT = 0.02  # disagreeing rows, as a share of FPL red cards
+MAX_LISTED = 20
+
+MAP_SCHEMA = understat.MAP_SCHEMA.rename_columns({"understat_id": ID})
+MAP_SORT_BY = (ID,)
+
+
+def empty_map() -> pd.DataFrame:
+    """espn_map with no rows (MAP_SCHEMA's columns and dtypes)."""
+    return pd.DataFrame(
+        {
+            ID: pd.Series(dtype="int64"),
+            "player_key": pd.Series(dtype="Int64"),
+            "method": pd.Series(dtype=str),
+            "shared": pd.Series(dtype="Int64"),
+            "overlap": pd.Series(dtype="Float64"),
+            "coverage": pd.Series(dtype="Float64"),
+            "name_score": pd.Series(dtype="Float64"),
+            "event_time": pd.Series(dtype=UTC_US),
+            "available_at": pd.Series(dtype=UTC_US),
+        }
+    )
+
+
+def pl_appearances(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """ESPN rows of matches with a PL fixture (eng.1): espn_athlete_id, fixture_key,
+    minutes_src, red, athlete_name (minutes 0 included)."""
+    match = tables["espn_match"].dropna(subset=["fixture_key"])
+    rows = tables["espn_player_match"].merge(
+        match[["espn_event_id", "fixture_key"]], on="espn_event_id"
+    )
+    rows = rows.assign(fixture_key=rows["fixture_key"].astype("int64"), minutes_src=rows["minutes"])
+    return rows[[ID, "fixture_key", "minutes_src", "red", "athlete_name"]]
+
+
+def map_espn(ctx: BuildContext, tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """espn_map: the Understat matcher on ESPN's PL appearances (minutes > 0) against FPL's,
+    names from espn_player_match vs player_season, overrides with source=espn."""
+    espn = pl_appearances(tables)
+    played = espn[espn["minutes_src"] > 0]
+    if played.empty:
+        return empty_map()
+    pairs = candidate_pairs(
+        played, fpl_appearances(ctx.table("player_match")), id_col=ID, minutes_col="minutes_src"
+    )
+    names = dict(zip(played[ID], played["athlete_name"], strict=True))
+    pairs["name_score"] = name_scores(
+        pairs, names, fpl_name_variants(ctx.table("player_season")), id_col=ID
+    )
+    overrides = read_overrides(ctx.config_dir, source=SOURCE, id_col=ID)
+    return map_understat(pairs, overrides, id_col=ID)
+
+
+def espn_problems(
+    ctx: BuildContext, tables: dict[str, pd.DataFrame], mapping: pd.DataFrame
+) -> list[str]:
+    """The build checks (module docstring) over seasons with any eng.1 match; empty = valid."""
+    match = tables["espn_match"]
+    covered = set(match.loc[match["league"] == "eng.1", "season"])
+    if not covered:
+        return []
+    problems: list[str] = []
+
+    fixture = ctx.table("fixture")
+    finished = fixture[fixture["finished"] & fixture["season"].isin(covered)]
+    missing = finished[~finished["fixture_key"].isin(set(match["fixture_key"].dropna()))]
+    if len(missing):
+        problems.append(
+            f"{len(missing)} finished PL fixtures have no ESPN match: "
+            f"{missing['fixture_key'].head(MAX_LISTED).tolist()}"
+        )
+
+    pm = ctx.table("player_match")
+    pm = pm[pm["season"].isin(covered)]
+    overrides = read_overrides(ctx.config_dir, source=SOURCE, id_col=ID)
+    exempt = set(overrides.loc[overrides[ID].isna(), "player_key"].astype(int))
+    mapped = mapping.dropna(subset=["player_key"]).astype({"player_key": "int64"})
+    unmapped = set(pm.loc[pm["minutes"] > 0, "player_key"]) - set(mapped["player_key"]) - exempt
+    if unmapped:
+        problems.append(
+            f"{len(unmapped)} FPL players with minutes are not mapped: "
+            f"{sorted(unmapped)[:MAX_LISTED]}"
+        )
+
+    both = (
+        pl_appearances(tables)
+        .merge(mapped[[ID, "player_key", "method"]], on=ID)
+        .merge(
+            pm[["player_key", "fixture_key", "minutes", "red_cards"]],
+            on=["player_key", "fixture_key"],
+        )
+    )
+    played = both[(both["method"] == "auto") & ((both["minutes"] > 0) | (both["minutes_src"] > 0))]
+    close = (played["minutes"] - played["minutes_src"]).abs() <= MINUTES_TOLERANCE
+    agreement = close.groupby(played[ID]).mean()
+    low = agreement[agreement < MIN_MINUTES_AGREEMENT].sort_values()
+    if len(low):
+        problems.append(
+            f"{len(low)} auto pairs agree on minutes in < {MIN_MINUTES_AGREEMENT:.0%} of "
+            f"fixtures (add an override if the pair is right): "
+            f"{low.head(MAX_LISTED).round(3).to_dict()}"
+        )
+
+    fpl_red = both["red_cards"] > 0
+    wrong = both[fpl_red != both["red"]]
+    if len(wrong):
+        log.info(
+            "espn: red cards disagree with FPL in %d row(s): %s",
+            len(wrong),
+            wrong[[ID, "player_key", "fixture_key", "red", "red_cards"]].to_dict("records"),
+        )
+    n_red = int(fpl_red.sum())
+    if len(wrong) > MAX_RED_DISAGREEMENT * max(n_red, 1):
+        problems.append(f"red cards disagree in {len(wrong)} of {n_red} FPL reds")
+    return problems
+
+
+def build_espn(ctx: BuildContext) -> pd.DataFrame:
+    """Writes espn_match, espn_player_match, espn_schedule_snapshot and espn_map (nothing if a
+    check fails). Returns espn_player_match (for the build log)."""
+    tables = build_espn_tables(ctx)
+    mapping = map_espn(ctx, tables)
+    problems = espn_problems(ctx, tables, mapping)
+    if problems:
+        raise EspnBuildError(f"{len(problems)} ESPN problems: " + "; ".join(problems))
+    specs = {
+        "espn_match": (MATCH_SCHEMA, MATCH_SORT_BY),
+        "espn_player_match": (PLAYER_SCHEMA, PLAYER_SORT_BY),
+        "espn_schedule_snapshot": (SCHEDULE_SCHEMA, SCHEDULE_SORT_BY),
+    }
+    for name, (schema, sort_by) in specs.items():
+        write_table(tables[name], name, schema, ctx.data_dir, sort_by)
+        ctx.forget(name)
+    write_table(mapping, "espn_map", MAP_SCHEMA, ctx.data_dir, MAP_SORT_BY)
+    ctx.forget("espn_map")
+    log.info(
+        "espn_map: %d athletes mapped (%d override row(s)) of %d with PL minutes",
+        int(mapping["player_key"].notna().sum()),
+        int((mapping["method"] == "override").sum()),
+        pl_appearances(tables).query("minutes_src > 0")[ID].nunique(),
+    )
+    return tables["espn_player_match"]
