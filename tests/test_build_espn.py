@@ -296,6 +296,27 @@ def test_a_match_played_after_june_joins_its_seasons_fixture(world):
     assert match["season"].tolist() == [2019]
 
 
+def test_only_finished_matches_are_kept(world):
+    built_world(world)
+    for event_id, status in ((80, "STATUS_ABANDONED"), (81, "STATUS_POSTPONED"), (82, None)):
+        payload = summary_payload(event_id, "2023-09-26T18:45Z", ESPN_OF[3], "1000", [], [])
+        if status:
+            payload["header"]["competitions"][0]["status"]["type"]["name"] = status
+        world.add_espn_summary("eng.league_cup", payload)
+    assert build_espn_tables(world.ctx)["espn_match"]["espn_event_id"].tolist() == [82]
+
+
+def test_two_espn_events_on_one_pl_fixture_fail_the_build(world):
+    fixtures = built_world(world)
+    first = next(fixtures.itertuples(index=False))
+    world.add_espn_summary("eng.1", pl_payload(first))
+    replay = pl_payload(first)
+    replay["header"]["id"] = "123456789"
+    world.add_espn_summary("eng.1", replay)
+    with pytest.raises(EspnBuildError, match=f"fixture {first.fixture_key} has 2 eng.1 events"):
+        build_espn_tables(world.ctx)
+
+
 def test_the_newest_summary_of_an_event_wins(world):
     fixtures = built_world(world)
     first = next(fixtures.itertuples(index=False))

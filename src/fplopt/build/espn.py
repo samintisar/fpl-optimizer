@@ -3,13 +3,14 @@
 docs/superpowers/specs/2026-10-27-espn-cup-data-design.md).
 
 Tables:
-- `espn_match` (event, key `espn_event_id`): the newest completed summary of every match with a
-  side in team_dim (`TeamResolver.find("espn", team id)`; the other side's key is null for a
-  club outside the PL); `fixture_key` for `eng.1`, joined on (season, home, away) — an `eng.1`
-  match that does not join is a build error. `season` is ESPN's (`season.year` of the summary
-  header or scoreboard event, its start year: 2019/20's matches of July 2020 are 2019), else
-  the season in progress at kickoff. `event_time` = kickoff, `available_at` = kickoff +
-  `AVAILABLE_AFTER`.
+- `espn_match` (event, key `espn_event_id`): the newest summary of every match with a side in
+  team_dim (`TeamResolver.find("espn", team id)`; the other side's key is null for a club
+  outside the PL), if finished (`FINISHED_STATUSES`: full time, after extra time, on
+  penalties; abandoned or postponed matches are dropped); `fixture_key` for `eng.1`, joined on
+  (season, home, away) — an `eng.1` match that does not join, or a fixture with two `eng.1`
+  events, is a build error. `season` is ESPN's (`season.year` of the summary header or
+  scoreboard event, the start year: 2019/20's matches of July 2020 are 2019), else the season
+  in progress at kickoff. `event_time` = kickoff, `available_at` = kickoff + `AVAILABLE_AFTER`.
 - `espn_player_match` (event, key `espn_athlete_id`, `espn_event_id`): every squad player of a
   side in team_dim, with the match's times.
 - `espn_schedule_snapshot` (snapshot): every scoreboard file is a snapshot at its timestamp of
@@ -63,6 +64,8 @@ log = logging.getLogger(__name__)
 
 AFTER_EXTRA_TIME = "STATUS_FINAL_AET"
 ON_PENALTIES = "STATUS_FINAL_PEN"  # straight after 90' (EFL Cup) or after extra time
+# Played to a finish; abandoned, postponed and cancelled matches are dropped.
+FINISHED_STATUSES = frozenset({"STATUS_FULL_TIME", AFTER_EXTRA_TIME, ON_PENALTIES})
 
 
 def _minute(seconds: float, end: int) -> int:
@@ -295,7 +298,7 @@ def _sides(competitors: list[dict]) -> dict[str, str]:
 def _summaries(
     ctx: BuildContext, resolver: TeamResolver, problems: list[str]
 ) -> tuple[list[dict], list[dict]]:
-    """Match and player rows from the newest completed summary of every event."""
+    """Match and player rows from the newest summary of every finished event."""
     fixture = ctx.table("fixture")
     fixture_of = {
         (int(s), int(h), int(a)): int(k)
@@ -313,7 +316,8 @@ def _summaries(
     for league, event_id in _item_dirs(ctx.store, "summary"):
         path = ctx.store.latest(SOURCE, f"{league}/summary/{event_id}")
         payload = ctx.store.read_json(path)
-        if not payload["header"]["competitions"][0]["status"]["type"].get("completed"):
+        status = payload["header"]["competitions"][0]["status"]["type"]["name"]
+        if status not in FINISHED_STATUSES:
             continue
         match, rows = parse_summary(payload, league)
         home = resolver.find("espn", match["home_espn_id"])
@@ -345,6 +349,10 @@ def _summaries(
                     {**row, "season": match["season"], "league": league, "team_key": team_key}
                     | times
                 )
+    events_of = Counter(m["fixture_key"] for m in matches if m["fixture_key"] is not None)
+    for fixture_key, n in sorted(events_of.items()):
+        if n > 1:
+            problems.append(f"fixture {fixture_key} has {n} eng.1 events")
     for league, n in sorted(unknown.items()):
         if n:
             log.info(
