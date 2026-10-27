@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 from synthetic_season import synthetic_tables
 
-from fplopt.features.history import prediction_frame
+from fplopt.build import espn
+from fplopt.features.history import prediction_frame, training_frame
 from fplopt.features.store import DataStore
 from fplopt.models.gbm import Gbm, GbmParams
 from fplopt.models.minutes import (
@@ -168,13 +169,11 @@ def test_suspensions_zero_the_banned_fixtures(league, fitted, cards, banned):
 
 
 def test_ban_residual_uses_the_banned_rows_start_rate(league, fitted):
-    from fplopt.features.history import training_frame
-
     assert fitted.ban_start == 0.0 and fitted.ban_sub == 0.0  # off by default
     v = view(league)
     rows = training_frame(v)
     banned = rows[rows["banned"] != 0]
-    assert len(banned) > 0
+    assert len(banned) > 0 and (banned["ban_kind"] == 2).all()  # no ESPN data: all certain
     weight = 0.7 ** (2023 - banned["season"]).to_numpy(dtype="float64")
     residual = fit_minutes(v, dataclasses.replace(PARAMS, ban_residual=True))
     expected = float((banned["start"] * weight).sum() / weight.sum())
@@ -191,6 +190,87 @@ def test_ban_residual_uses_the_banned_rows_start_rate(league, fitted):
     first = out[out["player_key"] == key].sort_values("horizon").iloc[0]
     assert first["p_start"] == pytest.approx(0.2)  # held fixed through the normalization
     assert first["p_sub"] == pytest.approx(0.8 * 0.5)
+
+
+def straight_red(tables: dict, key: int, season: int = 2023, gw: int = 4) -> dict:
+    """`tables` with player `key` sent off (a straight red, on ESPN, mapped) in `gw`."""
+    pm = tables["player_match"]
+    at = (pm["player_key"] == key) & (pm["season"] == season) & (pm["gw"] == gw)
+    pm.loc[at, "red_cards"] = 1
+    row = pm[at].iloc[0]
+    times = {"event_time": row["kickoff_time"], "available_at": row["available_at"]}
+    match = {
+        "espn_event_id": 1,
+        "league": "eng.1",
+        "season": season,
+        "kickoff_time": row["kickoff_time"],
+        "home_espn_id": "1",
+        "away_espn_id": "2",
+        "home_team_key": int(row["team_key"]),
+        "away_team_key": None,
+        "fixture_key": int(row["fixture_key"]),
+        "status": "STATUS_FULL_TIME",
+        "extra_time": False,
+        **times,
+    }
+    player = {
+        "espn_athlete_id": 7,
+        "espn_event_id": 1,
+        "season": season,
+        "league": "eng.1",
+        "team_key": int(row["team_key"]),
+        "athlete_name": "Sent Off",
+        "starter": True,
+        "minute_on": 0,
+        "minute_off": 30,
+        "minutes": 30,
+        "yellows": 0,
+        "red": True,
+        "second_yellow": False,
+        **times,
+    }
+    mapping = espn.empty_map()
+    mapping = pd.concat(
+        [mapping, pd.DataFrame({"espn_athlete_id": [7], "player_key": [key], **times})],
+        ignore_index=True,
+    ).astype(mapping.dtypes.to_dict())
+    return {
+        **tables,
+        "espn_match": espn._frame([match], espn.MATCH_SCHEMA),
+        "espn_player_match": espn._frame([player], espn.PLAYER_SCHEMA),
+        "espn_map": mapping,
+    }
+
+
+def test_one_ban_residual_per_kind(league):
+    v = view(league)
+    rows = training_frame(v).assign(ban_kind=0.0, banned=0.0)
+    recent = rows.index[rows["season"] == 2023]
+    certain, likely = recent[:100], recent[100:200]
+    rows.loc[certain, ["ban_kind", "banned"]] = [2.0, 1.0]
+    rows.loc[likely, ["ban_kind", "banned"]] = [1.0, 1.0]
+    rows.loc[certain, "start"] = [1.0] * 10 + [0.0] * 90
+    rows.loc[likely, "start"] = [1.0] * 60 + [0.0] * 40
+    rows.loc[certain, "sub"] = [0.0] * 10 + [1.0] * 9 + [0.0] * 81  # 9 of 90 benched
+    rows.loc[likely, "sub"] = [0.0] * 60 + [1.0] * 20 + [0.0] * 20  # 20 of 40 benched
+    fit = fit_minutes(v, dataclasses.replace(PARAMS, ban_residual=True), rows=rows)
+    assert fit.ban_start == pytest.approx(0.1) and fit.ban_sub == pytest.approx(0.1)
+    assert fit.ban_start_likely == pytest.approx(0.6)
+    assert fit.ban_sub_likely == pytest.approx(0.5)
+    assert fit.n_rows == len(rows) - 200
+
+    tables = {name: df.copy() for name, df in league.items()}
+    key = regular_starter(tables)
+    tables = straight_red(tables, key)
+    frame = prediction_frame(view(tables))
+    kinds = frame.loc[frame["player_key"] == key].sort_values("horizon")["ban_kind"]
+    assert kinds.tolist() == [2.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+    planted = dataclasses.replace(fit, ban_start=0.1, ban_sub=0.0, ban_start_likely=0.6)
+    out = predict_minutes(view(tables), planted)
+    mine = out[out["player_key"] == key].sort_values("horizon")
+    assert mine["p_start"].iloc[:3].tolist() == pytest.approx([0.1, 0.6, 0.6])
+    assert mine["p_sub"].iloc[1] == pytest.approx(0.4 * 0.5)
+    assert mine["banned"].tolist() == [True, True, True, False, False, False]
 
 
 def test_fits_are_deterministic(league, fitted):

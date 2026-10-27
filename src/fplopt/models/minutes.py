@@ -12,8 +12,8 @@ choice): the weighted mean minutes of starts with 60+ minutes, of starts under 6
 substitute appearances. A substitute appearance of 60+ minutes is counted as under 60 (1.4%
 of sub appearances in 2022/23–2024/25).
 
-**Training rows:** every visible player_match row except those inside a deterministic ban
-(`banned`; their outcome is fixed by the rule below), sorted by key, weighted by
+**Training rows:** every visible player_match row except those inside a ban (`banned`,
+certain or likely; their outcome is fixed by the rule below), sorted by key, weighted by
 `season_decay ** age` where age = the cutoff's season − the row's season (older seasons
 count less, none is dropped). A part with fewer than `MIN_ROWS` rows (the first deadlines of
 2016/17) predicts its weighted label mean (`DEFAULT_RATE` without rows) instead.
@@ -31,15 +31,17 @@ probabilities are unconditional: `p_60` = P(minutes ≥ 60) = p_start · P(60+ |
 1. Horizon decay (h ≥ 1; every horizon fixture has the lags as of the deadline): p_start =
    w · p_model + (1 − w) · long_run, w = `horizon_decay ** h`, long_run = the start rate
    over his last 38 rows shrunk toward p_model with `long_run_prior` pseudo-rows.
-2. Suspensions (`fplopt.features.history.BAN_RULES`, `RED_BAN`): the first `ban_remaining`
-   fixtures of his club in the horizon get p_start = p_sub = 0 (so every probability and
-   e_minutes are 0); with `ban_residual`, p_start and P(sub | no start) are instead the
-   weighted rates of the rule-banned training rows (`MinutesFit.ban_start` / `ban_sub`:
-   the rules are approximate, and such rows still start ~10% of the time), held fixed.
-   Rules: 5 yellow cards reached by gw_index 19 → 1 match, 10 by gw_index 32 → 2, 15 → 3,
-   any red card → 1; served by his next league fixtures. Simplified: cups and
-   Europe ignored, gw_index stands in for the club's 19th / 32nd match, red-card types are
-   not distinguished (straight reds are 3 matches in reality; the model sees `reds_l3`).
+2. Suspensions (`ban_kind` of `fplopt.features.history.prediction_frame`, from
+   `fplopt.features.bans`: 2 certain, 1 likely): the horizon fixtures in a ban get p_start =
+   p_sub = 0 (so every probability and e_minutes are 0); with `ban_residual`, p_start and
+   P(sub | no start) are instead the weighted rates of the training rows of that kind
+   (`MinutesFit.ban_start` / `ban_sub` for certain bans, `ban_start_likely` /
+   `ban_sub_likely` for likely ones: the rules are approximate, reds are rescinded or
+   appealed, and a straight red's 2nd and 3rd matches are a guess), held fixed. Bans: a
+   domestic red card bans the club's next domestic matches (cup ties serve it), 1 certain
+   match for a second yellow (or a red without ESPN data), 1 certain + 2 likely for a
+   straight red; 5 yellow cards reached by gw_index 19 -> 1 league match, 10 by gw_index 32
+   -> 2, 15 -> 3 (certain).
 3. Team normalization per (fixture, team) over the pool players of that club: a logit shift
    δ, the same for every player not fixed at 0, with |δ| ≤ `max_shift`, so that Σ p_start =
    11 (as close as the bound allows); then E[minutes] is scaled by a factor in
@@ -58,6 +60,7 @@ import numpy as np
 import pandas as pd
 from scipy.special import expit, logit
 
+from fplopt.features.bans import BAN_CERTAIN, BAN_LIKELY
 from fplopt.features.history import (
     LAG_FEATURES,
     PREDICTION_KEYS,
@@ -135,8 +138,10 @@ class MinutesFit:
     minutes_sub: float  # E[minutes | sub appearance]
     params: MinutesParams
     n_rows: int
-    ban_start: float = 0.0  # P(start) in a banned fixture (`ban_residual`; else 0)
-    ban_sub: float = 0.0  # P(sub appearance | no start) in a banned fixture
+    ban_start: float = 0.0  # P(start) in a certain ban (`ban_residual`; else 0)
+    ban_sub: float = 0.0  # P(sub appearance | no start) in a certain ban
+    ban_start_likely: float = 0.0  # the same in a likely ban
+    ban_sub_likely: float = 0.0
 
 
 def _weighted_mean(values: pd.Series, weights: pd.Series, default: float) -> float:
@@ -156,6 +161,15 @@ def _weighted(rows: pd.DataFrame, season: int, params: MinutesParams) -> pd.Data
     return rows.assign(weight=np.power(params.season_decay, age))
 
 
+def _ban_rates(rows: pd.DataFrame) -> tuple[float, float]:
+    """(P(start), P(sub | no start)) of banned training rows, weighted (0 without rows)."""
+    benched = rows[rows["start"] == 0]
+    return (
+        _weighted_mean(rows["start"], rows["weight"], 0.0),
+        _weighted_mean(benched["sub"], benched["weight"], 0.0),
+    )
+
+
 def fit_minutes(
     view: AsOfView, params: MinutesParams | None = None, rows: pd.DataFrame | None = None
 ) -> MinutesFit:
@@ -166,11 +180,9 @@ def fit_minutes(
     rows = _weighted(training_frame(view) if rows is None else rows, season, params)
     banned = rows[rows["banned"] != 0]
     rows = rows[rows["banned"] == 0].reset_index(drop=True)
-    ban_start = ban_sub = 0.0
+    residuals = {BAN_CERTAIN: (0.0, 0.0), BAN_LIKELY: (0.0, 0.0)}
     if params.ban_residual:
-        ban_start = _weighted_mean(banned["start"], banned["weight"], 0.0)
-        benched_banned = banned[banned["start"] == 0]
-        ban_sub = _weighted_mean(benched_banned["sub"], benched_banned["weight"], 0.0)
+        residuals = {kind: _ban_rates(banned[banned["ban_kind"] == kind]) for kind in residuals}
     started = rows[rows["start"] == 1].reset_index(drop=True)
     benched = rows[rows["start"] == 0].reset_index(drop=True)
     sixty = started["sixty"] == 1
@@ -188,8 +200,10 @@ def fit_minutes(
         minutes_sub=_weighted_mean(subbed["minutes"], subbed["weight"], 18.0),
         params=params,
         n_rows=len(rows),
-        ban_start=ban_start,
-        ban_sub=ban_sub,
+        ban_start=residuals[BAN_CERTAIN][0],
+        ban_sub=residuals[BAN_CERTAIN][1],
+        ban_start_likely=residuals[BAN_LIKELY][0],
+        ban_sub_likely=residuals[BAN_LIKELY][1],
     )
 
 
@@ -316,9 +330,11 @@ def predict_minutes(view: AsOfView, fit: MinutesFit) -> pd.DataFrame:
     weight = np.power(params.horizon_decay, frame["horizon"].to_numpy(dtype="float64"))
     p_start = weight * p_model + (1.0 - weight) * long_run
 
-    banned = frame["ban_kind"].to_numpy() > 0
-    p_start = np.where(banned, fit.ban_start, p_start)
-    csub = np.where(banned, fit.ban_sub, csub)
+    kind = frame["ban_kind"].to_numpy()
+    certain, likely = kind == BAN_CERTAIN, kind == BAN_LIKELY
+    p_start = np.where(certain, fit.ban_start, np.where(likely, fit.ban_start_likely, p_start))
+    csub = np.where(certain, fit.ban_sub, np.where(likely, fit.ban_sub_likely, csub))
+    banned = certain | likely
     m_start = c60 * fit.minutes_sixty + (1.0 - c60) * fit.minutes_short
     parts = frame[list(KEYS)].assign(
         p_start=p_start, c60=c60, csub=csub, m_start=m_start, fixed=banned, banned=banned
