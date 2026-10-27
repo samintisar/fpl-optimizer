@@ -496,7 +496,10 @@ def map_espn(ctx: BuildContext, tables: dict[str, pd.DataFrame]) -> pd.DataFrame
         pairs, names, fpl_name_variants(ctx.table("player_season")), id_col=ID
     )
     overrides = read_overrides(ctx.config_dir, source=SOURCE, id_col=ID)
-    return map_understat(pairs, overrides, id_col=ID)
+    # A pair override applies only to an athlete with PL minutes in the data; blank-id rows
+    # (an FPL player without an ESPN id) always apply.
+    overrides = overrides[overrides[ID].isna() | overrides[ID].isin(set(played[ID]))]
+    return map_understat(pairs, overrides.reset_index(drop=True), id_col=ID)
 
 
 def espn_problems(
