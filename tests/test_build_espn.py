@@ -148,6 +148,23 @@ def test_a_straight_red_is_not_a_second_yellow_and_extra_time_runs_to_120():
     assert rows[21]["minutes"] == 120 - 84 and rows[21]["yellows"] == 0
 
 
+def test_a_substitution_flag_without_its_event_leaves_minutes_unknown():
+    home = [
+        player(10, "Off", True, sub_out=True),  # no event takes him off
+        player(11, "On", False, sub_in=True),  # no event brings him on
+        player(12, "Starter", True),
+        player(13, "Swapped off", True, sub_out=True),
+        player(14, "Swapped on", False, sub_in=True),
+    ]
+    events = [key_event("Substitution", 3600, "359", 14, 13)]
+    payload = summary_payload(7, "2024-09-17T18:45Z", "359", "1000", home, [], events)
+    rows = {p["espn_athlete_id"]: p for p in parse_summary(payload, "eng.1")[1]}
+    assert pd.isna(rows[10]["minutes"]) and pd.isna(rows[10]["minute_off"])
+    assert rows[10]["minute_on"] == 0
+    assert pd.isna(rows[11]["minutes"]) and pd.isna(rows[11]["minute_on"])
+    assert [rows[k]["minutes"] for k in (12, 13, 14)] == [90, 61, 29]
+
+
 def shootout_payload(events, status="STATUS_FINAL_PEN"):
     home = [player(10, "A", True, sub_out=True), player(11, "B", False, sub_in=True)]
     events = [key_event("Substitution", 5000, "359", 11, 10), *events]
@@ -451,6 +468,28 @@ def test_minutes_that_disagree_too_often_fail_the_build(world):
     pl_world(world, payload=substituted(30, times=4))
     with pytest.raises(EspnBuildError, match=r"1 auto pairs agree on minutes in < 90% of fixtures"):
         build(["espn"], world.ctx)
+
+
+def test_unknown_minutes_are_null_and_skipped_by_the_checks(world, caplog):
+    club = TEAM_CODES[0]
+    done = []
+
+    def payload(fx):  # club 1's player flagged as a substitute without an event, 4 times
+        out = pl_payload(fx)
+        if club in (fx.home_team_key, fx.away_team_key) and len(done) < 4:
+            side = 0 if fx.home_team_key == club else 1
+            out["rosters"][side]["roster"] = [player(club * 10, "First1 Second1", False, True)]
+            done.append(fx.fixture_key)
+        return out
+
+    pl_world(world, payload=payload)
+    with caplog.at_level("INFO", logger="fplopt.build.espn"):
+        build(["espn"], world.ctx)
+    minutes = world.ctx.table("espn_player_match")["minutes"]
+    assert minutes.dtype == "Int64" and minutes.isna().sum() == 4
+    assert "eng.1: 4 row(s)" in caplog.text
+    mapping = world.ctx.table("espn_map")
+    assert mapping.loc[mapping["espn_athlete_id"] == club * 10, "player_key"].tolist() == [100001]
 
 
 def test_minutes_that_mostly_agree_pass(world):

@@ -23,18 +23,22 @@ Minutes (`parse_summary`): a key-event clock of s seconds is minute min(s // 60 
 event in period 3+ or a "Start Extra Time" event (an EFL Cup shoot-out straight after 90' has
 neither). A starter is on from 0, a substitute from his substitution
 (participants [in, out]); off at his own substitution, his red card or the end. A red after a
-yellow for the same player is a second yellow. Shoot-out events are ignored.
+yellow for the same player is a second yellow. Shoot-out events are ignored. A roster
+`subbedIn` without a Substitution event bringing him on, or `subbedOut` without one taking him
+off (nor a red card), leaves his `minutes` (and the unknown minute_on/off) null; the count per
+league is logged. The matcher and the minutes check skip null rows.
 
 Checks (`espn_problems`, fail the build), for seasons with any `eng.1` match: every finished PL
 fixture has one; every FPL player with minutes is mapped (or exempt by an override with a blank
 source_id); every auto pair agrees on minutes (±5) in >= `MIN_MINUTES_AGREEMENT` of the
-fixtures where both have a row and either played; ESPN and FPL red cards disagree in at most
-`MAX_RED_DISAGREEMENT` of FPL reds (each disagreement logged).
+fixtures where both have a row (ESPN minutes known) and either played; ESPN and FPL red
+cards disagree in at most `MAX_RED_DISAGREEMENT` of FPL reds (each disagreement logged).
 """
 
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from typing import Any
 
 import pandas as pd
@@ -109,6 +113,7 @@ def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict
     }
     on: dict[int, int] = {}
     off: dict[int, int] = {}
+    replaced: set[int] = set()
     yellows: dict[int, int] = {}
     red_at: dict[int, int] = {}
     second_yellow: set[int] = set()
@@ -125,6 +130,7 @@ def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict
                 continue
             on.setdefault(player_in, minute)
             off[player_out] = minute
+            replaced.add(player_out)
         elif text == "Yellow Card" and ids:
             yellows[ids[0]] = yellows.get(ids[0], 0) + 1
         elif text == "Red Card" and ids:
@@ -137,8 +143,12 @@ def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict
         team = str(roster["team"]["id"])
         for entry in roster.get("roster", []):
             athlete = int(entry["athlete"]["id"])
+            # A substitution flag without its event: when he came on or off is unknown.
+            unknown = (entry.get("subbedIn") and athlete not in on) or (
+                entry.get("subbedOut") and athlete not in replaced and athlete not in red_at
+            )
             start = 0 if entry.get("starter") else on.get(athlete)
-            stop = off.get(athlete, end) if start is not None else None
+            stop = off.get(athlete, end) if start is not None and not unknown else None
             players.append(
                 {
                     "espn_athlete_id": athlete,
@@ -148,7 +158,9 @@ def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict
                     "starter": bool(entry.get("starter")),
                     "minute_on": start if start is not None else pd.NA,
                     "minute_off": stop if stop is not None else pd.NA,
-                    "minutes": max(stop - start, 0) if start is not None else 0,
+                    "minutes": (
+                        pd.NA if unknown else max(stop - start, 0) if start is not None else 0
+                    ),
                     "yellows": yellows.get(athlete, 0),
                     "red": athlete in red_at,
                     "second_yellow": athlete in second_yellow,
@@ -205,7 +217,7 @@ PLAYER_SCHEMA = pa.DataFrameSchema(
         "starter": pa.Column(bool),
         "minute_on": pa.Column("Int64", nullable=True),
         "minute_off": pa.Column("Int64", nullable=True),
-        "minutes": pa.Column("int64", pa.Check.in_range(0, 120)),
+        "minutes": pa.Column("Int64", pa.Check.in_range(0, 120), nullable=True),
         "yellows": pa.Column("int64", pa.Check.ge(0)),
         "red": pa.Column(bool),
         "second_yellow": pa.Column(bool),
@@ -246,8 +258,15 @@ SCHEDULE_SCHEMA = pa.DataFrameSchema(
 )
 SCHEDULE_SORT_BY = ("snapshot_at", "espn_event_id")
 
-_INT64 = ("espn_event_id", "espn_athlete_id", "season", "team_key", "minutes", "yellows")
-_NULLABLE_INT = ("home_team_key", "away_team_key", "fixture_key", "minute_on", "minute_off")
+_INT64 = ("espn_event_id", "espn_athlete_id", "season", "team_key", "yellows")
+_NULLABLE_INT = (
+    "home_team_key",
+    "away_team_key",
+    "fixture_key",
+    "minute_on",
+    "minute_off",
+    "minutes",
+)
 _TIMES = ("kickoff_time", "event_time", "available_at", "snapshot_at")
 _BOOLS = ("extra_time", "starter", "red", "second_yellow")
 
@@ -290,6 +309,7 @@ def _summaries(
     }
     matches: list[dict] = []
     players: list[dict] = []
+    unknown: Counter[str] = Counter()
     for league, event_id in _item_dirs(ctx.store, "summary"):
         path = ctx.store.latest(SOURCE, f"{league}/summary/{event_id}")
         payload = ctx.store.read_json(path)
@@ -320,10 +340,18 @@ def _summaries(
         for row in rows:
             team_key = resolver.find("espn", row.pop("espn_team_id"))
             if team_key is not None:
+                unknown[league] += pd.isna(row["minutes"])
                 players.append(
                     {**row, "season": match["season"], "league": league, "team_key": team_key}
                     | times
                 )
+    for league, n in sorted(unknown.items()):
+        if n:
+            log.info(
+                "espn: minutes unknown (substitution flag without its event) in %s: %d row(s)",
+                league,
+                n,
+            )
     return matches, players
 
 
@@ -404,7 +432,7 @@ def empty_map() -> pd.DataFrame:
 
 def pl_appearances(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """ESPN rows of matches with a PL fixture (eng.1): espn_athlete_id, fixture_key,
-    minutes_src, red, athlete_name (minutes 0 included)."""
+    minutes_src (Int64, NA = unknown), red, athlete_name (minutes 0 included)."""
     match = tables["espn_match"].dropna(subset=["fixture_key"])
     rows = tables["espn_player_match"].merge(
         match[["espn_event_id", "fixture_key"]], on="espn_event_id"
@@ -416,8 +444,8 @@ def pl_appearances(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
 def map_espn(ctx: BuildContext, tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """espn_map: the Understat matcher on ESPN's PL appearances (minutes > 0) against FPL's,
     names from espn_player_match vs player_season, overrides with source=espn."""
-    espn = pl_appearances(tables)
-    played = espn[espn["minutes_src"] > 0]
+    espn = pl_appearances(tables).dropna(subset=["minutes_src"])
+    played = espn[espn["minutes_src"] > 0].astype({"minutes_src": "int64"})
     if played.empty:
         return empty_map()
     pairs = candidate_pairs(
@@ -470,7 +498,10 @@ def espn_problems(
             on=["player_key", "fixture_key"],
         )
     )
-    played = both[(both["method"] == "auto") & ((both["minutes"] > 0) | (both["minutes_src"] > 0))]
+    known = both.dropna(subset=["minutes_src"]).astype({"minutes_src": "int64"})
+    played = known[
+        (known["method"] == "auto") & ((known["minutes"] > 0) | (known["minutes_src"] > 0))
+    ]
     close = (played["minutes"] - played["minutes_src"]).abs() <= MINUTES_TOLERANCE
     agreement = close.groupby(played[ID]).mean()
     low = agreement[agreement < MIN_MINUTES_AGREEMENT].sort_values()
@@ -517,6 +548,9 @@ def build_espn(ctx: BuildContext) -> pd.DataFrame:
         "espn_map: %d athletes mapped (%d override row(s)) of %d with PL minutes",
         int(mapping["player_key"].notna().sum()),
         int((mapping["method"] == "override").sum()),
-        pl_appearances(tables).query("minutes_src > 0")[ID].nunique(),
+        pl_appearances(tables)
+        .dropna(subset=["minutes_src"])
+        .query("minutes_src > 0")[ID]
+        .nunique(),
     )
     return tables["espn_player_match"]
