@@ -120,6 +120,12 @@ def test_a_stoppage_time_substitute_plays_one_minute():
     assert (rows[10]["minutes"], rows[11]["minutes"], rows[11]["minute_on"]) == (90, 1, 90)
 
 
+def test_a_player_listed_twice_gets_one_row():
+    keeper = player(43372, "Hugo Lloris", True)
+    payload = summary_payload(513690, "2018-08-11T14:00Z", "367", "1000", [keeper, keeper], [])
+    assert [p["espn_athlete_id"] for p in parse_summary(payload, "eng.1")[1]] == [43372]
+
+
 def test_parse_summary_minutes_and_cards():
     _, players = parse_summary(palmer_match(), "eng.1")
     rows = {p["espn_athlete_id"]: p for p in players}

@@ -167,10 +167,14 @@ def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict
             no_clock,
         )
     players = []
+    seen: set[int] = set()
     for roster in payload.get("rosters", []):
         team = str(roster["team"]["id"])
         for entry in roster.get("roster", []):
             athlete = int(entry["athlete"]["id"])
+            if athlete in seen:  # ESPN lists some goalkeepers twice (25 matches, 2016-2026)
+                continue
+            seen.add(athlete)
             # A substitution flag without its event: when he came on or off is unknown.
             unknown = (entry.get("subbedIn") and athlete not in on) or (
                 entry.get("subbedOut") and athlete not in replaced and athlete not in red_at
