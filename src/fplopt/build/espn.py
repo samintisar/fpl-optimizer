@@ -6,7 +6,9 @@ Tables:
 - `espn_match` (event, key `espn_event_id`): the newest completed summary of every match with a
   side in team_dim (`TeamResolver.find("espn", team id)`; the other side's key is null for a
   club outside the PL); `fixture_key` for `eng.1`, joined on (season, home, away) — an `eng.1`
-  match that does not join is a build error. `event_time` = kickoff, `available_at` = kickoff +
+  match that does not join is a build error. `season` is ESPN's (`season.year` of the summary
+  header or scoreboard event, its start year: 2019/20's matches of July 2020 are 2019), else
+  the season in progress at kickoff. `event_time` = kickoff, `available_at` = kickoff +
   `AVAILABLE_AFTER`.
 - `espn_player_match` (event, key `espn_athlete_id`, `espn_event_id`): every squad player of a
   side in team_dim, with the match's times.
@@ -61,6 +63,13 @@ def _minute(seconds: float, end: int) -> int:
     return min(int(seconds // 60) + 1, end)
 
 
+def _season(payload: dict[str, Any], kickoff: pd.Timestamp) -> int:
+    """ESPN's season (its start year: an eng.1 match on 2020-07-04 is 2019), else the one in
+    progress at kickoff."""
+    year = (payload.get("season") or {}).get("year")
+    return int(year) if year is not None else season_start_year(kickoff.to_pydatetime())
+
+
 def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict]]:
     """One summary -> its match row and one row per squad player (lineups, minutes, cards)."""
     competition = payload["header"]["competitions"][0]
@@ -71,7 +80,7 @@ def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict
     match = {
         "espn_event_id": int(payload["header"]["id"]),
         "league": league,
-        "season": season_start_year(kickoff.to_pydatetime()),
+        "season": _season(payload["header"], kickoff),
         "kickoff_time": kickoff,
         "home_espn_id": sides["home"],
         "away_espn_id": sides["away"],
@@ -319,7 +328,7 @@ def _schedule(ctx: BuildContext, resolver: TeamResolver) -> list[dict]:
                         "snapshot_at": snapshot_at,
                         "espn_event_id": int(ev["id"]),
                         "league": league,
-                        "season": season_start_year(kickoff.to_pydatetime()),
+                        "season": _season(ev, kickoff),
                         "kickoff_time": kickoff,
                         "home_team_key": home,
                         "away_team_key": away,

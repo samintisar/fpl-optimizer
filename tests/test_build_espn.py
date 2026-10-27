@@ -37,15 +37,25 @@ def key_event(text, seconds, team, *athletes, shootout=False):
 
 
 def summary_payload(
-    event_id, kickoff, home, away, home_roster, away_roster, events=(), status="STATUS_FULL_TIME"
+    event_id,
+    kickoff,
+    home,
+    away,
+    home_roster,
+    away_roster,
+    events=(),
+    status="STATUS_FULL_TIME",
+    season=None,
 ):
     competitors = [
         {"homeAway": "home", "team": {"id": home}},
         {"homeAway": "away", "team": {"id": away}},
     ]
+    header_season = {} if season is None else {"season": {"year": season, "type": 1}}
     return {
         "header": {
             "id": str(event_id),
+            **header_season,
             "competitions": [
                 {
                     "date": kickoff,
@@ -216,6 +226,27 @@ def test_an_unknown_pl_club_fails_the_build(world):
         build_espn_tables(world.ctx)
 
 
+def test_the_header_season_wins_over_the_kickoff_date():
+    # 2019/20 restarted after lockdown: an eng.1 match on 2020-07-04 is still season 2019.
+    payload = summary_payload(9, "2020-07-04T11:30Z", "359", "363", [], [], season=2019)
+    assert parse_summary(payload, "eng.1")[0]["season"] == 2019
+    del payload["header"]["season"]
+    assert parse_summary(payload, "eng.1")[0]["season"] == 2020
+
+
+def test_a_match_played_after_june_joins_its_seasons_fixture(world):
+    world.add_vaastav_season(2019)
+    build(ALL, world.ctx)
+    first = next(world.ctx.table("fixture").itertuples(index=False))
+    payload = pl_payload(first)
+    payload["header"]["competitions"][0]["date"] = "2020-07-04T11:30Z"
+    payload["header"]["season"] = {"year": 2019, "type": 1}
+    world.add_espn_summary("eng.1", payload)
+    match = build_espn_tables(world.ctx)["espn_match"]
+    assert match["fixture_key"].tolist() == [first.fixture_key]
+    assert match["season"].tolist() == [2019]
+
+
 def test_the_newest_summary_of_an_event_wins(world):
     fixtures = built_world(world)
     first = next(fixtures.itertuples(index=False))
@@ -262,6 +293,28 @@ def test_schedule_snapshot_lists_scheduled_matches_of_pl_clubs(world):
     row = snap.iloc[0]
     assert (row["home_team_key"], row["away_team_key"], row["league"]) == (14, 8, "eng.league_cup")
     assert row["snapshot_at"] == row["available_at"] == pd.Timestamp(at)
+    assert row["season"] == 2026
+
+
+def test_schedule_snapshot_takes_the_events_season(world):
+    built_world(world)
+    event = {
+        "id": "601",
+        "date": "2020-07-04T11:30Z",
+        "season": {"year": 2019, "type": 1},
+        "status": {"type": {"name": "STATUS_SCHEDULED", "completed": False, "state": "pre"}},
+        "competitions": [
+            {
+                "competitors": [
+                    {"homeAway": "home", "team": {"id": ESPN_OF[14]}},
+                    {"homeAway": "away", "team": {"id": ESPN_OF[8]}},
+                ]
+            }
+        ],
+    }
+    world.add_espn_scoreboard("eng.1", "202007", [event], at=datetime(2020, 7, 1, tzinfo=UTC))
+    snap = build_espn_tables(world.ctx)["espn_schedule_snapshot"]
+    assert snap["season"].tolist() == [2019]
 
 
 # --- espn_map and the build checks ---------------------------------------------------------
