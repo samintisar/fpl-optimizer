@@ -10,6 +10,14 @@ data-design.md §2). Pure functions over frames (no view), so they are tested di
 
 `ban_kind` codes: `BAN_NONE` 0, `BAN_LIKELY` 1, `BAN_CERTAIN` 2 (overlapping bans combine with
 `max`).
+
+Measured on raw/ 2026-10-27 (training rows at the 2026/27 GW1 deadline, 2016/17–2024/25): 41–54
+likely and 51–102 certain banned PL fixtures per season. Players start 2–7% of certain-banned
+fixtures in 2017/18–2024/25 (13% in 2016/17; the league-only rule's rows started ~10%) and 2–41%
+of likely-banned ones (about a quarter overall: real three-match bans, one-match bans for
+denying a goal-scoring opportunity, and successful appeals). Live check: Palmer (Chelsea), sent
+off with a second yellow in 2026/27 GW8, serves the ban in the EFL Cup at Liverpool on
+2026-10-28 (a scheduled `club_match`), so his GW9 fixture is not banned.
 """
 
 from __future__ import annotations
