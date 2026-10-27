@@ -316,7 +316,7 @@ def predict_minutes(view: AsOfView, fit: MinutesFit) -> pd.DataFrame:
     weight = np.power(params.horizon_decay, frame["horizon"].to_numpy(dtype="float64"))
     p_start = weight * p_model + (1.0 - weight) * long_run
 
-    banned = frame["club_fixture_order"].to_numpy() < frame["ban_remaining"].to_numpy()
+    banned = frame["ban_kind"].to_numpy() > 0
     p_start = np.where(banned, fit.ban_start, p_start)
     csub = np.where(banned, fit.ban_sub, csub)
     m_start = c60 * fit.minutes_sixty + (1.0 - c60) * fit.minutes_short

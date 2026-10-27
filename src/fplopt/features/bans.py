@@ -23,6 +23,7 @@ BAN_CERTAIN = 2
 STRAIGHT_RED_EXTRA = 2  # likely matches after the certain one for a straight red
 # (yellow cards this season, last gw_index it counts by, matches banned): PLAN §6.3
 BAN_RULES = ((5, 19, 1), (10, 32, 2), (15, 99, 3))
+DOMESTIC_CUPS = ("eng.fa", "eng.league_cup")  # ESPN league codes (fplopt.adapters.espn)
 SCOPE_DOMESTIC = "domestic"
 SCOPE_LEAGUE = "league"
 
@@ -120,19 +121,21 @@ def serve_bans(events: pd.DataFrame, timelines: pd.DataFrame) -> pd.DataFrame:
     0): the club's matches after the ban's `time`, in order (scope 'league': league fixtures
     only); the first `n_certain` are `BAN_CERTAIN`, the next `n_likely` `BAN_LIKELY`; a cup
     match uses up its position without a row. Overlapping bans keep the maximum."""
-    by_team = {
-        team: (
-            _micros(group["kickoff_time"]),
-            group["fixture_key"].to_numpy(dtype="float64", na_value=np.nan),
-        )
-        for team, group in timelines.groupby("team_key")
-    }
+    teams = timelines["team_key"].to_numpy(dtype="int64")
+    kickoffs = _micros(timelines["kickoff_time"])
+    order = np.lexsort((kickoffs, teams))
+    teams, kickoffs = teams[order], kickoffs[order]
+    fixture_keys = timelines["fixture_key"].to_numpy(dtype="float64", na_value=np.nan)[order]
     rows = []
-    for event in events.itertuples(index=False):
-        if event.team_key not in by_team:
+    event_teams = events["team_key"].to_numpy(dtype="int64")
+    lo = np.searchsorted(teams, event_teams, side="left")
+    hi = np.searchsorted(teams, event_teams, side="right")
+    times = _micros(events["time"])
+    for i, event in enumerate(events.itertuples(index=False)):
+        if lo[i] == hi[i]:
             continue
-        kickoffs, fixtures = by_team[event.team_key]
-        after = np.searchsorted(kickoffs, _micros(pd.Series([event.time]))[0], side="right")
+        fixtures = fixture_keys[lo[i] : hi[i]]
+        after = np.searchsorted(kickoffs[lo[i] : hi[i]], times[i], side="right")
         upcoming = fixtures[after:]
         if event.scope == SCOPE_LEAGUE:
             upcoming = upcoming[~np.isnan(upcoming)]

@@ -86,15 +86,8 @@ def league():
     return synthetic_tables(seasons=(2022, 2023))
 
 
-def test_synthetic_tables_cover_every_table_but_understat_and_espn(league):
-    assert set(league) == set(TABLES) - {
-        "understat_map",
-        "understat_player_match",
-        "espn_map",
-        "espn_match",
-        "espn_player_match",
-        "espn_schedule_snapshot",
-    }
+def test_synthetic_tables_cover_every_table_but_understat(league):
+    assert set(league) == set(TABLES) - {"understat_map", "understat_player_match"}
     for name, df in league.items():
         assert df.index.equals(pd.RangeIndex(len(df))), name
         assert isinstance(df["available_at"].dtype, pd.DatetimeTZDtype), name

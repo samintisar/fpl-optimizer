@@ -54,12 +54,16 @@ only), manager tenure, age. `team_join_date` is not a feature: the snapshot carr
 from 2024/25, and the pool's club (a snapshot from 2020/21 GW32) already marks a club change
 (`fixtures_at_club` = 0).
 
-**Suspensions.** `ban_remaining`: league fixtures still to serve, from `BAN_RULES` (PLAN
-§6.3; simplified, see the constants) and red cards (`RED_BAN` = 1 match: our data can't tell
-a straight red from a second yellow), served by the player's subsequent rows. Training rows
-carry `banned` (the row's fixture falls within a ban); the prediction frame carries
-`ban_remaining` and `club_fixture_order` (0 = his club's first horizon fixture), so a model
-can zero the first `ban_remaining` fixtures.
+**Suspensions.** `ban_kind` per player and league fixture from `fplopt.features.bans`
+(0 none, 1 likely, 2 certain): a red card in a domestic match (PL from `player_match`, its
+kind from ESPN's `espn_player_match` where mapped; FA Cup / EFL Cup reds from ESPN) bans the
+club's next domestic matches, the club's domestic cup matches in `club_match` (scheduled ones
+too, as known at the deadline) using up part of it; a second yellow (or a red without ESPN
+data) is 1 certain match, a straight red 1 certain + 2 likely; PL yellow-card bans
+(`fplopt.features.bans.BAN_RULES`) are certain and served in league fixtures only. Training
+rows carry `ban_kind` and `banned` (= `ban_kind` > 0; bans from cards before the row's
+kickoff, a double's second fixture included); prediction rows `ban_kind` per horizon fixture
+(from the cards of the last `BAN_LOOKBACK` visible at the deadline).
 
 **Targets** (training): `minutes`, `start` (0/1), `sixty` (minutes ≥ 60), `sub` (minutes >
 0 without a start); `start_inferred` marks inferred starts.
@@ -73,11 +77,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from fplopt.features.bans import DOMESTIC_CUPS, ban_events, club_timelines, serve_bans
 from fplopt.features.baseline import HORIZON, player_pool, upcoming_fixtures
 from fplopt.features.store import AsOfView
 
 __all__ = (
-    "BAN_RULES",
     "HORIZON",
     "LAG_FEATURES",
     "PREDICTION_COLUMNS",
@@ -103,14 +107,10 @@ ABSENCE_RUN = 3  # 0-minute rows before an appearance that make it a return
 RETURN_WINDOW = 3
 RED_WINDOW = 3
 CONTINUITY_WINDOW = 5  # club fixtures in club_continuity
-# (yellow cards this season, last gw_index at which reaching them bans, matches banned).
-# Simplified from the Premier League rules: the real cut-offs are the club's 19th / 32nd
-# league match (here gw_index 19 / 32), cup and European cards and matches don't count, and
-# the ban starts with the next league fixture (in reality two days after the card is
-# confirmed, and cup matches serve it).
-BAN_RULES = ((5, 19, 1), (10, 32, 2), (15, 99, 3))
-RED_BAN = 1  # any red card bans the next league fixture (straight reds get 3 in reality)
-MAX_BAN = 4  # longest ban from one fixture (15th yellow + red)
+# Prediction: bans from cards of the last BAN_LOOKBACK only (a ban is at most 3 matches;
+# no club has gone that long without 3 domestic matches, the 2020 suspension included),
+# yellow totals from this and last season's rows.
+BAN_LOOKBACK = pd.Timedelta(days=200)
 
 MATCH_COLUMNS = (
     "player_key",
@@ -169,8 +169,7 @@ PREDICTION_KEYS = (
 PREDICTION_COLUMNS = (
     *(name for name, _ in PREDICTION_KEYS),
     *LAG_FEATURES,
-    "ban_remaining",
-    "club_fixture_order",
+    "ban_kind",
 )
 
 
@@ -391,22 +390,6 @@ def _lags(rows: pd.DataFrame) -> pd.DataFrame:
     out["yellows_season"] = _windowed(yellow, block, season_first)
     out["reds_l3"] = _windowed(red, block, np.maximum(block - RED_WINDOW, first))
 
-    # Bans: matches each row triggers, still to serve at the block (served by later rows).
-    total = pd.Series(yellow).groupby([rows["player_key"], rows["season"]]).cumsum().to_numpy()
-    before = total - yellow
-    gw_index = rows["gw_index"].to_numpy()
-    length = RED_BAN * (red > 0)
-    for cards, last_gw, matches in BAN_RULES:
-        length = length + matches * ((before < cards) & (total >= cards) & (gw_index <= last_gw))
-    remaining = np.zeros(n)
-    for d in range(1, MAX_BAN + 1):
-        source = block - d
-        valid = source >= first
-        left = np.where(valid, length[np.maximum(source, 0)] - (d - 1), 0)
-        remaining = np.maximum(remaining, left)
-    out["ban_remaining"] = remaining
-    out["banned"] = (in_block < remaining).astype("float64")
-
     # Consecutive earlier rows at the current club (the spell), capped.
     team = rows["team_key"].to_numpy()
     changed = (index == first) | (team != np.roll(team, 1))
@@ -414,6 +397,93 @@ def _lags(rows: pd.DataFrame) -> pd.DataFrame:
     at_club = np.where(block >= spell_first, block - spell_first, 0)
     out["fixtures_at_club"] = np.minimum(at_club, CLUB_CAP).astype("float64")
     return pd.DataFrame(out)
+
+
+LEAGUE_ROW_COLUMNS = (
+    "player_key",
+    "season",
+    "gw_index",
+    "fixture_key",
+    "team_key",
+    "kickoff_time",
+    "yellow_cards",
+    "red_cards",
+)
+ESPN_RED_COLUMNS = (
+    "espn_athlete_id",
+    "espn_event_id",
+    "league",
+    "red",
+    "second_yellow",
+    "team_key",
+    "event_time",
+)
+
+
+def _cup_sides(view: AsOfView, since: pd.Timestamp | None) -> pd.DataFrame:
+    """team_key, kickoff_time per PL side of every visible domestic cup `club_match`
+    (scheduled ones included) kicking off from `since` on (None: all)."""
+    cups = view.table(
+        "club_match", columns=["league", "kickoff_time", "home_team_key", "away_team_key"]
+    )
+    cups = cups[cups["league"].isin(DOMESTIC_CUPS).to_numpy(dtype=bool)]
+    if since is not None:
+        cups = cups[cups["kickoff_time"] >= since]
+    sides = pd.concat(
+        [
+            cups[["kickoff_time", side]].rename(columns={side: "team_key"})
+            for side in ("home_team_key", "away_team_key")
+        ],
+        ignore_index=True,
+    ).dropna(subset=["team_key"])
+    return sides.astype({"team_key": "int64"})[["team_key", "kickoff_time"]]
+
+
+def _bans(
+    view: AsOfView,
+    league_rows: pd.DataFrame,
+    league_fixtures: pd.DataFrame,
+    since: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """player_key, fixture_key, ban_kind (`fplopt.features.bans.serve_bans`) of the bans
+    from the cards in `league_rows` (history's match rows) and the visible, mapped ESPN
+    domestic cup reds (ESPN's PL rows tell a second yellow from a straight red), served over
+    each club's `league_fixtures` (team_key, fixture_key, kickoff_time) and its visible
+    domestic cup matches. Bans, ESPN rows and cup matches from `since` on (None: all)."""
+    reds = view.table("espn_player_match", columns=list(ESPN_RED_COLUMNS))
+    reds = reds[reds["red"].to_numpy(dtype=bool)]
+    if since is not None:
+        reds = reds[reds["event_time"] >= since]
+    mapped = view.lookup("espn_map", reds["espn_athlete_id"].unique())
+    mapped = mapped.dropna(subset=["player_key"]).astype({"player_key": "int64"})
+    reds = reds.merge(mapped, on="espn_athlete_id", how="inner")
+    league = reds[(reds["league"] == "eng.1").to_numpy(dtype=bool)]
+    league = league.merge(
+        view.table("espn_match", columns=["espn_event_id", "fixture_key"]),
+        on="espn_event_id",
+        how="inner",
+    ).dropna(subset=["fixture_key"])
+    red_kinds = league.astype({"fixture_key": "int64"})[
+        ["player_key", "fixture_key", "second_yellow"]
+    ]
+    cup_reds = reds[reds["league"].isin(DOMESTIC_CUPS).to_numpy(dtype=bool)]
+    cup_reds = cup_reds.rename(columns={"event_time": "kickoff_time"})[
+        ["player_key", "team_key", "kickoff_time", "second_yellow"]
+    ]
+    # Rows without a card neither trigger a ban nor change a yellow total.
+    carded = (league_rows["yellow_cards"] > 0) | (league_rows["red_cards"] > 0)
+    rows = league_rows.loc[carded.to_numpy(dtype=bool), list(LEAGUE_ROW_COLUMNS)]
+    events = ban_events(rows, red_kinds, cup_reds)
+    if since is not None:
+        events = events[events["time"] >= since]
+    return serve_bans(events, club_timelines(league_fixtures, _cup_sides(view, since)))
+
+
+def _with_bans(frame: pd.DataFrame, bans: pd.DataFrame) -> pd.DataFrame:
+    """`frame` (player_key, fixture_key) plus `ban_kind` (float64, 0 without a ban)."""
+    out = frame.merge(bans, on=["player_key", "fixture_key"], how="left", validate="many_to_one")
+    out["ban_kind"] = out["ban_kind"].fillna(0).astype("float64")
+    return out
 
 
 def _competition(frame: pd.DataFrame, by: list[str]) -> pd.DataFrame:
@@ -434,7 +504,7 @@ def _sorted(rows: pd.DataFrame) -> pd.DataFrame:
 
 def training_frame(view: AsOfView) -> pd.DataFrame:
     """One row per visible player_match row: keys (TRAINING_KEYS), LAG_FEATURES, the
-    targets (TARGETS), `start_inferred` and `banned`; sorted by (player_key, season,
+    targets (TARGETS), `start_inferred`, `ban_kind` and `banned`; sorted by (player_key, season,
     gw_index, kickoff_time, fixture_key), RangeIndex."""
     gameweeks = _gameweeks(view)
     matches = _sorted(_matches(view, gameweeks).rename(columns={"deadline_time": "ref_time"}))
@@ -457,6 +527,9 @@ def training_frame(view: AsOfView) -> pd.DataFrame:
     frame = _competition(frame, ["fixture_key", "team_key"])
     frame["club_continuity"] = _club_continuity(matches, frame)
     frame["club_fixtures_season"] = frame["_club_fixtures"]
+    league_fixtures = fixtures[["team_key", "fixture_key", "kickoff_time"]]
+    frame = _with_bans(frame, _bans(view, matches, league_fixtures))
+    frame["banned"] = (frame["ban_kind"] > 0).astype("float64")
     minutes = frame["minutes"]
     frame = frame.assign(
         sixty=(minutes >= 60).astype("float64"),
@@ -467,11 +540,12 @@ def training_frame(view: AsOfView) -> pd.DataFrame:
         *LAG_FEATURES,
         *TARGETS,
         "start_inferred",
+        "ban_kind",
         "banned",
     ]
     dtypes = {
         **dict(TRAINING_KEYS),
-        **{name: "float64" for name in (*LAG_FEATURES, *TARGETS, "banned")},
+        **{name: "float64" for name in (*LAG_FEATURES, *TARGETS, "ban_kind", "banned")},
         "start_inferred": "bool",
     }
     out = frame[columns].astype(dtypes)
@@ -507,14 +581,12 @@ def _horizon_fixtures(view: AsOfView, season: int) -> pd.DataFrame:
         validate="one_to_one",
     )
     out["rest_days"] = out["rest_days"].fillna(REST_CAP_DAYS)
-    out = out.sort_values(["team_key", "kickoff_time", "fixture_key"], kind="mergesort")
-    out["club_fixture_order"] = out.groupby("team_key").cumcount().astype("float64")
-    return out
+    return out.sort_values(["team_key", "kickoff_time", "fixture_key"], kind="mergesort")
 
 
 def prediction_frame(view: AsOfView) -> pd.DataFrame:
     """One row per pool player and horizon fixture of his club: PREDICTION_COLUMNS (keys,
-    LAG_FEATURES as of the deadline, `ban_remaining`, `club_fixture_order`); sorted by
+    LAG_FEATURES as of the deadline, `ban_kind`); sorted by
     (player_key, horizon, kickoff_time, fixture_key), RangeIndex."""
     season, gw = view.gameweek_for_deadline()
     gameweeks = _gameweeks(view)
@@ -578,16 +650,24 @@ def prediction_frame(view: AsOfView) -> pd.DataFrame:
                 "horizon",
                 "kickoff_time",
                 "rest_days",
-                "club_fixture_order",
             ]
         ],
         on="team_key",
         how="inner",
         validate="many_to_many",
     )
+    # Bans from the cards of the last BAN_LOOKBACK, over the fixtures since and the horizon.
+    since = view.deadline - BAN_LOOKBACK
+    columns = ["team_key", "fixture_key", "kickoff_time"]
+    league_fixtures = pd.concat(
+        [fixtures.loc[fixtures["kickoff_time"] >= since, columns], horizon[columns]],
+        ignore_index=True,
+    ).drop_duplicates(["team_key", "fixture_key"])
+    league_rows = history[history["season"].to_numpy() >= season - 1]
+    out = _with_bans(out, _bans(view, league_rows, league_fixtures, since))
     dtypes = {
         **dict(PREDICTION_KEYS),
-        **{name: "float64" for name in (*LAG_FEATURES, "ban_remaining", "club_fixture_order")},
+        **{name: "float64" for name in (*LAG_FEATURES, "ban_kind")},
     }
     out = out[list(PREDICTION_COLUMNS)].astype(dtypes)
     sort_by = ["player_key", "horizon", "kickoff_time", "fixture_key"]

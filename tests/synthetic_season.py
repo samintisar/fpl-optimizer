@@ -19,7 +19,9 @@ rules of the real `data/*.parquet` tables (PLAN §3, §4):
   Otherwise an empty frame with the same columns.
 - `team_rating`: Elo, one pre-season row per club and season (available like the schedule)
   and one row per fixture and side (`available_at` = kickoff + 2h).
-- `odds_snapshot`, `fixture_snapshot`: empty, with the real columns and dtypes.
+- `odds_snapshot`, `fixture_snapshot`, `espn_match`, `espn_player_match`, `espn_map`,
+  `espn_schedule_snapshot`, `club_match`: empty, with the real columns and dtypes
+  (`espn_tables()`).
 - `team_dim`, `player_dim`: static identity tables (`available_at` = epoch).
 
 Players stay with their club (and keep their `player_key`) across the generated seasons;
@@ -52,6 +54,7 @@ import pandas as pd
 
 from fplopt.backtest.rules import backtest_rules
 from fplopt.backtest.scoring import score_matches
+from fplopt.build import espn
 
 UTC_US = pd.DatetimeTZDtype("us", "UTC")
 EPOCH = pd.Timestamp(0, tz="UTC").as_unit("us")
@@ -127,6 +130,17 @@ def first_deadline(season: int) -> pd.Timestamp:
     """GW1 deadline: the first Friday on or after 8 August, 17:30 UTC."""
     day = pd.Timestamp(f"{season}-08-08", tz="UTC")
     return (day + pd.Timedelta(days=(4 - day.weekday()) % 7, hours=17, minutes=30)).as_unit("us")
+
+
+def espn_tables() -> dict[str, pd.DataFrame]:
+    """The ESPN tables and `club_match`, empty, with the real columns and dtypes."""
+    return {
+        "espn_match": espn._frame([], espn.MATCH_SCHEMA),
+        "espn_player_match": espn._frame([], espn.PLAYER_SCHEMA),
+        "espn_schedule_snapshot": espn._frame([], espn.SCHEDULE_SCHEMA),
+        "espn_map": espn.empty_map(),
+        "club_match": espn._frame([], espn.CLUB_MATCH_SCHEMA),
+    }
 
 
 def synthetic_tables(
@@ -1000,6 +1014,7 @@ def _build(
         tables["player_snapshot"] = _empty(SNAPSHOT_DTYPES)
     tables["odds_snapshot"] = _empty(ODDS_DTYPES)
     tables["fixture_snapshot"] = _empty(FIXTURE_SNAPSHOT_DTYPES)
+    tables.update(espn_tables())
     tables["team_dim"] = pd.DataFrame(
         {
             "team_key": pd.array(teams, dtype="int64"),
