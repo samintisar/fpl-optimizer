@@ -22,12 +22,13 @@ Tables:
 Minutes (`parse_summary`): a key-event clock of s seconds is minute min(s // 60 + 1, end), end =
 120 after extra time else 90: STATUS_FINAL_AET, or STATUS_FINAL_PEN with a non-shoot-out key
 event in period 3+ or a "Start Extra Time" event (an EFL Cup shoot-out straight after 90' has
-neither). A starter is on from 0, a substitute from his substitution
-(participants [in, out]); off at his own substitution, his red card or the end. A red after a
-yellow for the same player is a second yellow. Shoot-out events are ignored. A roster
-`subbedIn` without a Substitution event bringing him on, or `subbedOut` without one taking him
-off (nor a red card), leaves his `minutes` (and the unknown minute_on/off) null; the count per
-league is logged. The matcher and the minutes check skip null rows.
+neither). A starter is on from 0, a substitute from his substitution (participants [in, out]);
+off at his own substitution, his red card or the end. A red after a yellow for the same player
+is a second yellow. Key events are read in (period, clock) order (stable); shoot-out events are
+ignored, as is (logged) a substitution or card without a clock. A roster `subbedIn` without a
+Substitution event bringing him on, or `subbedOut` without one taking him off (nor a red card),
+leaves his `minutes` (and the unknown minute_on/off) null; the count per league is logged. The
+matcher and the minutes check skip null rows.
 
 Checks (`espn_problems`, fail the build), for seasons with any `eng.1` match: every finished PL
 fixture has one; every FPL player with minutes is mapped (or exempt by an override with a blank
@@ -71,6 +72,15 @@ FINISHED_STATUSES = frozenset({"STATUS_FULL_TIME", AFTER_EXTRA_TIME, ON_PENALTIE
 def _minute(seconds: float, end: int) -> int:
     """ESPN's display minute (3015 s -> 51'), capped at the match end (stoppage time)."""
     return min(int(seconds // 60) + 1, end)
+
+
+MINUTE_EVENTS = frozenset({"Substitution", "Yellow Card", "Red Card"})
+
+
+def _event_order(ev: dict) -> tuple[int, float]:
+    """(period, clock): ESPN's second-half clock restarts at 45', so a first-half stoppage-time
+    event can have a later clock than an early second-half one."""
+    return (ev.get("period") or {}).get("number", 0), (ev.get("clock") or {}).get("value", 0)
 
 
 def _season(payload: dict[str, Any], kickoff: pd.Timestamp) -> int:
@@ -120,13 +130,17 @@ def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict
     yellows: dict[int, int] = {}
     red_at: dict[int, int] = {}
     second_yellow: set[int] = set()
-    events = sorted(payload.get("keyEvents", []), key=lambda e: e.get("clock", {}).get("value", 0))
-    for ev in events:
-        if ev.get("shootout"):
-            continue
+    no_clock = 0
+    for ev in sorted(payload.get("keyEvents", []), key=_event_order):
         text = ev["type"]["text"]
+        if ev.get("shootout") or text not in MINUTE_EVENTS:
+            continue
+        seconds = (ev.get("clock") or {}).get("value")
+        if seconds is None:
+            no_clock += 1
+            continue
         ids = [int(p["athlete"]["id"]) for p in ev.get("participants", [])]
-        minute = _minute(ev["clock"]["value"], end)
+        minute = _minute(seconds, end)
         if text == "Substitution" and len(ids) == 2:
             player_in, player_out = ids
             if player_out in off:  # already sent off or replaced: a data glitch, skip
@@ -141,6 +155,12 @@ def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict
                 second_yellow.add(ids[0])
             red_at[ids[0]] = minute
             off.setdefault(ids[0], minute)
+    if no_clock:
+        log.warning(
+            "espn event %d: %d key event(s) without a clock skipped",
+            match["espn_event_id"],
+            no_clock,
+        )
     players = []
     for roster in payload.get("rosters", []):
         team = str(roster["team"]["id"])

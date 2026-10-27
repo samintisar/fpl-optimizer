@@ -165,6 +165,32 @@ def test_a_substitution_flag_without_its_event_leaves_minutes_unknown():
     assert [rows[k]["minutes"] for k in (12, 13, 14)] == [90, 61, 29]
 
 
+def test_key_events_are_ordered_by_period_then_clock():
+    home = [player(10, "A", True)]
+    events = [
+        key_event("Red Card", 2760, "359", 10, period=2),  # 47'
+        key_event("Yellow Card", 2880, "359", 10, period=1),  # 45+3'
+    ]
+    payload = summary_payload(8, "2024-09-17T18:45Z", "359", "1000", home, [], events)
+    (row,) = parse_summary(payload, "eng.1")[1]
+    assert row["second_yellow"] and row["minutes"] == 47
+
+
+def test_key_events_without_a_clock_are_skipped(caplog):
+    home = [player(10, "A", True), player(11, "B", True)]
+    events = [
+        {"type": {"text": "Kickoff"}, "period": {"number": 1}, "participants": []},
+        key_event("Yellow Card", 600, "359", 10),
+        key_event("Yellow Card", 900, "359", 11),
+    ]
+    del events[2]["clock"]
+    payload = summary_payload(9, "2024-09-17T18:45Z", "359", "1000", home, [], events)
+    with caplog.at_level("INFO", logger="fplopt.build.espn"):
+        rows = {p["espn_athlete_id"]: p for p in parse_summary(payload, "eng.1")[1]}
+    assert (rows[10]["yellows"], rows[11]["yellows"]) == (1, 0)
+    assert "event 9: 1 key event(s) without a clock skipped" in caplog.text
+
+
 def shootout_payload(events, status="STATUS_FINAL_PEN"):
     home = [player(10, "A", True, sub_out=True), player(11, "B", False, sub_in=True)]
     events = [key_event("Substitution", 5000, "359", 11, 10), *events]
