@@ -97,7 +97,13 @@ Example rows: `3,ARS,Arsenal,Arsenal,Arsenal,Arsenal,359` and `1001,BIR,,Birming
 
 ```python
 CONFIG_COLUMNS = (
-    "team_key", "short_name", "fpl_names", "football_data", "understat", "odds_api", "espn"
+    "team_key",
+    "short_name",
+    "fpl_names",
+    "football_data",
+    "understat",
+    "odds_api",
+    "espn",
 )
 ...
 _SOURCES = {
@@ -117,9 +123,7 @@ In `SCHEMA`, after `odds_api_name`:
 In `read_teams_config`, the duplicate check's column list:
 
 ```python
-        values = [
-            (c, row[c]) for c in ("short_name", "football_data", "understat", "odds_api", "espn")
-        ]
+values = [(c, row[c]) for c in ("short_name", "football_data", "understat", "odds_api", "espn")]
 ```
 
 In `team_dim_from_config`, after `"odds_api_name": config["odds_api"],`:
@@ -209,8 +213,14 @@ def test_require_key_rejects_json_without_the_key():
 
 def test_leagues_are_the_eight_competitions():
     assert LEAGUES == (
-        "eng.1", "eng.fa", "eng.league_cup", "eng.charity",
-        "uefa.champions", "uefa.europa", "uefa.europa.conf", "uefa.super_cup",
+        "eng.1",
+        "eng.fa",
+        "eng.league_cup",
+        "eng.charity",
+        "uefa.champions",
+        "uefa.europa",
+        "uefa.europa.conf",
+        "uefa.super_cup",
     )
 
 
@@ -347,18 +357,33 @@ def event(event_id, date, home, away, completed=True, state="post"):
     return {
         "id": event_id,
         "date": date,
-        "status": {"type": {"name": "STATUS_FULL_TIME" if completed else "STATUS_SCHEDULED",
-                            "completed": completed, "state": state}},
-        "competitions": [{"competitors": [
-            {"homeAway": "home", "team": {"id": home}},
-            {"homeAway": "away", "team": {"id": away}},
-        ]}],
+        "status": {
+            "type": {
+                "name": "STATUS_FULL_TIME" if completed else "STATUS_SCHEDULED",
+                "completed": completed,
+                "state": state,
+            }
+        },
+        "competitions": [
+            {
+                "competitors": [
+                    {"homeAway": "home", "team": {"id": home}},
+                    {"homeAway": "away", "team": {"id": away}},
+                ]
+            }
+        ],
     }
 
 
 def summary(event_id, completed=True):
-    return {"header": {"id": event_id, "competitions": [
-        {"status": {"type": {"completed": completed}}}]}, "rosters": [], "keyEvents": []}
+    return {
+        "header": {
+            "id": event_id,
+            "competitions": [{"status": {"type": {"completed": completed}}}],
+        },
+        "rosters": [],
+        "keyEvents": [],
+    }
 
 
 class FakeEspn:
@@ -383,9 +408,9 @@ PL = frozenset({"359", "363"})
 
 def test_events_to_fetch_keeps_completed_events_with_a_pl_club_after_july_2016():
     events = [
-        event("1", "2016-10-25T18:45Z", "359", "1000"),        # Arsenal v lower club
-        event("2", "2016-10-25T18:45Z", "1000", "1001"),       # no PL club
-        event("3", "2016-05-01T18:45Z", "359", "1000"),        # before 2016/17
+        event("1", "2016-10-25T18:45Z", "359", "1000"),  # Arsenal v lower club
+        event("2", "2016-10-25T18:45Z", "1000", "1001"),  # no PL club
+        event("3", "2016-05-01T18:45Z", "359", "1000"),  # before 2016/17
         event("4", "2026-11-04T20:00Z", "363", "1000", completed=False, state="pre"),
     ]
     assert events_to_fetch({"events": events}, "eng.league_cup", PL) == ["1"]
@@ -400,12 +425,20 @@ def test_archive_period_writes_the_scoreboard_and_new_summaries_once(tmp_path):
     store = RawStore(tmp_path)
     espn = FakeEspn({("eng.league_cup", "2016"): [event("1", "2016-10-25T18:45Z", "359", "1000")]})
     sleeps = []
-    assert archive_period(store, espn, "eng.league_cup", "2016", PL, NOW, lambda: NOW, sleeps.append) == 1
+    assert (
+        archive_period(store, espn, "eng.league_cup", "2016", PL, NOW, lambda: NOW, sleeps.append)
+        == 1
+    )
     assert store.latest("espn", summary_endpoint("eng.league_cup", "1")) is not None
     assert store.latest("espn", "eng.league_cup/scoreboard/2016") is not None
     # A second run re-reads the scoreboard but skips the completed summary.
     later = datetime(2026, 10, 28, tzinfo=UTC)
-    assert archive_period(store, espn, "eng.league_cup", "2016", PL, later, lambda: later, sleeps.append) == 0
+    assert (
+        archive_period(
+            store, espn, "eng.league_cup", "2016", PL, later, lambda: later, sleeps.append
+        )
+        == 0
+    )
     assert [c[0] for c in espn.calls] == ["scoreboard", "summary", "scoreboard"]
 
 
@@ -424,7 +457,9 @@ def test_recent_periods_cover_a_week_back_and_sixty_days_ahead():
 
 def test_backfill_walks_every_league_and_year(tmp_path):
     espn = FakeEspn({})
-    backfill_espn(RawStore(tmp_path), espn, PL, first_year=2025, now=lambda: NOW, sleep=lambda s: None)
+    backfill_espn(
+        RawStore(tmp_path), espn, PL, first_year=2025, now=lambda: NOW, sleep=lambda s: None
+    )
     boards = {(c[1], c[2]) for c in espn.calls if c[0] == "scoreboard"}
     assert ("eng.1", "2025") in boards and ("uefa.super_cup", "2026") in boards
     assert len(boards) == 16
@@ -509,7 +544,9 @@ def _kickoff(text: str) -> datetime:
     return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
-def events_to_fetch(scoreboard: Mapping[str, Any], league: str, team_ids: frozenset[str]) -> list[str]:
+def events_to_fetch(
+    scoreboard: Mapping[str, Any], league: str, team_ids: frozenset[str]
+) -> list[str]:
     """Ids of completed events from FIRST_KICKOFF with a club of `team_ids` (eng.1: all)."""
     out = []
     for ev in scoreboard.get("events", []):
@@ -554,7 +591,9 @@ def archive_period(
     def step(event_id: str) -> Callable[[], None]:
         def run() -> None:
             sleep(pause_s)
-            store.write(SOURCE, summary_endpoint(league, event_id), espn.summary(league, event_id), now())
+            store.write(
+                SOURCE, summary_endpoint(league, event_id), espn.summary(league, event_id), now()
+            )
             written.append(event_id)
 
         return run
@@ -562,7 +601,9 @@ def archive_period(
     try:
         run_independently([(f"{league}/{event_id}", step(event_id)) for event_id in due])
     finally:
-        log.info("espn %s %s: %d summaries archived (%d due)", league, period, len(written), len(due))
+        log.info(
+            "espn %s %s: %d summaries archived (%d due)", league, period, len(written), len(due)
+        )
     return len(written)
 
 
@@ -664,7 +705,9 @@ def test_run_daily_runs_the_espn_step_when_given(tmp_path, monkeypatch):
         lambda store, espn, team_ids, now, sleep: calls.append(team_ids),
     )
     store = RawStore(tmp_path)
-    jobs.run_daily(store, FakeFpl(), None, espn=(object(), frozenset({"359"})), sleep=lambda s: None)
+    jobs.run_daily(
+        store, FakeFpl(), None, espn=(object(), frozenset({"359"})), sleep=lambda s: None
+    )
     assert calls == [frozenset({"359"})]
 ```
 
@@ -767,35 +810,62 @@ from fplopt.build.espn import parse_summary
 
 
 def player(athlete_id, name, starter, sub_in=False, sub_out=False):
-    return {"starter": starter, "subbedIn": sub_in, "subbedOut": sub_out,
-            "athlete": {"id": str(athlete_id), "displayName": name}}
+    return {
+        "starter": starter,
+        "subbedIn": sub_in,
+        "subbedOut": sub_out,
+        "athlete": {"id": str(athlete_id), "displayName": name},
+    }
 
 
 def key_event(text, seconds, team, *athletes, shootout=False):
-    return {"type": {"text": text}, "clock": {"value": float(seconds)}, "team": {"id": team},
-            "participants": [{"athlete": {"id": str(a)}} for a in athletes], "shootout": shootout}
-
-
-def summary_payload(event_id, kickoff, home, away, home_roster, away_roster, events=(),
-                    status="STATUS_FULL_TIME"):
-    competitors = [{"homeAway": "home", "team": {"id": home}},
-                   {"homeAway": "away", "team": {"id": away}}]
     return {
-        "header": {"id": str(event_id), "competitions": [{
-            "date": kickoff, "competitors": competitors,
-            "status": {"type": {"name": status, "completed": True, "state": "post"}}}]},
-        "rosters": [{"homeAway": "home", "team": {"id": home}, "roster": home_roster},
-                    {"homeAway": "away", "team": {"id": away}, "roster": away_roster}],
+        "type": {"text": text},
+        "clock": {"value": float(seconds)},
+        "team": {"id": team},
+        "participants": [{"athlete": {"id": str(a)}} for a in athletes],
+        "shootout": shootout,
+    }
+
+
+def summary_payload(
+    event_id, kickoff, home, away, home_roster, away_roster, events=(), status="STATUS_FULL_TIME"
+):
+    competitors = [
+        {"homeAway": "home", "team": {"id": home}},
+        {"homeAway": "away", "team": {"id": away}},
+    ]
+    return {
+        "header": {
+            "id": str(event_id),
+            "competitions": [
+                {
+                    "date": kickoff,
+                    "competitors": competitors,
+                    "status": {"type": {"name": status, "completed": True, "state": "post"}},
+                }
+            ],
+        },
+        "rosters": [
+            {"homeAway": "home", "team": {"id": home}, "roster": home_roster},
+            {"homeAway": "away", "team": {"id": away}, "roster": away_roster},
+        ],
         "keyEvents": list(events),
     }
 
 
 def palmer_match():
     """Chelsea 0-2 Spurs, GW8 2026/27, trimmed: Palmer yellow 71', red (second yellow) 80'."""
-    home = [player(296395, "Cole Palmer", True), player(353951, "Jorrel Hato", True, sub_out=True),
-            player(362486, "Marco Palestra", False, sub_in=True), player(1, "Unused Sub", False)]
-    away = [player(194450, "James Maddison", True, sub_out=True),
-            player(266696, "Conor Gallagher", False, sub_in=True)]
+    home = [
+        player(296395, "Cole Palmer", True),
+        player(353951, "Jorrel Hato", True, sub_out=True),
+        player(362486, "Marco Palestra", False, sub_in=True),
+        player(1, "Unused Sub", False),
+    ]
+    away = [
+        player(194450, "James Maddison", True, sub_out=True),
+        player(266696, "Conor Gallagher", False, sub_in=True),
+    ]
     events = [
         key_event("Substitution", 3015, "367", 266696, 194450),
         key_event("Substitution", 3867, "363", 362486, 353951),
@@ -809,9 +879,14 @@ def palmer_match():
 def test_parse_summary_match_row():
     match, _ = parse_summary(palmer_match(), "eng.1")
     assert match == {
-        "espn_event_id": 401878767, "league": "eng.1", "season": 2026,
-        "kickoff_time": pd.Timestamp("2026-10-24T16:30Z"), "home_espn_id": "363",
-        "away_espn_id": "367", "status": "STATUS_FULL_TIME", "extra_time": False,
+        "espn_event_id": 401878767,
+        "league": "eng.1",
+        "season": 2026,
+        "kickoff_time": pd.Timestamp("2026-10-24T16:30Z"),
+        "home_espn_id": "363",
+        "away_espn_id": "367",
+        "status": "STATUS_FULL_TIME",
+        "extra_time": False,
     }
 
 
@@ -822,7 +897,11 @@ def test_parse_summary_minutes_and_cards():
     palmer = rows[296395]
     assert (palmer["minutes"], palmer["minute_off"], palmer["yellows"]) == (80, 80, 1)
     assert palmer["red"] and palmer["second_yellow"] and palmer["starter"]
-    assert (rows[353951]["minutes"], rows[362486]["minute_on"], rows[362486]["minutes"]) == (65, 65, 25)
+    assert (rows[353951]["minutes"], rows[362486]["minute_on"], rows[362486]["minutes"]) == (
+        65,
+        65,
+        25,
+    )
     assert (rows[194450]["minutes"], rows[266696]["minutes"]) == (51, 39)
     assert rows[266696]["yellows"] == 1 and not rows[266696]["red"]
     assert rows[1]["minutes"] == 0 and pd.isna(rows[1]["minute_on"])
@@ -832,12 +911,15 @@ def test_parse_summary_minutes_and_cards():
 def test_a_straight_red_is_not_a_second_yellow_and_extra_time_runs_to_120():
     home = [player(10, "A", True), player(11, "B", False, sub_in=True)]
     away = [player(20, "C", True, sub_out=True), player(21, "D", False, sub_in=True)]
-    events = [key_event("Red Card", 1200, "359", 10),
-              key_event("Substitution", 6600, "359", 11, 10),  # ignored: 10 already off
-              key_event("Substitution", 5000, "1000", 21, 20),
-              key_event("Yellow Card", 7300, "1000", 21, shootout=True)]
-    payload = summary_payload(5, "2016-10-25T18:45Z", "359", "1000", home, away, events,
-                              status="STATUS_FINAL_PEN")
+    events = [
+        key_event("Red Card", 1200, "359", 10),
+        key_event("Substitution", 6600, "359", 11, 10),  # ignored: 10 already off
+        key_event("Substitution", 5000, "1000", 21, 20),
+        key_event("Yellow Card", 7300, "1000", 21, shootout=True),
+    ]
+    payload = summary_payload(
+        5, "2016-10-25T18:45Z", "359", "1000", home, away, events, status="STATUS_FINAL_PEN"
+    )
     match, players = parse_summary(payload, "eng.league_cup")
     rows = {p["espn_athlete_id"]: p for p in players}
     assert match["extra_time"] and match["season"] == 2016
@@ -971,13 +1053,14 @@ Rules:
 - [ ] **Step 1: World helpers** (`tests/synthetic_raw.py`, methods of `World`):
 
 ```python
-    def add_espn_summary(self, league: str, payload: dict, at: datetime = RUN) -> None:
-        event_id = payload["header"]["id"]
-        self.store.write("espn", f"{league}/summary/{event_id}", json.dumps(payload).encode(), at)
+def add_espn_summary(self, league: str, payload: dict, at: datetime = RUN) -> None:
+    event_id = payload["header"]["id"]
+    self.store.write("espn", f"{league}/summary/{event_id}", json.dumps(payload).encode(), at)
 
-    def add_espn_scoreboard(self, league: str, period: str, events: list, at: datetime = RUN) -> None:
-        body = json.dumps({"events": events}).encode()
-        self.store.write("espn", f"{league}/scoreboard/{period}", body, at)
+
+def add_espn_scoreboard(self, league: str, period: str, events: list, at: datetime = RUN) -> None:
+    body = json.dumps({"events": events}).encode()
+    self.store.write("espn", f"{league}/scoreboard/{period}", body, at)
 ```
 
 - [ ] **Step 2: Write the failing tests** (append to `tests/test_build_espn.py`)
@@ -992,8 +1075,11 @@ from fplopt.build import build
 from fplopt.build.espn import AVAILABLE_AFTER, EspnBuildError, build_espn_tables
 from fplopt.build.teams import team_dim_from_config
 
-ESPN_OF = dict(team_dim_from_config(REPO_CONFIG / "teams.csv")[["team_key", "espn_id"]]
-               .dropna().itertuples(index=False))
+ESPN_OF = dict(
+    team_dim_from_config(REPO_CONFIG / "teams.csv")[["team_key", "espn_id"]]
+    .dropna()
+    .itertuples(index=False)
+)
 
 
 @pytest.fixture
@@ -1025,8 +1111,13 @@ def pl_payload(fx, minutes_home=90):
         events = [key_event("Red Card", (minutes_home - 1) * 60, home, fx.home_team_key * 10)]
     kickoff = fx.kickoff_time.strftime("%Y-%m-%dT%H:%MZ")
     return summary_payload(
-        fx.fixture_key, kickoff, home, away,
-        [athlete(fx.home_team_key)], [athlete(fx.away_team_key)], events,
+        fx.fixture_key,
+        kickoff,
+        home,
+        away,
+        [athlete(fx.home_team_key)],
+        [athlete(fx.away_team_key)],
+        events,
     )
 
 
@@ -1039,7 +1130,9 @@ def test_tables_join_pl_fixtures_and_keep_cup_matches_of_pl_clubs(world):
         77, "2023-09-26T18:45Z", ars, "1000", [athlete(3)], [player(5, "Lower", True)]
     )
     world.add_espn_summary("eng.league_cup", cup)
-    world.add_espn_summary("eng.league_cup", summary_payload(78, "2023-09-26T18:45Z", "1000", "1001", [], []))
+    world.add_espn_summary(
+        "eng.league_cup", summary_payload(78, "2023-09-26T18:45Z", "1000", "1001", [], [])
+    )
     tables = build_espn_tables(world.ctx)
     match = tables["espn_match"].set_index("espn_event_id")
     assert set(match.index) == {first.fixture_key, 77}
@@ -1048,12 +1141,18 @@ def test_tables_join_pl_fixtures_and_keep_cup_matches_of_pl_clubs(world):
     assert pd.isna(match.loc[77, "away_team_key"])
     assert (match["available_at"] == match["event_time"] + AVAILABLE_AFTER).all()
     players = tables["espn_player_match"]
-    assert set(players["espn_athlete_id"]) == {first.home_team_key * 10, first.away_team_key * 10, 30}
+    assert set(players["espn_athlete_id"]) == {
+        first.home_team_key * 10,
+        first.away_team_key * 10,
+        30,
+    }
 
 
 def test_an_unknown_pl_club_fails_the_build(world):
     built_world(world)
-    world.add_espn_summary("eng.1", summary_payload(1, "2023-08-12T14:00Z", "999999", ESPN_OF[3], [], []))
+    world.add_espn_summary(
+        "eng.1", summary_payload(1, "2023-08-12T14:00Z", "999999", ESPN_OF[3], [], [])
+    )
     with pytest.raises(EspnBuildError, match="eng.1 event 1"):
         build_espn_tables(world.ctx)
 
@@ -1071,14 +1170,32 @@ def test_schedule_snapshot_lists_scheduled_matches_of_pl_clubs(world):
     built_world(world)
     at = datetime(2026, 10, 27, 3, tzinfo=UTC)
     events = [
-        {"id": "501", "date": "2026-10-28T19:45Z",
-         "status": {"type": {"name": "STATUS_SCHEDULED", "completed": False, "state": "pre"}},
-         "competitions": [{"competitors": [{"homeAway": "home", "team": {"id": ESPN_OF[14]}},
-                                           {"homeAway": "away", "team": {"id": ESPN_OF[8]}}]}]},
-        {"id": "502", "date": "2026-10-28T19:45Z",
-         "status": {"type": {"name": "STATUS_SCHEDULED", "completed": False, "state": "pre"}},
-         "competitions": [{"competitors": [{"homeAway": "home", "team": {"id": "1000"}},
-                                           {"homeAway": "away", "team": {"id": "1001"}}]}]},
+        {
+            "id": "501",
+            "date": "2026-10-28T19:45Z",
+            "status": {"type": {"name": "STATUS_SCHEDULED", "completed": False, "state": "pre"}},
+            "competitions": [
+                {
+                    "competitors": [
+                        {"homeAway": "home", "team": {"id": ESPN_OF[14]}},
+                        {"homeAway": "away", "team": {"id": ESPN_OF[8]}},
+                    ]
+                }
+            ],
+        },
+        {
+            "id": "502",
+            "date": "2026-10-28T19:45Z",
+            "status": {"type": {"name": "STATUS_SCHEDULED", "completed": False, "state": "pre"}},
+            "competitions": [
+                {
+                    "competitors": [
+                        {"homeAway": "home", "team": {"id": "1000"}},
+                        {"homeAway": "away", "team": {"id": "1001"}},
+                    ]
+                }
+            ],
+        },
     ]
     world.add_espn_scoreboard("eng.league_cup", "202610", events, at=at)
     snap = build_espn_tables(world.ctx)["espn_schedule_snapshot"]
@@ -1113,9 +1230,7 @@ def _item_dirs(store: RawStore, kind: str) -> list[tuple[str, str]]:
     root = store.root / SOURCE
     if not root.is_dir():
         return []
-    return [
-        (d.parent.parent.name, d.name) for d in sorted(root.glob(f"*/{kind}/*")) if d.is_dir()
-    ]
+    return [(d.parent.parent.name, d.name) for d in sorted(root.glob(f"*/{kind}/*")) if d.is_dir()]
 
 
 MATCH_SCHEMA = pa.DataFrameSchema(
@@ -1349,11 +1464,22 @@ The helpers hard-code `understat_id` / `us_minutes`. Add keyword parameters with
 ```python
 def test_matcher_helpers_take_another_id_column():
     src = pd.DataFrame({"espn_athlete_id": [7, 7], "fixture_key": [1, 2], "minutes_src": [90, 88]})
-    fpl = pd.DataFrame({"player_key": [3, 3], "fixture_key": [1, 2], "minutes": [90, 90],
-                        "season": [2023, 2023], "goals_scored": [0, 0]})
+    fpl = pd.DataFrame(
+        {
+            "player_key": [3, 3],
+            "fixture_key": [1, 2],
+            "minutes": [90, 90],
+            "season": [2023, 2023],
+            "goals_scored": [0, 0],
+        }
+    )
     pairs = candidate_pairs(src, fpl, id_col="espn_athlete_id", minutes_col="minutes_src")
-    assert pairs[["espn_athlete_id", "player_key", "together", "shared"]].values.tolist() == [[7, 3, 2, 2]]
-    pairs["name_score"] = name_scores(pairs, {7: "Ann Bee"}, {3: {"Ann Bee"}}, id_col="espn_athlete_id")
+    assert pairs[["espn_athlete_id", "player_key", "together", "shared"]].values.tolist() == [
+        [7, 3, 2, 2]
+    ]
+    pairs["name_score"] = name_scores(
+        pairs, {7: "Ann Bee"}, {3: {"Ann Bee"}}, id_col="espn_athlete_id"
+    )
     empty = read_overrides(REPO_CONFIG, source="espn", id_col="espn_athlete_id")
     mapping = map_understat(pairs, empty, id_col="espn_athlete_id")
     assert mapping[["espn_athlete_id", "player_key", "method"]].values.tolist() == [[7, 3, "auto"]]
@@ -1507,13 +1633,19 @@ def test_no_espn_data_builds_empty_tables(world):
 In `tests/test_build_tables.py`, the kinds test: `understat_map` and `espn_map` are static, `espn_schedule_snapshot` is a snapshot table:
 
 ```python
-    assert {n for n, k in kinds.items() if k == "static"} == {
-        "team_dim", "player_dim", "understat_map", "espn_map",
-    }
-    ...
-    assert {n for n, k in kinds.items() if k == "snapshot"} == {
-        "player_snapshot", "fixture_snapshot", "odds_snapshot", "espn_schedule_snapshot",
-    }
+assert {n for n, k in kinds.items() if k == "static"} == {
+    "team_dim",
+    "player_dim",
+    "understat_map",
+    "espn_map",
+}
+...
+assert {n for n, k in kinds.items() if k == "snapshot"} == {
+    "player_snapshot",
+    "fixture_snapshot",
+    "odds_snapshot",
+    "espn_schedule_snapshot",
+}
 ```
 
 and `assert TABLES["espn_map"].public_columns == ("espn_athlete_id", "player_key")` in the static-tables test. The full synthetic build (`test_synthetic_build_all_writes_exactly_the_registered_tables`) then needs the ESPN tables written even without ESPN data (empty).
@@ -1544,7 +1676,9 @@ ID = "espn_athlete_id"
 MAP_SCHEMA = pa.DataFrameSchema(
     {
         ID: pa.Column("int64", unique=True),
-        "player_key": pa.Column("Int64", pa.Check(lambda s: ~s.duplicated() | s.isna()), nullable=True),
+        "player_key": pa.Column(
+            "Int64", pa.Check(lambda s: ~s.duplicated() | s.isna()), nullable=True
+        ),
         "method": pa.Column(str, pa.Check.isin(["auto", "override"])),
         "shared": pa.Column("Int64", nullable=True),
         "overlap": pa.Column("Float64", nullable=True),
@@ -1562,7 +1696,9 @@ MAP_SORT_BY = (ID,)
 def pl_appearances(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """ESPN eng.1 rows with a fixture: espn_athlete_id, fixture_key, minutes_src, red, name."""
     match = tables["espn_match"].dropna(subset=["fixture_key"])
-    rows = tables["espn_player_match"].merge(match[["espn_event_id", "fixture_key"]], on="espn_event_id")
+    rows = tables["espn_player_match"].merge(
+        match[["espn_event_id", "fixture_key"]], on="espn_event_id"
+    )
     rows = rows.assign(fixture_key=rows["fixture_key"].astype("int64"), minutes_src=rows["minutes"])
     return rows[[ID, "fixture_key", "minutes_src", "red", "athlete_name"]]
 
@@ -1570,15 +1706,20 @@ def pl_appearances(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
 def map_espn(ctx: BuildContext, tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     espn = pl_appearances(tables)
     played = espn[espn["minutes_src"] > 0]
-    pairs = candidate_pairs(played, fpl_appearances(ctx.table("player_match")),
-                            id_col=ID, minutes_col="minutes_src")
+    pairs = candidate_pairs(
+        played, fpl_appearances(ctx.table("player_match")), id_col=ID, minutes_col="minutes_src"
+    )
     names = dict(zip(espn[ID], espn["athlete_name"], strict=False))
-    pairs["name_score"] = name_scores(pairs, names, fpl_name_variants(ctx.table("player_season")), id_col=ID)
+    pairs["name_score"] = name_scores(
+        pairs, names, fpl_name_variants(ctx.table("player_season")), id_col=ID
+    )
     overrides = read_overrides(ctx.config_dir, source="espn", id_col=ID)
     return map_understat(pairs, overrides, id_col=ID)
 
 
-def espn_problems(ctx: BuildContext, tables: dict[str, pd.DataFrame], mapping: pd.DataFrame) -> list[str]:
+def espn_problems(
+    ctx: BuildContext, tables: dict[str, pd.DataFrame], mapping: pd.DataFrame
+) -> list[str]:
     match = tables["espn_match"]
     covered = set(match.loc[match["league"] == "eng.1", "season"])
     if not covered:
@@ -1586,32 +1727,53 @@ def espn_problems(ctx: BuildContext, tables: dict[str, pd.DataFrame], mapping: p
     problems: list[str] = []
     fixture = ctx.table("fixture")
     finished = fixture[fixture["finished"] & fixture["season"].isin(covered)]
-    missing = finished[~finished["fixture_key"].isin(set(match["fixture_key"].dropna().astype(int)))]
+    missing = finished[
+        ~finished["fixture_key"].isin(set(match["fixture_key"].dropna().astype(int)))
+    ]
     if len(missing):
-        problems.append(f"{len(missing)} finished PL fixtures have no ESPN match: "
-                        f"{missing['fixture_key'].head(5).tolist()}")
+        problems.append(
+            f"{len(missing)} finished PL fixtures have no ESPN match: "
+            f"{missing['fixture_key'].head(5).tolist()}"
+        )
     pm = ctx.table("player_match")
     pm = pm[pm["season"].isin(covered)]
-    exempt = set(read_overrides(ctx.config_dir, source="espn", id_col=ID)
-                 .query(f"{ID}.isna()", engine="python")["player_key"].dropna().astype(int))
+    exempt = set(
+        read_overrides(ctx.config_dir, source="espn", id_col=ID)
+        .query(f"{ID}.isna()", engine="python")["player_key"]
+        .dropna()
+        .astype(int)
+    )
     mapped = set(mapping["player_key"].dropna().astype(int))
     unmapped = set(pm.loc[pm["minutes"] > 0, "player_key"]) - mapped - exempt
     if unmapped:
-        problems.append(f"{len(unmapped)} FPL players with minutes are not mapped: {sorted(unmapped)[:10]}")
+        problems.append(
+            f"{len(unmapped)} FPL players with minutes are not mapped: {sorted(unmapped)[:10]}"
+        )
     espn = pl_appearances(tables).merge(mapping[[ID, "player_key"]].dropna(), on=ID)
-    both = espn.merge(pm[["player_key", "fixture_key", "minutes", "red_cards"]], on=["player_key", "fixture_key"])
+    both = espn.merge(
+        pm[["player_key", "fixture_key", "minutes", "red_cards"]], on=["player_key", "fixture_key"]
+    )
     both = both.assign(player_key=both["player_key"].astype("int64"))
     played = both[(both["minutes"] > 0) | (both["minutes_src"] > 0)]
-    agree = ((played["minutes"] - played["minutes_src"]).abs() <= MINUTES_TOLERANCE).groupby(played[ID]).mean()
+    agree = (
+        ((played["minutes"] - played["minutes_src"]).abs() <= MINUTES_TOLERANCE)
+        .groupby(played[ID])
+        .mean()
+    )
     auto = set(mapping.loc[mapping["method"] == "auto", ID])
     bad = agree[(agree < MIN_MINUTES_AGREEMENT) & agree.index.isin(auto)]
     if len(bad):
-        problems.append(f"{len(bad)} pairs agree on minutes in < 90% of fixtures: {bad.head(10).round(2).to_dict()}")
+        problems.append(
+            f"{len(bad)} pairs agree on minutes in < 90% of fixtures: {bad.head(10).round(2).to_dict()}"
+        )
     fpl_reds = both["red_cards"] > 0
     wrong = both[fpl_reds != both["red"]]
     if len(wrong):
-        log.info("ESPN/FPL red cards disagree in %d rows: %s", len(wrong),
-                 wrong[[ID, "player_key", "fixture_key", "red", "red_cards"]].to_dict("records"))
+        log.info(
+            "ESPN/FPL red cards disagree in %d rows: %s",
+            len(wrong),
+            wrong[[ID, "player_key", "fixture_key", "red", "red_cards"]].to_dict("records"),
+        )
     if len(wrong) > MAX_RED_DISAGREEMENT * max(int(fpl_reds.sum()), 1):
         problems.append(f"red cards disagree in {len(wrong)} of {int(fpl_reds.sum())} FPL reds")
     return problems
@@ -1632,7 +1794,11 @@ def build_espn(ctx: BuildContext) -> pd.DataFrame:
     for name, (schema, sort_by) in specs.items():
         write_table(tables[name], name, schema, ctx.data_dir, sort_by)
     write_table(mapping, "espn_map", MAP_SCHEMA, ctx.data_dir, MAP_SORT_BY)
-    log.info("espn_map: %d athletes (%d by override)", len(mapping), int((mapping["method"] == "override").sum()))
+    log.info(
+        "espn_map: %d athletes (%d by override)",
+        len(mapping),
+        int((mapping["method"] == "override").sum()),
+    )
     return tables["espn_player_match"]
 ```
 
@@ -1643,6 +1809,7 @@ Register (`src/fplopt/build/__init__.py`): import `espn`; `"espn": Builder(espn.
 `src/fplopt/build/tables.py`:
 
 ```python
+(
     TableSpec(
         "espn_map",
         "static",
@@ -1650,11 +1817,12 @@ Register (`src/fplopt/build/__init__.py`): import `espn`; `"espn": Builder(espn.
         public_columns=("espn_athlete_id", "player_key"),
         visible_via=("espn_player_match", "espn_athlete_id"),
     ),
-    ...
-    TableSpec("espn_match", "event", ("espn_event_id",)),
-    TableSpec("espn_player_match", "event", ("espn_athlete_id", "espn_event_id")),
-    ...
-    TableSpec("espn_schedule_snapshot", "snapshot", ("snapshot_at", "espn_event_id"), "snapshot_at"),
+)
+...
+(TableSpec("espn_match", "event", ("espn_event_id",)),)
+(TableSpec("espn_player_match", "event", ("espn_athlete_id", "espn_event_id")),)
+...
+(TableSpec("espn_schedule_snapshot", "snapshot", ("snapshot_at", "espn_event_id"), "snapshot_at"),)
 ```
 
 - [ ] **Step 4: Run the build tests**
