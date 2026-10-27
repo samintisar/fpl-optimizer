@@ -7,7 +7,11 @@ import logging
 from typing import Any
 
 import pandas as pd
+import pandera.pandas as pa
 
+from fplopt.build.common import UTC_US, BuildContext
+from fplopt.build.teams import TeamResolver
+from fplopt.ingest.raw_store import RawStore
 from fplopt.seasons import season_start_year
 
 log = logging.getLogger(__name__)
@@ -26,7 +30,7 @@ def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict
     status = competition["status"]["type"]["name"]
     end = 120 if status in EXTRA_TIME_STATUSES else 90
     kickoff = pd.Timestamp(competition["date"]).tz_convert("UTC")
-    sides = {c["homeAway"]: str(c["team"]["id"]) for c in competition["competitors"]}
+    sides = _sides(competition["competitors"])
     match = {
         "espn_event_id": int(payload["header"]["id"]),
         "league": league,
@@ -85,3 +89,220 @@ def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict
                 }
             )
     return match, players
+
+
+SOURCE = "espn"
+AVAILABLE_AFTER = pd.Timedelta(hours=3)  # VERIFY (spec §1): lineups/cards final by then
+
+
+class EspnBuildError(ValueError):
+    """ESPN data that does not fit: an unknown PL club, a missing PL fixture, a bad mapping."""
+
+
+def _item_dirs(store: RawStore, kind: str) -> list[tuple[str, str]]:
+    """(league, item) of every `espn/<league>/<kind>/<item>` directory, sorted."""
+    root = store.root / SOURCE
+    if not root.is_dir():
+        return []
+    return [(d.parent.parent.name, d.name) for d in sorted(root.glob(f"*/{kind}/*")) if d.is_dir()]
+
+
+MATCH_SCHEMA = pa.DataFrameSchema(
+    {
+        "espn_event_id": pa.Column("int64", unique=True),
+        "league": pa.Column(str),
+        "season": pa.Column("int64"),
+        "kickoff_time": pa.Column(UTC_US),
+        "home_espn_id": pa.Column(str),
+        "away_espn_id": pa.Column(str),
+        "home_team_key": pa.Column("Int64", nullable=True),
+        "away_team_key": pa.Column("Int64", nullable=True),
+        "fixture_key": pa.Column("Int64", nullable=True),
+        "status": pa.Column(str),
+        "extra_time": pa.Column(bool),
+        "event_time": pa.Column(UTC_US),
+        "available_at": pa.Column(UTC_US),
+    },
+    strict=True,
+    ordered=True,
+)
+MATCH_SORT_BY = ("kickoff_time", "espn_event_id")
+
+PLAYER_SCHEMA = pa.DataFrameSchema(
+    {
+        "espn_athlete_id": pa.Column("int64"),
+        "espn_event_id": pa.Column("int64"),
+        "season": pa.Column("int64"),
+        "league": pa.Column(str),
+        "team_key": pa.Column("int64"),
+        "athlete_name": pa.Column(str),
+        "starter": pa.Column(bool),
+        "minute_on": pa.Column("Int64", nullable=True),
+        "minute_off": pa.Column("Int64", nullable=True),
+        "minutes": pa.Column("int64", pa.Check.in_range(0, 120)),
+        "yellows": pa.Column("int64", pa.Check.ge(0)),
+        "red": pa.Column(bool),
+        "second_yellow": pa.Column(bool),
+        "event_time": pa.Column(UTC_US),
+        "available_at": pa.Column(UTC_US),
+    },
+    checks=[
+        pa.Check(
+            lambda df: ~df.duplicated(["espn_athlete_id", "espn_event_id"]),
+            error="(espn_athlete_id, espn_event_id) must be unique",
+        )
+    ],
+    strict=True,
+    ordered=True,
+)
+PLAYER_SORT_BY = ("espn_event_id", "espn_athlete_id")
+
+SCHEDULE_SCHEMA = pa.DataFrameSchema(
+    {
+        "snapshot_at": pa.Column(UTC_US),
+        "espn_event_id": pa.Column("int64"),
+        "league": pa.Column(str),
+        "season": pa.Column("int64"),
+        "kickoff_time": pa.Column(UTC_US),
+        "home_team_key": pa.Column("Int64", nullable=True),
+        "away_team_key": pa.Column("Int64", nullable=True),
+        "event_time": pa.Column(UTC_US),
+        "available_at": pa.Column(UTC_US),
+    },
+    checks=[
+        pa.Check(
+            lambda df: ~df.duplicated(["snapshot_at", "espn_event_id"]),
+            error="(snapshot_at, espn_event_id) must be unique",
+        )
+    ],
+    strict=True,
+    ordered=True,
+)
+SCHEDULE_SORT_BY = ("snapshot_at", "espn_event_id")
+
+_INT64 = ("espn_event_id", "espn_athlete_id", "season", "team_key", "minutes", "yellows")
+_NULLABLE_INT = ("home_team_key", "away_team_key", "fixture_key", "minute_on", "minute_off")
+_TIMES = ("kickoff_time", "event_time", "available_at", "snapshot_at")
+_BOOLS = ("extra_time", "starter", "red", "second_yellow")
+
+
+def _frame(rows: list[dict], schema: pa.DataFrameSchema) -> pd.DataFrame:
+    """`rows` as a frame with exactly the schema's columns and dtypes (also when empty)."""
+    df = pd.DataFrame(rows, columns=list(schema.columns))
+    for name in df.columns:
+        if name in _INT64:
+            df[name] = df[name].astype("int64")
+        elif name in _NULLABLE_INT:
+            df[name] = df[name].astype("Int64")
+        elif name in _TIMES:
+            df[name] = pd.to_datetime(df[name], utc=True).astype(UTC_US)
+        elif name in _BOOLS:
+            df[name] = df[name].astype(bool)
+        else:
+            df[name] = df[name].astype(str)
+    return df
+
+
+def _sides(competitors: list[dict]) -> dict[str, str]:
+    return {c["homeAway"]: str(c["team"]["id"]) for c in competitors}
+
+
+def _summaries(
+    ctx: BuildContext, resolver: TeamResolver, problems: list[str]
+) -> tuple[list[dict], list[dict]]:
+    """Match and player rows from the newest completed summary of every event."""
+    fixture = ctx.table("fixture")
+    fixture_of = {
+        (int(s), int(h), int(a)): int(k)
+        for s, h, a, k in zip(
+            fixture["season"],
+            fixture["home_team_key"],
+            fixture["away_team_key"],
+            fixture["fixture_key"],
+            strict=True,
+        )
+    }
+    matches: list[dict] = []
+    players: list[dict] = []
+    for league, event_id in _item_dirs(ctx.store, "summary"):
+        path = ctx.store.latest(SOURCE, f"{league}/summary/{event_id}")
+        payload = ctx.store.read_json(path)
+        if not payload["header"]["competitions"][0]["status"]["type"].get("completed"):
+            continue
+        match, rows = parse_summary(payload, league)
+        home = resolver.find("espn", match["home_espn_id"])
+        away = resolver.find("espn", match["away_espn_id"])
+        fixture_key = None
+        if league == "eng.1":
+            fixture_key = fixture_of.get((match["season"], home or -1, away or -1))
+            if fixture_key is None:
+                problems.append(
+                    f"eng.1 event {match['espn_event_id']} ({match['home_espn_id']} v "
+                    f"{match['away_espn_id']}, {match['kickoff_time']:%Y-%m-%d}) has no fixture"
+                )
+                continue
+        if home is None and away is None:
+            continue
+        times = {
+            "event_time": match["kickoff_time"],
+            "available_at": match["kickoff_time"] + AVAILABLE_AFTER,
+        }
+        matches.append(
+            {**match, "home_team_key": home, "away_team_key": away, "fixture_key": fixture_key}
+            | times
+        )
+        for row in rows:
+            team_key = resolver.find("espn", row.pop("espn_team_id"))
+            if team_key is not None:
+                players.append(
+                    {**row, "season": match["season"], "league": league, "team_key": team_key}
+                    | times
+                )
+    return matches, players
+
+
+def _schedule(ctx: BuildContext, resolver: TeamResolver) -> list[dict]:
+    """Every scoreboard file is a snapshot (taken at its timestamp) of the scheduled matches
+    of PL clubs it lists."""
+    rows: list[dict] = []
+    for league, period in _item_dirs(ctx.store, "scoreboard"):
+        for ts, path in ctx.store.entries(SOURCE, f"{league}/scoreboard/{period}"):
+            snapshot_at = pd.Timestamp(ts)
+            for ev in ctx.store.read_json(path).get("events", []):
+                kickoff = pd.Timestamp(ev["date"]).tz_convert("UTC")
+                if ev["status"]["type"].get("state") != "pre" or kickoff <= snapshot_at:
+                    continue
+                sides = _sides(ev["competitions"][0]["competitors"])
+                home = resolver.find("espn", sides["home"])
+                away = resolver.find("espn", sides["away"])
+                if home is None and away is None:
+                    continue
+                rows.append(
+                    {
+                        "snapshot_at": snapshot_at,
+                        "espn_event_id": int(ev["id"]),
+                        "league": league,
+                        "season": season_start_year(kickoff.to_pydatetime()),
+                        "kickoff_time": kickoff,
+                        "home_team_key": home,
+                        "away_team_key": away,
+                        "event_time": snapshot_at,
+                        "available_at": snapshot_at,
+                    }
+                )
+    return rows
+
+
+def build_espn_tables(ctx: BuildContext) -> dict[str, pd.DataFrame]:
+    """espn_match, espn_player_match and espn_schedule_snapshot (the mapping: `map_espn`)."""
+    resolver = TeamResolver(ctx.table("team_dim"))
+    problems: list[str] = []
+    matches, players = _summaries(ctx, resolver, problems)
+    if problems:
+        raise EspnBuildError(f"{len(problems)} ESPN problems: " + "; ".join(problems[:20]))
+    schedule = _frame(_schedule(ctx, resolver), SCHEDULE_SCHEMA)
+    return {
+        "espn_match": _frame(matches, MATCH_SCHEMA),
+        "espn_player_match": _frame(players, PLAYER_SCHEMA),
+        "espn_schedule_snapshot": schedule.drop_duplicates(["snapshot_at", "espn_event_id"]),
+    }
