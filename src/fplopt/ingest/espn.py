@@ -5,7 +5,9 @@ scoreboard of a run shares the run's start time, so a run is one schedule snapsh
 `espn/<league>/summary/<event_id>/<ts>.json.gz`. A summary is fetched for a completed event
 with a club of `team_ids` (every event of `eng.1`) kicking off from 1 July 2016, unless one
 with a completed status is archived already (resumable; a summary archived before the match
-finished is fetched again). Requests are paced by `pause_s`.
+finished is fetched again). Requests are paced by `pause_s` and tried at most three times
+(`EspnClient`). The daily job (`fplopt.ingest.jobs.run_daily`) runs this last, after
+post-lockdown, reading the club ids from config/teams.csv inside its own step.
 """
 
 from __future__ import annotations
