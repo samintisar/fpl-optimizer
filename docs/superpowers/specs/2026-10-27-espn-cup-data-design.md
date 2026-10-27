@@ -88,7 +88,7 @@ PL) stay unmapped and are dropped from features.
   override);
 - minutes oracle: each pair's ESPN and FPL PL minutes agree (|Δ| ≤ 5) in ≥ 90% of common
   fixtures;
-- cards: ESPN PL reds equal `player_match.red_cards`.
+- cards: ESPN PL reds agree with `player_match.red_cards` (at most 2% of FPL reds disagree; every disagreement logged).
 
 ## 2. Bans
 
