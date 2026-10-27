@@ -19,7 +19,9 @@ Tables:
   with source=espn. Athletes without PL minutes are not in it.
 
 Minutes (`parse_summary`): a key-event clock of s seconds is minute min(s // 60 + 1, end), end =
-120 after extra time else 90. A starter is on from 0, a substitute from his substitution
+120 after extra time else 90: STATUS_FINAL_AET, or STATUS_FINAL_PEN with a non-shoot-out key
+event in period 3+ or a "Start Extra Time" event (an EFL Cup shoot-out straight after 90' has
+neither). A starter is on from 0, a substitute from his substitution
 (participants [in, out]); off at his own substitution, his red card or the end. A red after a
 yellow for the same player is a second yellow. Shoot-out events are ignored.
 
@@ -55,7 +57,8 @@ from fplopt.seasons import season_start_year
 
 log = logging.getLogger(__name__)
 
-EXTRA_TIME_STATUSES = frozenset({"STATUS_FINAL_AET", "STATUS_FINAL_PEN"})
+AFTER_EXTRA_TIME = "STATUS_FINAL_AET"
+ON_PENALTIES = "STATUS_FINAL_PEN"  # straight after 90' (EFL Cup) or after extra time
 
 
 def _minute(seconds: float, end: int) -> int:
@@ -70,11 +73,28 @@ def _season(payload: dict[str, Any], kickoff: pd.Timestamp) -> int:
     return int(year) if year is not None else season_start_year(kickoff.to_pydatetime())
 
 
+def _went_to_extra_time(status: str, events: list[dict]) -> bool:
+    """AET, or on penalties with a non-shoot-out key event in period 3+ (extra time; the
+    shoot-out is period 5) or a "Start Extra Time" event."""
+    if status == AFTER_EXTRA_TIME:
+        return True
+    if status != ON_PENALTIES:
+        return False
+    return any(
+        not ev.get("shootout")
+        and (
+            (ev.get("period") or {}).get("number", 0) >= 3
+            or ev.get("type", {}).get("text") == "Start Extra Time"
+        )
+        for ev in events
+    )
+
+
 def parse_summary(payload: dict[str, Any], league: str) -> tuple[dict, list[dict]]:
     """One summary -> its match row and one row per squad player (lineups, minutes, cards)."""
     competition = payload["header"]["competitions"][0]
     status = competition["status"]["type"]["name"]
-    end = 120 if status in EXTRA_TIME_STATUSES else 90
+    end = 120 if _went_to_extra_time(status, payload.get("keyEvents", [])) else 90
     kickoff = pd.Timestamp(competition["date"]).tz_convert("UTC")
     sides = _sides(competition["competitors"])
     match = {

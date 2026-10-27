@@ -26,9 +26,12 @@ def player(athlete_id, name, starter, sub_in=False, sub_out=False):
     }
 
 
-def key_event(text, seconds, team, *athletes, shootout=False):
+def key_event(text, seconds, team, *athletes, shootout=False, period=None):
+    if period is None:
+        period = 5 if shootout else 1 + (seconds >= 2700) + (seconds >= 5400) + (seconds >= 6300)
     return {
         "type": {"text": text},
+        "period": {"number": period},
         "clock": {"value": float(seconds)},
         "team": {"id": team},
         "participants": [{"athlete": {"id": str(a)}} for a in athletes],
@@ -143,6 +146,35 @@ def test_a_straight_red_is_not_a_second_yellow_and_extra_time_runs_to_120():
     assert match["extra_time"] and match["season"] == 2016
     assert rows[10]["red"] and not rows[10]["second_yellow"] and rows[10]["minutes"] == 21
     assert rows[21]["minutes"] == 120 - 84 and rows[21]["yellows"] == 0
+
+
+def shootout_payload(events, status="STATUS_FINAL_PEN"):
+    home = [player(10, "A", True, sub_out=True), player(11, "B", False, sub_in=True)]
+    events = [key_event("Substitution", 5000, "359", 11, 10), *events]
+    return summary_payload(6, "2024-09-17T18:45Z", "359", "1000", home, [], events, status=status)
+
+
+def test_a_shoot_out_straight_after_90_minutes_ends_at_90():
+    shootout = [key_event("Penalty - Scored", 5500, "359", 11, shootout=True)]
+    match, players = parse_summary(shootout_payload(shootout), "eng.league_cup")
+    rows = {p["espn_athlete_id"]: p for p in players}
+    assert not match["extra_time"]
+    assert (rows[11]["minute_off"], rows[11]["minutes"]) == (90, 90 - 84)
+
+
+def test_a_shoot_out_after_extra_time_ends_at_120():
+    for events in (
+        [key_event("Yellow Card", 6000, "359", 11)],  # an event in extra time (period 3)
+        [key_event("Start Extra Time", 5400, "359", period=2)],
+    ):
+        match, players = parse_summary(shootout_payload(events), "eng.league_cup")
+        rows = {p["espn_athlete_id"]: p for p in players}
+        assert match["extra_time"] and rows[11]["minutes"] == 120 - 84
+
+
+def test_after_extra_time_without_a_shoot_out_ends_at_120():
+    match, _ = parse_summary(shootout_payload([], status="STATUS_FINAL_AET"), "eng.fa")
+    assert match["extra_time"]
 
 
 ESPN_OF = dict(
