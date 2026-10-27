@@ -16,6 +16,7 @@ from fplopt.models.shares import (
     SHARES_COLUMNS,
     SharesFit,
     SharesParams,
+    _price_model,
     fit_shares,
     marcel_shares,
     match_xg,
@@ -256,6 +257,38 @@ def test_price_par_sets_the_finishing_par_by_price():
     plain = dataclasses.replace(fit, price_finishing=())
     out = marcel_shares(rows, POOL, plain, SEASON).set_index("player_key")
     assert out.loc[1, "g"] == pytest.approx(no_fin.loc[1, "g"] * (7.5 + 25 * 0.9) / (7.5 + 25))
+
+
+def test_price_par_quadratic_bends_the_par_by_price():
+    rows = share_rows(1, 10, 2023, 10, 0.75, goals=0.75)
+    table = ((4, np.log(0.8), 0.5, 70.0),)
+    base = toy_fit(finishing_prior=25.0, position_par=True, price_par=True)
+    fit = dataclasses.replace(base, price_finishing=table, price_finishing_curve=((4, 0.3),))
+    out = marcel_shares(rows, POOL, fit, SEASON).set_index("player_key")
+    no_fin = marcel_shares(rows, POOL, toy_fit(), SEASON).set_index("player_key")
+    z = (90 - 70) / 10
+    par = 0.8 * np.exp(0.5 * z + 0.3 * z**2)
+    assert out.loc[1, "g"] == pytest.approx(no_fin.loc[1, "g"] * (7.5 + 25 * par) / (7.5 + 25))
+    # The setting off: the log-linear par.
+    off = dataclasses.replace(
+        fit, params=dataclasses.replace(fit.params, price_par_quadratic=False)
+    )
+    out = marcel_shares(rows, POOL, off, SEASON).set_index("player_key")
+    par = 0.8 * np.exp(0.5 * z)
+    assert out.loc[1, "g"] == pytest.approx(no_fin.loc[1, "g"] * (7.5 + 25 * par) / (7.5 + 25))
+
+
+def test_quadratic_price_model_recovers_a_convex_rate():
+    price = np.repeat(np.arange(45.0, 125.0, 5.0), 20)
+    z = (price - 80.0) / 10
+    d = np.full(len(price), 10.0)
+    seasons = pd.DataFrame({"price": price, "x": d * np.exp(-0.2 + 0.05 * z + 0.02 * z**2), "d": d})
+    a, b, center, c = _price_model(seasons, "x", "d", quadratic=True)
+    zc = (price - center) / 10
+    fitted = np.exp(a + b * zc + c * zc**2)
+    assert c > 0.01
+    assert np.allclose(fitted, seasons["x"] / d, rtol=0.05)
+    assert len(_price_model(seasons, "x", "d")) == 3
 
 
 def test_season_weights_and_goal_fallback():

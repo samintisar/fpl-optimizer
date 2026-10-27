@@ -57,7 +57,8 @@ their goals to forwards (E[goals] / realized FWD 0.94, MID 1.06 at h0;
 results/research/diag-finish-pos.txt, diag-goals-pos.txt). With `price_par` the par is
 also by price: per position a quasi-Poisson np goals ~ npxG·exp(a + b·z) over the same
 rows' player-seasons (`SharesFit.price_finishing`, like the price prior; positions with
-under `PAR_PRIOR` npxG keep the position par).
+under `PAR_PRIOR` npxG keep the position par). With `price_par_quadratic` that regression
+has a c·z² term (`SharesFit.price_finishing_curve`): the par is convex in price.
 
 **Team consistency** (`predict_shares`, per team-fixture over the club's pool players, f =
 e_minutes / 90 from the minutes frame, the expected XI by minutes):
@@ -206,6 +207,11 @@ class SharesParams:
     # finish below npxG, premium ones above (develop 2021-22 h0: bench MID <= 5.0 np goals /
     # npxG 0.74, MID >= 9.5 1.10, FWD >= 9.5 1.06; results/research/diag-goals-price.txt).
     price_par: bool = True
+    # With price_par: a z² term in the finishing par's price regression (SharesFit.
+    # price_finishing_curve). The par is convex in price: forward starters at £5.0-8.0m finish
+    # at 0.80 of npxG, premium ones at 1.00, steeper than the log-linear fit's +2.5-4 % per
+    # £1m (develop 2017-22, results/research/diag-goals-price-pp.txt).
+    price_par_quadratic: bool = True
 
     def __post_init__(self) -> None:
         if not self.season_weights or any(w < 0 for w in self.season_weights):
@@ -246,6 +252,8 @@ class SharesFit:
     position_finishing: tuple[tuple[int, float], ...] = field(default=())  # np goals / npxG
     # np goals / npxG by position and price: (element_type, a, b, center), as `price_goal`
     price_finishing: tuple[tuple[int, float, float, float], ...] = field(default=())
+    # With price_par_quadratic: (element_type, c), the par × exp(c·z²) on top of price_finishing
+    price_finishing_curve: tuple[tuple[int, float], ...] = field(default=())
 
 
 # --- inputs ---------------------------------------------------------------------------------
@@ -542,26 +550,34 @@ def _rows(
 # --- the Marcel prior -----------------------------------------------------------------------
 
 
-def _price_model(seasons: pd.DataFrame, x: str, d: str) -> tuple[float, float, float]:
+def _price_model(
+    seasons: pd.DataFrame, x: str, d: str, quadratic: bool = False
+) -> tuple[float, ...]:
     """(a, b, center): quasi-Poisson X ~ D·exp(a + b·(price − center)/10) by Newton steps
-    from a = log ΣX/ΣD, b = 0, with a small ridge on b; `seasons` has price, x, d."""
+    from a = log ΣX/ΣD, b = 0, with a small ridge on b; `seasons` has price, x, d. With
+    `quadratic`, (a, b, center, c): a c·z² term in the exponent, ridged like b."""
     rows = seasons[(seasons[d] > 0) & seasons["price"].notna()]
     if rows.empty or rows[x].sum() <= 0:
         total = float(seasons[x].sum()) / max(float(seasons[d].sum()), RATE_EPS)
-        return float(np.log(max(total, RATE_EPS))), 0.0, 0.0
+        flat = (float(np.log(max(total, RATE_EPS))), 0.0, 0.0)
+        return (*flat, 0.0) if quadratic else flat
     weights = rows[d].to_numpy(dtype="float64")
     price = rows["price"].to_numpy(dtype="float64")
     center = float(np.average(price, weights=weights))
     z = (price - center) / PRICE_SCALE
     target = rows[x].to_numpy(dtype="float64")
-    theta = np.array([np.log(target.sum() / weights.sum()), 0.0])
-    design = np.column_stack([np.ones_like(z), z])
-    ridge = np.diag([0.0, PRICE_RIDGE])
+    columns = [np.ones_like(z), z, z**2] if quadratic else [np.ones_like(z), z]
+    theta = np.zeros(len(columns))
+    theta[0] = np.log(target.sum() / weights.sum())
+    design = np.column_stack(columns)
+    ridge = np.diag([0.0] + [PRICE_RIDGE] * (len(columns) - 1))
     for _ in range(PRICE_ITERATIONS):
         mu = weights * np.exp(design @ theta)
         gradient = design.T @ (mu - target) + ridge @ theta
         hessian = (design * mu[:, None]).T @ design + ridge
         theta = theta - np.linalg.solve(hessian, gradient)
+    if quadratic:
+        return float(theta[0]), float(theta[1]), center, float(theta[2])
     return float(theta[0]), float(theta[1]), center
 
 
@@ -570,6 +586,19 @@ def _price_prior(table: tuple, element_type: np.ndarray, price: np.ndarray) -> n
     for position, a, b, center in table:
         mask = element_type == position
         out[mask] = np.exp(a + b * (price[mask] - center) / PRICE_SCALE)
+    return out
+
+
+def _price_curve(
+    table: tuple, curve: tuple, element_type: np.ndarray, price: np.ndarray
+) -> np.ndarray:
+    """exp(c·z²) per row, z = (price − the position's center) / 10; 1 where no curve."""
+    out = np.ones(len(element_type))
+    lookup = dict(curve)
+    for position, _a, _b, center in table:
+        mask = element_type == position
+        z = (price[mask] - center) / PRICE_SCALE
+        out[mask] = np.exp(lookup.get(position, 0.0) * z**2)
     return out
 
 
@@ -651,6 +680,10 @@ def marcel_shares(
         par = np.array([lookup.get(int(e), 1.0) if e == e else 1.0 for e in element_type])
         if params.price_par and fit.price_finishing:
             by_price = _price_prior(fit.price_finishing, element_type, price)
+            if params.price_par_quadratic and fit.price_finishing_curve:
+                by_price = by_price * _price_curve(
+                    fit.price_finishing, fit.price_finishing_curve, element_type, price
+                )
             par = np.where(np.isnan(by_price), par, by_price)
     finishing = (
         np.ones(len(out))
@@ -726,7 +759,7 @@ def fit_shares(view: AsOfView, params: SharesParams | None = None) -> SharesFit:
     recent = share_rows[share_rows["season"] > season - FIT_SEASONS]
     team_output = _ratio(recent["d"], recent["on_pitch"], 1.3)
     position_goal, position_assist, price_goal, price_assist = [], [], [], []
-    position_finishing, price_finishing = [], []
+    position_finishing, price_finishing, price_finishing_curve = [], [], []
     for position, group in recent.groupby("element_type", sort=True):
         if position != position:
             continue
@@ -771,9 +804,12 @@ def fit_shares(view: AsOfView, params: SharesParams | None = None) -> SharesFit:
             .merge(first_price, on=["player_key", "season"], how="left")
         )
         if finishing_seasons["fin_xg"].sum() >= PAR_PRIOR:  # keepers: no par by price
-            price_finishing.append(
-                (int(position), *_price_model(finishing_seasons, "fin", "fin_xg"))
+            model = _price_model(
+                finishing_seasons, "fin", "fin_xg", quadratic=params.price_par_quadratic
             )
+            price_finishing.append((int(position), *model[:3]))
+            if params.price_par_quadratic:
+                price_finishing_curve.append((int(position), model[3]))
         seasons = (
             group.assign(
                 xg=group["x_goals"] * wg,
@@ -860,6 +896,7 @@ def fit_shares(view: AsOfView, params: SharesParams | None = None) -> SharesFit:
         coverage=coverage,
         position_finishing=tuple(position_finishing),
         price_finishing=tuple(price_finishing),
+        price_finishing_curve=tuple(price_finishing_curve),
     )
 
 
