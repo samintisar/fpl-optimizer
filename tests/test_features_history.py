@@ -91,8 +91,48 @@ def league(rows: list[dict], n_gws: int = 12, seasons: tuple[int, ...] = (SEASON
         "player_match": player_match,
         "player_gw": player_gw.reset_index(drop=True),
         "player_season": player_season.reset_index(drop=True),
+        "schedule": league_schedule(player_match, gameweeks),
+        "fixture_snapshot": synthetic_tables(seasons=(2023,), n_clubs=2)["fixture_snapshot"],
         **espn_tables(),
     }
+
+
+def league_schedule(player_match: pd.DataFrame, gameweeks: pd.DataFrame) -> pd.DataFrame:
+    """The final schedule of `league`: the fixtures of the rows (home = the fixture's first
+    team, away = its second, 0 if it has one only), and for every team of the rows a fixture
+    in each of its other GWs (`league`'s default key and kickoff)."""
+    sides = player_match.drop_duplicates(["fixture_key", "team_key"])
+    played = set(zip(sides["season"], sides["gw"], sides["team_key"], strict=True))
+    rows = [
+        {
+            "fixture_key": key,
+            "season": f["season"].iloc[0],
+            "gw": f["gw"].iloc[0],
+            "kickoff_time": f["kickoff_time"].iloc[0],
+            "home_team_key": f["team_key"].iloc[0],
+            "away_team_key": f["team_key"].iloc[1] if len(f) > 1 else 0,
+        }
+        for key, f in sides.groupby("fixture_key")
+    ]
+    for season, gw in zip(gameweeks["season"], gameweeks["gw"], strict=True):
+        for team_key in sorted(sides["team_key"].unique()):
+            if (season, gw, team_key) not in played:
+                rows.append(
+                    {
+                        "fixture_key": season * 10_000 + gw * 100 + team_key,
+                        "season": season,
+                        "gw": gw,
+                        "kickoff_time": deadline(gw, season) + pd.Timedelta(days=1),
+                        "home_team_key": team_key,
+                        "away_team_key": 0,
+                    }
+                )
+    schedule = pd.DataFrame(rows).assign(schedule_source="final")
+    schedule["gw_index"] = schedule["gw"]
+    schedule["kickoff_time"] = schedule["kickoff_time"].astype(UTC_US)
+    return schedule.assign(
+        event_time=schedule["kickoff_time"], available_at=gameweeks["available_at"].iloc[0]
+    )
 
 
 def frame_at(tables: dict, gw: int, season: int = SEASON) -> pd.DataFrame:
@@ -352,9 +392,91 @@ def test_prediction_frame_has_one_row_per_pool_player_and_horizon_fixture(synthe
     assert frame.equals(prediction_frame(view))
 
 
-def test_prediction_lags_match_the_training_rows_of_that_gameweek(synthetic):
-    gameweeks = synthetic["gameweek"]
-    store = DataStore(tables=synthetic)
+def cup_data(tables: dict, seed: int = 0) -> dict:
+    """`tables` (the synthetic league) plus cup and European matches of clubs 1-4 around
+    the GWs (midweek, Thursday, the morning of a deadline; known 12 hours to 14 days before
+    kickoff; one not played) with ESPN rows of the club's squad (mapped, one athlete not)."""
+    rng = np.random.default_rng(seed)
+    deadlines = tables["gameweek"].sort_values("deadline_time")["deadline_time"].tolist()
+    players = tables["player_gw"].drop_duplicates("player_key")
+    leagues = ["eng.league_cup", "eng.fa", "uefa.champions", "uefa.europa"]
+    matches, rows = [], []
+    for at in deadlines[:-1]:
+        for team_key in (1, 2, 3, 4):
+            if rng.random() < 0.3:
+                continue
+            kickoff = at + pd.Timedelta(days=float(rng.choice([-0.5, 4.5, 6.0])))
+            event = 9000 + len(matches)
+            played = event != 9003
+            matches.append(
+                {
+                    "espn_event_id": event,
+                    "league": leagues[int(rng.integers(len(leagues)))],
+                    "season": int(tables["gameweek"]["season"].iloc[0]),
+                    "kickoff_time": kickoff,
+                    "home_team_key": team_key,
+                    "away_team_key": None,
+                    "played": played,
+                    "event_time": kickoff,
+                    "available_at": kickoff - pd.Timedelta(days=float(rng.choice([0.5, 3, 14]))),
+                }
+            )
+            if not played:
+                continue
+            squad = players.loc[players["team_key"] == team_key, "player_key"].to_numpy()
+            starters = set(rng.choice(squad, size=min(11, len(squad)), replace=False))
+            for key in squad:
+                started = key in starters
+                minutes = int(rng.integers(45, 91)) if started else int(rng.choice([0, 0, 15]))
+                rows.append(
+                    {
+                        "espn_athlete_id": int(key) + 7_000_000,
+                        "espn_event_id": event,
+                        "season": matches[-1]["season"],
+                        "league": matches[-1]["league"],
+                        "team_key": team_key,
+                        "athlete_name": f"A{key}",
+                        "starter": started,
+                        "minute_on": 0 if started else None,
+                        "minute_off": minutes if started else None,
+                        "minutes": None if rng.random() < 0.03 else minutes,
+                        "yellows": 0,
+                        "red": False,
+                        "second_yellow": False,
+                        "event_time": kickoff,
+                        "available_at": kickoff + pd.Timedelta(hours=3),
+                    }
+                )
+    athletes = sorted({r["espn_athlete_id"] for r in rows})[1:]  # the first: unmapped
+    epoch = pd.Timestamp(0, tz="UTC")
+    mapping = espn.empty_map()
+    mapping = pd.concat(
+        [
+            mapping,
+            pd.DataFrame(
+                {
+                    "espn_athlete_id": athletes,
+                    "player_key": [a - 7_000_000 for a in athletes],
+                    "event_time": epoch,
+                    "available_at": epoch,
+                }
+            ),
+        ],
+        ignore_index=True,
+    ).astype(mapping.dtypes.to_dict())
+    return {
+        **tables,
+        "club_match": espn._frame(matches, espn.CLUB_MATCH_SCHEMA),
+        "espn_player_match": espn._frame(rows, espn.PLAYER_SCHEMA),
+        "espn_map": mapping,
+    }
+
+
+@pytest.mark.parametrize("cups", [False, True])
+def test_prediction_lags_match_the_training_rows_of_that_gameweek(synthetic, cups):
+    tables = cup_data(synthetic) if cups else synthetic
+    gameweeks = tables["gameweek"]
+    store = DataStore(tables=tables)
     for gw in (2, 6, 9):
         at = gameweeks.loc[gameweeks["gw"] == gw, "deadline_time"].iloc[0]
         predicted = prediction_frame(store.as_of(at))
@@ -528,3 +650,110 @@ def test_training_rows_carry_the_served_ban():
     without = frame_at(sent_off(league(card_rows({5: (1, 1)}, n_gws=8), n_gws=12), False, []), 9)
     mine = without[without["player_key"] == 1].set_index("gw")
     assert mine.loc[5:9, "ban_kind"].tolist() == [0.0, 2.0, 1.0, 1.0]
+
+
+# --- congestion and cup matches -----------------------------------------------------------
+
+DAY = pd.Timedelta(days=1)
+
+
+def kickoff(gw: int) -> pd.Timestamp:
+    """`league`'s kickoff of a GW (one day after its deadline)."""
+    return deadline(gw) + DAY
+
+
+def club_matches(tables: dict, matches: list[dict]) -> dict:
+    """`tables` plus `club_match` rows: team, at (kickoff); optional league (default
+    eng.league_cup), known (available_at; default 14 days before kickoff), played (default
+    True)."""
+    rows = [
+        {
+            "espn_event_id": 9500 + i,
+            "league": m.get("league", "eng.league_cup"),
+            "season": SEASON,
+            "kickoff_time": m["at"],
+            "home_team_key": m["team"],
+            "away_team_key": None,
+            "played": m.get("played", True),
+            "event_time": m["at"],
+            "available_at": m.get("known", m["at"] - 14 * DAY),
+        }
+        for i, m in enumerate(matches)
+    ]
+    return {**tables, "club_match": espn._frame(rows, espn.CLUB_MATCH_SCHEMA)}
+
+
+def by_gw(frame: pd.DataFrame, player: int = 1) -> pd.DataFrame:
+    return frame[frame["player_key"] == player].set_index("gw")
+
+
+def test_without_espn_data_congestion_is_the_league_schedule():
+    frame = frame_at(league(history_rows()), 12)
+    assert frame["rest_days_all"].equals(frame["rest_days"])
+    assert (frame["europe_week"] == 0).all()
+    assert by_gw(frame)["days_to_next"].tolist() == [7.0] * 8  # GW9 is scheduled
+    last = by_gw(frame_at(league(history_rows(), n_gws=8), 12))
+    assert last.loc[8, "days_to_next"] == 30.0  # the season's last fixture
+
+
+def test_a_european_match_three_days_before_a_fixture():
+    tables = club_matches(
+        league(history_rows()), [{"team": 1, "at": kickoff(6) - 3 * DAY, "league": "uefa.europa"}]
+    )
+    mine = by_gw(frame_at(tables, 12))
+    assert mine.loc[6, "rest_days"] == 7.0
+    assert mine.loc[6, "rest_days_all"] == pytest.approx(3.0)
+    assert mine.loc[6, "europe_week"] == 1.0
+    assert mine.loc[5, "days_to_next"] == pytest.approx(4.0)
+    assert mine.loc[5, "europe_week"] == 1.0  # 4 days after GW5's kickoff
+    assert mine.loc[7, "europe_week"] == 0.0
+    assert mine.loc[7, "rest_days_all"] == 7.0
+
+
+def test_a_cup_match_two_days_after_a_fixture():
+    tables = club_matches(league(history_rows()), [{"team": 1, "at": kickoff(6) + 2 * DAY}])
+    mine = by_gw(frame_at(tables, 12))
+    assert mine.loc[6, "days_to_next"] == pytest.approx(2.0)
+    assert mine.loc[6, "europe_week"] == 0.0  # a domestic cup
+    assert mine.loc[7, "rest_days_all"] == pytest.approx(5.0)
+
+
+def test_a_cup_match_not_yet_known_is_ignored():
+    at = kickoff(6) + 2 * DAY
+    tables = club_matches(
+        league(history_rows()), [{"team": 1, "at": at, "known": deadline(6) + DAY}]
+    )
+    mine = by_gw(frame_at(tables, 12))
+    assert mine.loc[6, "days_to_next"] == 7.0  # drawn after GW6's deadline
+    assert mine.loc[7, "rest_days_all"] == pytest.approx(5.0)  # played before GW7's
+
+
+def test_a_match_not_played_is_ignored_once_it_is_past():
+    tables = club_matches(
+        league(history_rows()), [{"team": 1, "at": kickoff(6) - 3 * DAY, "played": False}]
+    )
+    mine = by_gw(frame_at(tables, 12))
+    assert mine.loc[6, "rest_days_all"] == 7.0  # postponed: past at GW6's deadline
+    assert mine.loc[5, "days_to_next"] == pytest.approx(4.0)  # still scheduled at GW5's
+
+
+def predicted(tables: dict, player: int = 1) -> pd.DataFrame:
+    frame = prediction_frame(DataStore(tables=tables).as_of(deadline(6)))
+    return frame[frame["player_key"] == player].set_index("horizon")
+
+
+def test_congestion_in_the_prediction_frame():
+    plain = predicted(prediction_tables({}))
+    assert plain["rest_days_all"].equals(plain["rest_days"])
+    assert plain["days_to_next"].tolist() == [7.0] * 6  # GW6-11; the schedule has GW12
+    assert (plain["europe_week"] == 0).all()
+    europe = {"team": 1, "at": kickoff(7) - 3 * DAY, "league": "uefa.champions"}
+    mine = predicted(club_matches(prediction_tables({}), [europe]))
+    assert mine.loc[1, "rest_days_all"] == pytest.approx(3.0)
+    assert mine.loc[[0, 1, 2], "europe_week"].tolist() == [1.0, 1.0, 0.0]
+    assert mine.loc[0, "days_to_next"] == pytest.approx(4.0)
+    unknown = {**europe, "known": deadline(6) + pd.Timedelta(hours=1)}
+    mine = predicted(club_matches(prediction_tables({}), [unknown]))
+    assert mine.loc[1, "rest_days_all"] == 7.0
+    assert mine.loc[0, "days_to_next"] == 7.0
+    assert (mine["europe_week"] == 0).all()
