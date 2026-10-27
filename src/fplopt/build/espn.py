@@ -31,10 +31,14 @@ leaves his `minutes` (and the unknown minute_on/off) null; the count per league 
 matcher and the minutes check skip null rows.
 
 Checks (`espn_problems`, fail the build), for seasons with any `eng.1` match: every finished PL
-fixture has one; every FPL player with minutes is mapped (or exempt by an override with a blank
+fixture that kicked off over `GRACE` (2 days) before the newest ESPN `eng.1` match has one
+(matches are archived daily, so the last days may be missing); for each season before the
+newest of them: every FPL player with minutes is mapped (or exempt by an override with a blank
 source_id); every auto pair agrees on minutes (±5) in >= `MIN_MINUTES_AGREEMENT` of the
-fixtures where both have a row (ESPN minutes known) and either played; ESPN and FPL red
-cards disagree in at most `MAX_RED_DISAGREEMENT` of FPL reds (each disagreement logged).
+fixtures where both have a row (ESPN minutes known) and either played; ESPN and FPL red cards
+disagree in at most `MAX_RED_DISAGREEMENT` of FPL reds (each disagreement logged). The newest
+season's player checks (in progress, its data still settling) are logged as warnings, so they
+never fail the build. `espn` is the last table of `fplopt.build.ORDER`.
 """
 
 from __future__ import annotations
@@ -436,6 +440,7 @@ ID = "espn_athlete_id"
 MIN_MINUTES_AGREEMENT = 0.9  # auto pairs: share of common fixtures with |Δ minutes| <= 5
 MAX_RED_DISAGREEMENT = 0.02  # disagreeing rows, as a share of FPL red cards
 MAX_LISTED = 20
+GRACE = pd.Timedelta(days=2)  # fixtures this close to the newest ESPN eng.1 match may be missing
 
 MAP_SCHEMA = understat.MAP_SCHEMA.rename_columns({"understat_id": ID})
 MAP_SORT_BY = (ID,)
@@ -490,15 +495,20 @@ def map_espn(ctx: BuildContext, tables: dict[str, pd.DataFrame]) -> pd.DataFrame
 def espn_problems(
     ctx: BuildContext, tables: dict[str, pd.DataFrame], mapping: pd.DataFrame
 ) -> list[str]:
-    """The build checks (module docstring) over seasons with any eng.1 match; empty = valid."""
+    """The build checks (module docstring) over seasons with any eng.1 match; empty = valid.
+    The player checks of the newest covered season are logged as warnings instead."""
     match = tables["espn_match"]
-    covered = set(match.loc[match["league"] == "eng.1", "season"])
+    pl = match[match["league"] == "eng.1"]
+    covered = set(pl["season"])
     if not covered:
         return []
     problems: list[str] = []
 
     fixture = ctx.table("fixture")
-    finished = fixture[fixture["finished"] & fixture["season"].isin(covered)]
+    cutoff = pl["kickoff_time"].max() - GRACE
+    finished = fixture[
+        fixture["finished"] & fixture["season"].isin(covered) & (fixture["kickoff_time"] < cutoff)
+    ]
     missing = finished[~finished["fixture_key"].isin(set(match["fixture_key"].dropna()))]
     if len(missing):
         problems.append(
@@ -506,8 +516,22 @@ def espn_problems(
             f"{missing['fixture_key'].head(MAX_LISTED).tolist()}"
         )
 
+    newest = max(covered)
+    problems += _player_problems(ctx, tables, mapping, covered - {newest})
+    for warning in _player_problems(ctx, tables, mapping, {newest}):
+        log.warning("espn (season %d, in progress or newest): %s", newest, warning)
+    return problems
+
+
+def _player_problems(
+    ctx: BuildContext, tables: dict[str, pd.DataFrame], mapping: pd.DataFrame, seasons: set[int]
+) -> list[str]:
+    """The mapping, minutes and red-card checks over FPL's rows of `seasons`."""
+    if not seasons:
+        return []
+    problems: list[str] = []
     pm = ctx.table("player_match")
-    pm = pm[pm["season"].isin(covered)]
+    pm = pm[pm["season"].isin(seasons)]
     overrides = read_overrides(ctx.config_dir, source=SOURCE, id_col=ID)
     exempt = set(overrides.loc[overrides[ID].isna(), "player_key"].astype(int))
     mapped = mapping.dropna(subset=["player_key"]).astype({"player_key": "int64"})

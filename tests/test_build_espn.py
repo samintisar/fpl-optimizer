@@ -6,7 +6,7 @@ from synthetic_raw import REPO_CONFIG, RUN, TEAM_CODES, World
 from test_build_understat import ALL as UNDERSTAT_BUILD
 from test_build_understat import add_understat_season
 
-from fplopt.build import build
+from fplopt.build import ORDER, build
 from fplopt.build.espn import (
     AVAILABLE_AFTER,
     MAP_SCHEMA,
@@ -15,6 +15,7 @@ from fplopt.build.espn import (
     parse_summary,
 )
 from fplopt.build.teams import team_dim_from_config
+from fplopt.seasons import season_label
 
 
 def player(athlete_id, name, starter, sub_in=False, sub_out=False):
@@ -416,19 +417,26 @@ def test_schedule_snapshot_takes_the_events_season(world):
 # --- espn_map and the build checks ---------------------------------------------------------
 
 
-def pl_world(world, *, payload=None, skip=()):
+def pl_world(world, *, payload=None, skip=(), newer=False):
     """Season 2023 built through player_match / player_season (Understat files included, so
     the Understat builder passes) with an ESPN eng.1 summary for every fixture but the
-    `skip` indices (`payload(fx)`, default: one player a side, 90')."""
-    raw = world.add_vaastav_season(2023)
-    add_understat_season(world, 2023, raw, "2023-24")
+    `skip` indices (`payload(fx)`, default: one player a side, 90'). `newer`: season 2024
+    too, with an ESPN summary (`payload`) of its first fixture only (so 2023 is not the newest
+    season)."""
+    seasons = [2023, 2024] if newer else [2023]
+    for season in seasons:
+        raw = world.add_vaastav_season(season)
+        add_understat_season(world, season, raw, season_label(season))
     world.write_player_snapshot()
     build(UNDERSTAT_BUILD, world.ctx)
     fixtures = world.ctx.table("fixture")
-    for i, fx in enumerate(fixtures.itertuples(index=False)):
+    for i, fx in enumerate(fixtures[fixtures["season"] == 2023].itertuples(index=False)):
         if i not in skip:
             world.add_espn_summary("eng.1", (payload or pl_payload)(fx))
-    return fixtures
+    if newer:
+        first = next(fixtures[fixtures["season"] == 2024].itertuples(index=False))
+        world.add_espn_summary("eng.1", (payload or pl_payload)(first))
+    return fixtures[fixtures["season"] == 2023]
 
 
 def test_build_espn_maps_every_player_and_writes_four_tables(world):
@@ -454,16 +462,30 @@ def test_a_missing_pl_fixture_fails_the_build(world):
     assert not world.ctx.table_path("espn_map").exists()
 
 
+def test_a_fixture_missing_inside_the_grace_period_passes(world):
+    pl_world(world, skip={379})  # the season's last fixture: kicked off with the newest
+    build(["espn"], world.ctx)
+    assert len(world.ctx.table("espn_match")) == 379
+
+
+def without_club_1(fx):
+    out = pl_payload(fx)
+    gone = str(TEAM_CODES[0] * 10)
+    for roster in out["rosters"]:
+        roster["roster"] = [p for p in roster["roster"] if p["athlete"]["id"] != gone]
+    return out
+
+
+def test_an_fpl_player_missing_in_the_newest_season_only_warns(world, caplog):
+    pl_world(world, payload=without_club_1)
+    with caplog.at_level("WARNING", logger="fplopt.build.espn"):
+        build(["espn"], world.ctx)
+    assert "1 FPL players with minutes are not mapped: [100001]" in caplog.text
+    assert world.ctx.table_path("espn_map").exists()
+
+
 def test_an_fpl_player_missing_from_espn_fails_the_build(world):
-    gone = TEAM_CODES[0]
-
-    def payload(fx):
-        out = pl_payload(fx)
-        for roster in out["rosters"]:
-            roster["roster"] = [p for p in roster["roster"] if p["athlete"]["id"] != str(gone * 10)]
-        return out
-
-    pl_world(world, payload=payload)
+    pl_world(world, payload=without_club_1, newer=True)
     with pytest.raises(
         EspnBuildError, match=r"1 FPL players with minutes are not mapped: \[100001\]"
     ):
@@ -478,15 +500,7 @@ def test_an_override_exempts_an_fpl_player_without_espn_rows(world, tmp_path):
         "source,source_id,season,player_key,note\nespn,,,100001,not on ESPN\n", "utf-8"
     )
     world.ctx.config_dir = config
-    gone = TEAM_CODES[0]
-
-    def payload(fx):
-        out = pl_payload(fx)
-        for roster in out["rosters"]:
-            roster["roster"] = [p for p in roster["roster"] if p["athlete"]["id"] != str(gone * 10)]
-        return out
-
-    pl_world(world, payload=payload)
+    pl_world(world, payload=without_club_1, newer=True)
     build(["espn"], world.ctx)
     assert 100001 not in set(world.ctx.table("espn_map")["player_key"])
 
@@ -512,7 +526,7 @@ def substituted(minute, times):
 
 def test_minutes_that_disagree_too_often_fail_the_build(world):
     # 34 of 38 agree (89%): still an auto pair (overlap >= 0.8, shared >= 3), below 90%.
-    pl_world(world, payload=substituted(30, times=4))
+    pl_world(world, payload=substituted(30, times=4), newer=True)
     with pytest.raises(EspnBuildError, match=r"1 auto pairs agree on minutes in < 90% of fixtures"):
         build(["espn"], world.ctx)
 
@@ -546,10 +560,14 @@ def test_minutes_that_mostly_agree_pass(world):
 
 
 def test_an_espn_red_card_fpl_does_not_have_fails_the_build(world):
-    fixtures = pl_world(world, skip={0})
+    fixtures = pl_world(world, skip={0}, newer=True)
     world.add_espn_summary("eng.1", pl_payload(fixtures.iloc[0], minutes_home=88))
     with pytest.raises(EspnBuildError, match="red cards disagree in 1 of 0 FPL reds"):
         build(["espn"], world.ctx)
+
+
+def test_espn_is_built_last():
+    assert ORDER[-1] == "espn"
 
 
 def test_no_espn_data_builds_empty_tables(world):

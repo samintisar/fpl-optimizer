@@ -101,11 +101,12 @@ ORDER: list[str] = [
     "player_dim",
     "understat",
     "team_match",
-    # espn needs fixture, player_match and player_season.
-    "espn",
     "fixture_snapshot",
     "odds_snapshot",
     "team_rating",
+    # espn needs fixture, player_match and player_season; last, so a failing ESPN check
+    # cannot keep the other tables from being written.
+    "espn",
 ]
 
 
