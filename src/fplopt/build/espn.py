@@ -1,5 +1,32 @@
-"""ESPN summaries -> espn_match, espn_player_match, espn_schedule_snapshot, espn_map (spec
-2026-10-27 §1). See the module docstring's sections below for the tables and checks."""
+"""ESPN summaries and scoreboards (`fplopt.ingest.espn`) -> `espn_match`, `espn_player_match`,
+`espn_schedule_snapshot` and `espn_map` (spec §1:
+docs/superpowers/specs/2026-10-27-espn-cup-data-design.md).
+
+Tables:
+- `espn_match` (event, key `espn_event_id`): the newest completed summary of every match with a
+  side in team_dim (`TeamResolver.find("espn", team id)`; the other side's key is null for a
+  club outside the PL); `fixture_key` for `eng.1`, joined on (season, home, away) — an `eng.1`
+  match that does not join is a build error. `event_time` = kickoff, `available_at` = kickoff +
+  `AVAILABLE_AFTER`.
+- `espn_player_match` (event, key `espn_athlete_id`, `espn_event_id`): every squad player of a
+  side in team_dim, with the match's times.
+- `espn_schedule_snapshot` (snapshot): every scoreboard file is a snapshot at its timestamp of
+  the scheduled (`state` 'pre') matches of PL clubs after it.
+- `espn_map` (static): ESPN athlete -> player_key, the Understat matcher (`fplopt.build.understat`)
+  on ESPN's `eng.1` appearances (minutes > 0) against FPL's; overrides in config/overrides.csv
+  with source=espn. Athletes without PL minutes are not in it.
+
+Minutes (`parse_summary`): a key-event clock of s seconds is minute min(s // 60 + 1, end), end =
+120 after extra time else 90. A starter is on from 0, a substitute from his substitution
+(participants [in, out]); off at his own substitution, his red card or the end. A red after a
+yellow for the same player is a second yellow. Shoot-out events are ignored.
+
+Checks (`espn_problems`, fail the build), for seasons with any `eng.1` match: every finished PL
+fixture has one; every FPL player with minutes is mapped (or exempt by an override with a blank
+source_id); every auto pair agrees on minutes (±5) in >= `MIN_MINUTES_AGREEMENT` of the
+fixtures where both have a row and either played; ESPN and FPL red cards disagree in at most
+`MAX_RED_DISAGREEMENT` of FPL reds (each disagreement logged).
+"""
 
 from __future__ import annotations
 
