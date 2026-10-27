@@ -620,14 +620,17 @@ def test_club_match_known_after_the_previous_round_or_two_weeks_before_the_first
     out = out.set_index("espn_event_id")
     assert set(out.index) == {1, 2, 3}
     assert out.loc[1, "available_at"] == pd.Timestamp("2026-08-26T18:45Z") - FIRST_ROUND_NOTICE
-    # Round 3: known once both clubs' previous league-cup match kicked off (Liverpool: none).
-    assert out.loc[2, "available_at"] == pd.Timestamp("2026-08-26T18:45Z")
+    # Round 3: the latest over both sides: Chelsea's previous match kicked off 2026-08-26, but
+    # Liverpool has none (a late entrant), so 14 days before kickoff.
+    assert out.loc[2, "available_at"] == pd.Timestamp("2026-09-23T18:45Z") - FIRST_ROUND_NOTICE
     assert out.loc[3, "available_at"] == pd.Timestamp("2026-09-17T19:00Z") - FIRST_ROUND_NOTICE
     assert out["played"].all() and (out["event_time"] == out["kickoff_time"]).all()
 
 
 def test_club_match_adds_scheduled_matches_known_from_their_first_snapshot():
-    played = pd.DataFrame([cup(1, "2026-09-23T18:45Z", 8, None)])
+    played = pd.DataFrame(
+        [cup(1, "2026-09-23T18:45Z", 8, None), cup(0, "2026-09-22T18:45Z", 14, None)]
+    )
     snaps = pd.DataFrame(
         [
             {
@@ -643,7 +646,8 @@ def test_club_match_adds_scheduled_matches_known_from_their_first_snapshot():
     out = club_match(played, snaps).set_index("espn_event_id")
     assert not out.loc[2, "played"]
     assert out.loc[2, "kickoff_time"] == pd.Timestamp("2026-10-28T20:00Z")  # newest snapshot
-    # Rule: Chelsea's previous league-cup match (event 1) kicked off 2026-09-23 < first snapshot.
+    # Rule: the latest previous match of the two sides (event 1) kicked off 2026-09-23, before
+    # the first snapshot (2026-10-01), so the rule time wins.
     assert out.loc[2, "available_at"] == pd.Timestamp("2026-09-23T18:45Z")
 
 

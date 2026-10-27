@@ -400,8 +400,9 @@ def club_match(played: pd.DataFrame, schedule: pd.DataFrame) -> pd.DataFrame:
     previous = sides.groupby(["team_key", "league", "season"])["kickoff_time"].shift()
     rule = previous.fillna(sides["kickoff_time"] - FIRST_ROUND_NOTICE)
     rule = rule.groupby(sides["espn_event_id"]).max()
-    known = pd.to_datetime(out["espn_event_id"].map(rule), utc=True)
-    seen = pd.to_datetime(out["espn_event_id"].map(first_seen), utc=True)
+    known = pd.Series(rule.reindex(out["espn_event_id"]).to_numpy(), index=out.index)
+    seen = pd.Series(first_seen.reindex(out["espn_event_id"]).to_numpy(), index=out.index)
+    known, seen = pd.to_datetime(known, utc=True), pd.to_datetime(seen, utc=True)
     known = known.where(~(seen < known), seen)  # NaT compares False: no snapshot, keep the rule
     latest = pd.to_datetime(out["kickoff_time"], utc=True) - pd.Timedelta(microseconds=1)
     out["available_at"] = known.where(known < latest, latest)
