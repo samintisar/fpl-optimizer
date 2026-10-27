@@ -63,7 +63,9 @@ data) is 1 certain match, a straight red 1 certain + 2 likely; PL yellow-card ba
 (`fplopt.features.bans.BAN_RULES`) are certain and served in league fixtures only. Training
 rows carry `ban_kind` and `banned` (= `ban_kind` > 0; bans from cards before the row's
 kickoff, a double's second fixture included); prediction rows `ban_kind` per horizon fixture
-(from the cards of the last `BAN_LOOKBACK` visible at the deadline).
+(from the cards of the last `BAN_LOOKBACK` visible at the deadline), without the bans FPL's
+newest flag says are over (`_flag_cleared`: fully available over `FLAG_SETTLE` after the card;
+rescinded reds and one-match straight reds, which ESPN cannot tell apart).
 
 **Targets** (training): `minutes`, `start` (0/1), `sixty` (minutes ≥ 60), `sub` (minutes >
 0 without a start); `start_inferred` marks inferred starts.
@@ -111,6 +113,8 @@ CONTINUITY_WINDOW = 5  # club fixtures in club_continuity
 # no club has gone that long without 3 domestic matches, the 2020 suspension included),
 # yellow totals from this and last season's rows.
 BAN_LOOKBACK = pd.Timedelta(days=200)
+# A flag counts once FPL has had this long after the card to set 's' for a ban that runs.
+FLAG_SETTLE = pd.Timedelta(hours=12)
 
 MATCH_COLUMNS = (
     "player_key",
@@ -444,12 +448,14 @@ def _bans(
     league_rows: pd.DataFrame,
     league_fixtures: pd.DataFrame,
     since: pd.Timestamp | None = None,
+    flags: bool = False,
 ) -> pd.DataFrame:
     """player_key, fixture_key, ban_kind (`fplopt.features.bans.serve_bans`) of the bans
     from the cards in `league_rows` (history's match rows) and the visible, mapped ESPN
     domestic cup reds (ESPN's PL rows tell a second yellow from a straight red), served over
     each club's `league_fixtures` (team_key, fixture_key, kickoff_time) and its visible
-    domestic cup matches. Bans, ESPN rows and cup matches from `since` on (None: all)."""
+    domestic cup matches. Bans, ESPN rows and cup matches from `since` on (None: all).
+    `flags`: drop the bans FPL says are over (`_flag_cleared`)."""
     reds = view.table("espn_player_match", columns=list(ESPN_RED_COLUMNS))
     reds = reds[reds["red"].to_numpy(dtype=bool)]
     if since is not None:
@@ -476,7 +482,32 @@ def _bans(
     events = ban_events(rows, red_kinds, cup_reds)
     if since is not None:
         events = events[events["time"] >= since]
-    return serve_bans(events, club_timelines(league_fixtures, _cup_sides(view, since)))
+    served = serve_bans(events, club_timelines(league_fixtures, _cup_sides(view, since)))
+    return _flag_cleared(view, served, events) if flags else served
+
+
+def _flag_cleared(view: AsOfView, served: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
+    """`served` without the players FPL shows fully available (status 'a', chance blank or
+    100) in their newest snapshot before the deadline, taken over `FLAG_SETTLE` after their
+    latest card that bans: the ban is over (served in a cup match FPL knows of, or a one-match
+    ban) or was rescinded on appeal. ESPN cannot tell those apart; FPL's flag can (a ban still
+    running shows 's')."""
+    if served.empty:
+        return served
+    latest_card = events.groupby("player_key")["time"].max()
+    snaps = view.latest(
+        "player_snapshot",
+        by=["player_key"],
+        columns=["snapshot_at", "status", "chance_of_playing_next_round"],
+    )
+    snaps = snaps[snaps["player_key"].isin(set(served["player_key"]))]
+    snaps = snaps.astype({"player_key": "int64"}).set_index("player_key")
+    chance = snaps["chance_of_playing_next_round"]
+    available = (snaps["status"] == "a") & (chance.isna() | (chance >= 100))
+    card = pd.to_datetime(latest_card.reindex(snaps.index), utc=True)
+    settled = pd.to_datetime(snaps["snapshot_at"], utc=True) > card + FLAG_SETTLE
+    cleared = set(snaps.index[(available & settled).to_numpy(dtype=bool)])
+    return served[~served["player_key"].isin(cleared)].reset_index(drop=True)
 
 
 def _with_bans(frame: pd.DataFrame, bans: pd.DataFrame) -> pd.DataFrame:
@@ -664,7 +695,7 @@ def prediction_frame(view: AsOfView) -> pd.DataFrame:
         ignore_index=True,
     ).drop_duplicates(["team_key", "fixture_key"])
     league_rows = history[history["season"].to_numpy() >= season - 1]
-    out = _with_bans(out, _bans(view, league_rows, league_fixtures, since))
+    out = _with_bans(out, _bans(view, league_rows, league_fixtures, since, flags=True))
     dtypes = {
         **dict(PREDICTION_KEYS),
         **{name: "float64" for name in (*LAG_FEATURES, "ban_kind")},

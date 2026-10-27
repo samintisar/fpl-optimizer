@@ -150,6 +150,27 @@ def regular_starter(tables, season=2023, gw=4):
     return int(started[started == 90].index[0])
 
 
+def flag_after_card(tables, key, at, status):
+    """FPL's flag for `key` in every snapshot after the carded match (`at` rows of
+    player_match): 's' while a ban runs, 'a' once it is over or rescinded."""
+    kickoff = tables["player_match"].loc[at, "kickoff_time"].max()
+    snaps = tables["player_snapshot"]
+    later = (snaps["player_key"] == key) & (snaps["snapshot_at"] > kickoff)
+    snaps.loc[later, "status"] = status
+
+
+def test_a_ban_fpl_shows_as_over_is_dropped(league, fitted):
+    # A red (rescinded, or served where FPL knows it): available after the card -> no ban.
+    tables = {name: df.copy() for name, df in league.items()}
+    key = regular_starter(tables)
+    pm = tables["player_match"]
+    at = (pm["player_key"] == key) & (pm["season"] == 2023) & (pm["gw"] == 4)
+    pm.loc[at, ["yellow_cards", "red_cards"]] = (0, 1)
+    flag_after_card(tables, key, at, "a")
+    out = predict_minutes(view(tables), fitted)
+    assert (out.loc[out["player_key"] == key, "p_start"] > 0.3).all()
+
+
 @pytest.mark.parametrize(("cards", "banned"), [((0, 1), 1), ((5, 0), 1)])
 def test_suspensions_zero_the_banned_fixtures(league, fitted, cards, banned):
     tables = {name: df.copy() for name, df in league.items()}
@@ -157,6 +178,7 @@ def test_suspensions_zero_the_banned_fixtures(league, fitted, cards, banned):
     pm = tables["player_match"]
     at = (pm["player_key"] == key) & (pm["season"] == 2023) & (pm["gw"] == 4)
     pm.loc[at, ["yellow_cards", "red_cards"]] = cards
+    flag_after_card(tables, key, at, "s")
     wide = dataclasses.replace(PARAMS, max_shift=5.0, max_scale=2.0)
     out = predict_minutes(view(tables), dataclasses.replace(fitted, params=wide))
     mine = out[out["player_key"] == key].sort_values("horizon")
@@ -185,6 +207,7 @@ def test_ban_residual_uses_the_banned_rows_start_rate(league, fitted):
     pm = tables["player_match"]
     at = (pm["player_key"] == key) & (pm["season"] == 2023) & (pm["gw"] == 4)
     pm.loc[at, "red_cards"] = 1
+    flag_after_card(tables, key, at, "s")
     planted = dataclasses.replace(residual, ban_start=0.2, ban_sub=0.5)
     out = predict_minutes(view(tables), planted)
     first = out[out["player_key"] == key].sort_values("horizon").iloc[0]
@@ -197,6 +220,7 @@ def straight_red(tables: dict, key: int, season: int = 2023, gw: int = 4) -> dic
     pm = tables["player_match"]
     at = (pm["player_key"] == key) & (pm["season"] == season) & (pm["gw"] == gw)
     pm.loc[at, "red_cards"] = 1
+    flag_after_card(tables, key, at, "s")
     row = pm[at].iloc[0]
     times = {"event_time": row["kickoff_time"], "available_at": row["available_at"]}
     match = {
