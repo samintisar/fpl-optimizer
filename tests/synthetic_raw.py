@@ -324,3 +324,13 @@ class World:
         self.store.write(
             "fpl", "element-summary", json.dumps(manifest).encode(), at, name="_manifest"
         )
+
+    def add_espn_summary(self, league: str, payload: dict, at: datetime = RUN) -> None:
+        event_id = payload["header"]["id"]
+        self.store.write("espn", f"{league}/summary/{event_id}", json.dumps(payload).encode(), at)
+
+    def add_espn_scoreboard(
+        self, league: str, period: str, events: list, at: datetime = RUN
+    ) -> None:
+        body = json.dumps({"events": events}).encode()
+        self.store.write("espn", f"{league}/scoreboard/{period}", body, at)

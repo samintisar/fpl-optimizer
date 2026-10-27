@@ -723,3 +723,47 @@ def test_tick_post_lockdown_failure_does_not_hide_fpl_or_odds(tmp_path):
     assert len(store.times("fpl", "bootstrap-static")) == 3  # daily, tick, tick's summary run
     assert len(store.times("odds", "soccer_epl")) == 1
     assert fpl.summary_calls == [1, 2]
+
+
+def test_run_daily_runs_the_espn_step_last_when_given(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "fplopt.ingest.espn.snapshot_espn_recent",
+        lambda store, espn, team_ids, now, sleep: calls.append(("espn", team_ids)),
+    )
+    monkeypatch.setattr(
+        "fplopt.ingest.jobs.snapshot_post_lockdown",
+        lambda store, fpl, now, sleep: calls.append(("post-lockdown", None)),
+    )
+    teams = tmp_path / "teams.csv"
+    teams.write_text("team,espn\nArsenal,359\nNo id,\n", "utf-8")
+    run_daily(
+        RawStore(tmp_path / "raw"),
+        FakeFpl(),
+        None,
+        Clock(DEADLINE - timedelta(hours=8)),
+        espn=object(),
+        espn_teams_csv=teams,
+        sleep=lambda s: None,
+    )
+    assert calls == [("post-lockdown", None), ("espn", frozenset({"359"}))]
+
+
+def test_a_teams_csv_problem_fails_only_the_espn_step(tmp_path, monkeypatch):
+    lockdown = []
+    monkeypatch.setattr(
+        "fplopt.ingest.jobs.snapshot_post_lockdown",
+        lambda store, fpl, now, sleep: lockdown.append(True),
+    )
+    store = RawStore(tmp_path / "raw")
+    with pytest.raises(SnapshotError, match=r"^espn: FileNotFoundError"):
+        run_daily(
+            store,
+            FakeFpl(),
+            None,
+            Clock(DEADLINE - timedelta(hours=8)),
+            espn=object(),
+            espn_teams_csv=tmp_path / "missing.csv",
+            sleep=lambda s: None,
+        )
+    assert len(store.times("fpl", "bootstrap-static")) == 1 and lockdown == [True]
