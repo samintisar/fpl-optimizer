@@ -40,6 +40,16 @@ fixtures where both have a row (ESPN minutes known) and either played; ESPN and 
 disagree in at most `MAX_RED_DISAGREEMENT` of FPL reds (each disagreement logged). The newest
 season's player checks (in progress, its data still settling) are logged as warnings, so they
 never fail the build. `espn` is the last table of `fplopt.build.ORDER`.
+
+Results on raw/ 2026-10-27 (backfill 2016/17 – 2026/27 GW8, 6,002 summaries): matches eng.1
+3,880 (every PL fixture), eng.league_cup 651, eng.fa 644, uefa.champions 442, uefa.europa
+297, uefa.europa.conf 69, eng.charity 11, uefa.super_cup 6; 201,320 player rows of PL clubs.
+All 2,013 athletes with PL minutes mapped, 1 by override (Roman Dixon, listed as Roman
+Quintyne); 0 red-card disagreements with FPL (461 PL reds, 45% second yellows); 4 rows with
+unknown minutes (1 eng.1, 1 eng.fa, 2 eng.league_cup); in the newest season one pair agrees on
+minutes in 6 of 7 fixtures (a warning). Found on the way: stoppage-time substitutes need the
+1-minute floor (35 of the first 36 unmapped players), and ESPN lists a goalkeeper twice in 25
+matches (one row kept).
 """
 
 from __future__ import annotations
