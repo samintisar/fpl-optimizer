@@ -81,6 +81,11 @@ TABLES = (
     "team_match",
     "team_rating",
     "odds_snapshot",
+    # Bans served in cup matches (fplopt.features.bans).
+    "espn_match",
+    "espn_player_match",
+    "espn_map",
+    "club_match",
 )
 SNAPSHOT_COLUMNS = [
     "snapshot_at",
