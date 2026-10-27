@@ -66,6 +66,12 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
    - Tried 2026-10-25: `position_minutes` (E[minutes | start, 60+ / <60] per position, in
      e_minutes and m_sixty; GK e_minutes 82.3 vs 86.5 at p_start > 0.8): DISCARD, MSE h0
      +0.00007, 2 of 6 seasons better. The GK minutes gap costs nothing in points. Not a lead.
+   - Live GW1–8 (report 2026-10-27-gw8; main still lacks horizon_shrink and
+     category_slopes): regulars 0.776 vs 0.817, GW8 0.803 vs 0.812 (smallest gap yet);
+     0.3–0.5 band 0.399 vs 0.322, 0.8–0.9 0.856 vs 0.921; GK p_start > 0.5 0.874 vs 0.944
+     (n 161; develop first-choice GK 0.90 vs 0.93, a keeper-only fix is diluted in the
+     pooled MSE like idea 10). Back from a miss with p_start > 0.3: 0.419 vs 0.400 (n 65),
+     the over-prediction of GW6–7 is gone.
 2. **Five subs: closed 2026-10-24** (model). Retest of the full feature on top of the shrink:
    2022 still +0.0025 (DISCARD); in the 60+ part only: 2022 +0.0013, minutes_ll −0.06 % (the
    −0.32 % gain was the sub part; DISCARD). Three variants: closed. Remaining fact: in
@@ -104,6 +110,24 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
    - Develop has no defcon points, so test on develop via P(threshold reached) on
      2016/17–2018/19 rows that carry the old detailed stats only if their definitions
      match (PLAN §3, VERIFY); otherwise live-evidence-only: write the case for the user.
+   - **GW8 (2026-10-27), first read of main's `p_defcon`** (`slice4.txt`, `slice5.txt` in
+     `~/fpl-live/results/live/2026-10-27T0945Z`): DEF under-predicted, MID fine. DEF
+     starters (p_start > 0.8) 0.206 vs 0.274; P(defcon | 60+) ≈ p_defcon / p_60 0.228 vs
+     0.277 (n 642), realized ≥ predicted in every GW from GW2, band 0.3–0.4 0.344 vs 0.429,
+     0.4–0.5 0.439 vs 0.540. MID 0.155 vs 0.137. DEF starters' pts_defcon 0.41 vs ~0.55
+     realized: most of the DEF h0 bias (−0.151).
+   - **The count model is calibrated on develop** (`diag-defcon-dev.txt`: 2016/17–2018/19,
+     CBIT from the old stats, in-season rates from `defcon_rates` at every 2nd deadline,
+     P(count ≥ 10 / 12) given the realized minutes): by band DEF 0.150 / 0.139, 0.249 /
+     0.251, 0.348 / 0.361, 0.445 / 0.452; by rate quintile within ±0.04; implied NB r DEF
+     12.7 (model 13.2), MID 18.6 (15.2); early season same as late. So the rate shrinkage,
+     `DEFCON_K` and `DEFCON_R` are right **on old-definition counts**. The live gap is
+     something live-specific: 2025+ Opta CBIT counts more dispersed (smaller r) or higher
+     per 90 for the same players, the prior mean at GW1 (0.142 vs 0.224), or opponent
+     strength (not in the model). Not testable by the judge (develop scores no defcon).
+     **For the user**: a live dispersion check (implied r of 2026 DEF counts, the same
+     calc as the develop diagnostic) decides between r and the rate; the loop can't read
+     live counts outside `weekly.sh`.
 4. **Bonus season weighting** (model; low value on develop).
    - BPS changed in 2026/27; the bonus fit weights 4 seasons by 0.7 per year. Develop can
      only test the weighting itself (current-season data weighted more), not the new rules,
@@ -143,6 +167,8 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      here (defcon era: DEF bias −0.134 per player-GW at h0). Don't run a third variant
      without a new mechanism; the user may want to judge it on its merits.
    - Team-level live P(CS) stays a watch item (GW to GW 0.13–0.40). Recheck at GW10.
+     GW8: team P(CS) 0.247 predicted vs keepers 60+ 0.288 (n 160, ~1.1 SE), GW8 alone
+     0.433; DEF 0.297, MID 0.349, FWD 0.351 (the subbing pattern again).
    - Head walk 2021–22 (`diag-components.txt`), starters (p_start > 0.8): P(CS)·P(60+) vs
      realized CS·60+: GK 0.261/0.272, DEF 0.236/0.246, MID 0.235/0.260, FWD 0.219/0.255.
      The same subbing pattern on develop.
@@ -198,8 +224,56 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
       FWDs on target). A log-linear price par may be too flat for FWDs (fitted +2.5–4 % per
       £1m). Bench players (p_start ≤ 0.5) over-predicted 10–25 % (cheap bench MID 0.73,
       DEF 0.78): they convert below npxG, but they're rarely picked.
+    - **2026-10-27: two keeps.** `price_par_quadratic` (z² in the finishing par's price
+      regression; MSE h0 −0.00133, all 6 seasons) and `price_prior_quadratic` (z² in the
+      goal / assist share priors; the MID prior was concave: ≤ £5.0m 0.69–0.89 of the
+      log-linear prior, £5.5–8.0m 1.14–1.60, ≥ £9.5m 0.71–0.85, `diag-prior-bands.txt`;
+      MSE h0 −0.00083, 5 of 6 seasons). Two variants of the price-curvature line.
+    - The fitted finishing curves (`diag-price-curve.txt`) are not the convex FWD story
+      alone: MID c −0.010 to −0.019 (caps premium mids), FWD +0.005 to +0.009 in 2020/22
+      (−0.017 in 2018), **DEF unstable: 2018 c −0.065** (par 0.43 at £10.0m, 0.13 at
+      £12.0m; 2022 −0.011). The gain is mostly taming the log-linear extrapolation at the
+      price extremes. **Check at promotion**: the DEF par at live prices with the
+      2023–25 fit (a premium DEF at z ≈ 2.5 gets ×0.67 if c is 2018-like).
+    - After both (head walk d228f87, `diag-goals-price-pq.txt`): MID bands now 0.89–1.10
+      (cheap bench 0.73 → 0.89, cheap starters 0.90 → 1.02). FWD still over. With FPL
+      goals (`diag-goals-fpl.txt`; Understat `us_npg` is incomplete before 2019/20, so the
+      earlier Understat-only FWD numbers are partly coverage): starters FWD 0.936, MID
+      1.025, DEF 0.958, FWD < 1 in 5 of 6 seasons. 2020–22 (`diag-fwd-pens.txt`): it's
+      open play (FWD 0.907, MID 1.058); penalties are fine.
+    - **Located (`diag-fwd-finish.txt`, 2020–22 starters): FWD own finishing is
+      over-trusted.** By last season's np goals − npxG: ≤ −3 1.05, −3 to −1 0.92, ±1
+      0.86, +1 to +3 0.70, > +3 0.72 (17 / 31 / 34 / 7 / 6 FWDs); MIDs flatter (0.97 at
+      +1 to +3, 1.37 at ≤ −3, 7 players). FWD finishing doesn't persist as much as k = 25
+      assumes. `finishing_prior` is closed (12, 25, 50 tried globally, before the price
+      pars); a per-position k (FWD stronger shrinkage) is the same setting: **for the
+      user** to reopen or not. Small n in the high bands.
+    - Bench-player minutes are not it: `sub-minutes` (E[minutes | sub app] by P(start))
+      DISCARD on the min gain, idea 12.
+12. **Minutes given the appearance** (model; new 2026-10-27, one variant DISCARD on the min
+    gain). Develop P(start) is calibrated in every band (head walk d228f87 h0,
+    `diag-low-minutes.txt`), but E[minutes] is over-predicted for low-p_start players at
+    every position (FWD 0.1–0.3: 22.0 vs 17.8; `diag-fwd-minutes.txt`) because the
+    conditional minutes are flat: E[minutes | sub app] is one constant 17.8 against 13.9
+    realized at p_start ≤ 0.1 → 23.1 at 0.8+, and E[minutes | start] 81.9–86.5 against
+    78.5–87.1. `sub-minutes` (m_sub linear in the row's P(start)): MSE h0 −0.00011, 5 of 6
+    seasons better, components unchanged (commit 5b645bc on the server hub). The start
+    half is smaller still. Don't retry without a points-level reason.
 
 ## Needs the user (not the loop's to do)
+
+- **Two new keeps on `research`** (2026-10-27): `price_par_quadratic` (625a96f) and
+  `price_prior_quadratic` (dbb3265), the price curvature of the finishing par and of the
+  goal / assist share priors. Same 7 head test failures, 3 new tests pass. Promotion
+  check: the DEF finishing curve at live prices (idea 11).
+- **FWD finishing over-trusted** (2026-10-27, idea 11): reopen `finishing_prior` as a
+  per-position setting (FWD stronger)? Evidence is clear in direction, thin in players.
+- **Live DEF defcon −0.05 per 60+ appearance** (2026-10-27, idea 3): the model is right
+  on develop counts, so it's the 2025+ counts. A dispersion check on live counts is yours.
+- **Guard** (2026-10-27, no harm): `judge.py compare` followed by a `python -c` in the
+  same ssh command is refused as touching the frozen judge; the plain compare works.
+  `dev/calibrate_v1.py walk --seasons 2016-2022` (research copy) runs; the pinned
+  harness's copy is refused, as designed.
 
 - **New keep on `research`** (2026-10-26): `price_par` (e81e161), finishing par by position
   and price. Same 7 test failures as the head (no new one).
@@ -257,6 +331,15 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
 
 ## Done
 
+- **Share prior curvature** (model, KEEP 2026-10-27, dbb3265):
+  `SharesParams.price_prior_quadratic`, a ridged z² term in the goal and assist share price
+  priors (`SharesFit.price_goal_curve`, `price_assist_curve`). MSE h0 −0.00083, h1–5
+  −0.00022, 5 of 6 seasons better (2018 +0.0003). Evidence: the MID prior is concave in
+  price in every fit season (`diag-prior-bands.txt`).
+- **Finishing par curvature** (model, KEEP 2026-10-27, 625a96f):
+  `SharesParams.price_par_quadratic`, a ridged z² term in the finishing par's price
+  regression (`SharesFit.price_finishing_curve`). MSE h0 −0.00133, h1–5 −0.00054, all 6
+  seasons better, goals_ll +0.03 %. See idea 11 for the fitted curves (DEF unstable).
 - **Finishing par by price** (model, KEEP 2026-10-26, e81e161): `SharesParams.price_par`,
   the finishing par per position and price, quasi-Poisson np goals ~ npxG·exp(a + b·z) over
   the position par's own-npxG player-seasons (`SharesFit.price_finishing`; fitted per +£1m:
