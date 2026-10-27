@@ -757,3 +757,125 @@ def test_congestion_in_the_prediction_frame():
     assert mine.loc[1, "rest_days_all"] == 7.0
     assert mine.loc[0, "days_to_next"] == 7.0
     assert (mine["europe_week"] == 0).all()
+
+
+def espn_rows(tables: dict, rows: list[dict]) -> dict:
+    """`tables` plus mapped ESPN rows (athlete 500 + player): player, at (kickoff), minutes;
+    optional starter (default True), league (default eng.league_cup), team (default 1)."""
+    out = []
+    for i, r in enumerate(rows):
+        starter = r.get("starter", True)
+        out.append(
+            {
+                "espn_athlete_id": 500 + r["player"],
+                "espn_event_id": 9700 + i,
+                "season": SEASON,
+                "league": r.get("league", "eng.league_cup"),
+                "team_key": r.get("team", 1),
+                "athlete_name": f"Player {r['player']}",
+                "starter": starter,
+                "minute_on": 0 if starter else None,
+                "minute_off": None,
+                "minutes": r["minutes"],
+                "yellows": 0,
+                "red": False,
+                "second_yellow": False,
+                "event_time": r["at"],
+                "available_at": r["at"] + pd.Timedelta(hours=3),
+            }
+        )
+    players = sorted({r["player"] for r in rows})
+    epoch = pd.Timestamp(0, tz="UTC")
+    mapping = espn.empty_map()
+    mapping = pd.concat(
+        [
+            mapping,
+            pd.DataFrame(
+                {
+                    "espn_athlete_id": [500 + p for p in players],
+                    "player_key": players,
+                    "event_time": epoch,
+                    "available_at": epoch,
+                }
+            ),
+        ],
+        ignore_index=True,
+    ).astype(mapping.dtypes.to_dict())
+    return {
+        **tables,
+        "espn_player_match": espn._frame(out, espn.PLAYER_SCHEMA),
+        "espn_map": mapping,
+    }
+
+
+def test_without_espn_data_no_cup_minutes_or_starts():
+    frame = frame_at(league(history_rows()), 12)
+    assert (frame["cup_minutes_7d"] == 0).all()
+    assert frame["cup_started_last"].isna().all()
+
+
+def test_cup_minutes_of_the_last_seven_days():
+    rows = [
+        {"player": 1, "at": deadline(7) - 3 * DAY, "minutes": 90},
+        {"player": 1, "at": deadline(9) - 8 * DAY, "minutes": 90},
+        {"player": 1, "at": deadline(10) - 2 * DAY, "minutes": 90, "league": "eng.1"},
+        {"player": 1, "at": deadline(11) - 2 * DAY, "minutes": None},
+    ]
+    mine = by_gw(frame_at(espn_rows(league(card_rows({}, n_gws=11)), rows), 12))
+    assert mine.loc[7, "cup_minutes_7d"] == 90.0
+    assert mine.loc[8, "cup_minutes_7d"] == 90.0  # 1 day before GW8's deadline
+    assert mine.loc[9, "cup_minutes_7d"] == 0.0  # 8 days before
+    assert mine.loc[10, "cup_minutes_7d"] == 0.0  # a league match
+    assert mine.loc[11, "cup_minutes_7d"] == 0.0  # minutes unknown
+
+
+@pytest.mark.parametrize(("hours", "minutes", "started"), [(2, 0.0, np.nan), (4, 90.0, 1.0)])
+def test_a_cup_row_counts_once_available(hours, minutes, started):
+    # ESPN rows come 3 hours after kickoff: a match 2 hours before the deadline is unknown.
+    rows = [{"player": 1, "at": deadline(7) - pd.Timedelta(hours=hours), "minutes": 90}]
+    mine = by_gw(frame_at(espn_rows(league(history_rows()), rows), 12))
+    assert mine.loc[7, "cup_minutes_7d"] == minutes
+    np.testing.assert_equal(mine.loc[7, "cup_started_last"], started)
+    assert np.isnan(mine.loc[8, "cup_started_last"])  # before his GW7 row
+
+
+@pytest.mark.parametrize(("starter", "minutes", "started"), [(True, 90, 1.0), (False, 0, 0.0)])
+def test_cup_started_last(starter, minutes, started):
+    rows = [
+        {"player": 1, "at": kickoff(6) - 2 * DAY, "minutes": 90},  # before his GW6 row
+        {"player": 1, "at": kickoff(6) + 3 * DAY, "minutes": minutes, "starter": starter},
+    ]
+    mine = by_gw(frame_at(espn_rows(league(history_rows()), rows), 12))
+    assert mine.loc[6, "cup_started_last"] == 1.0  # since his GW5 row
+    assert mine.loc[7, "cup_started_last"] == started  # the latest since his GW6 row
+    assert np.isnan(mine.loc[8, "cup_started_last"])  # none since his GW7 row
+
+
+def test_days_since_app_counts_cup_appearances():
+    minutes = [90, 0, 0, 0, 0, 0, 90]  # injured for 5 PL rows
+    rows = [{"player": 1, "team": 1, "gw": gw, "minutes": m} for gw, m in enumerate(minutes, 1)]
+    rows += [{"player": 2, "team": 1, "gw": gw, "minutes": 90} for gw in range(1, 8)]
+    cups = [
+        {"player": 1, "at": deadline(6) - 2 * DAY, "minutes": 60},
+        {"player": 1, "at": deadline(5) - 2 * DAY, "minutes": 0, "starter": False},
+        {"player": 1, "at": deadline(4) - 2 * DAY, "minutes": None},
+    ]
+    plain = by_gw(frame_at(league(rows), 12))
+    mine = by_gw(frame_at(espn_rows(league(rows), cups), 12))
+    assert plain.loc[6, "days_since_app"] == pytest.approx(34.0)  # GW1's kickoff
+    assert mine.loc[6, "days_since_app"] == pytest.approx(2.0)  # the cup match
+    assert mine.loc[6, "cup_minutes_7d"] == 60.0
+    assert mine.loc[7, "days_since_app"] == pytest.approx(9.0)
+    for gw in (4, 5):  # on the bench; minutes unknown: not appearances
+        assert mine.loc[gw, "days_since_app"] == plain.loc[gw, "days_since_app"]
+
+
+def test_cup_features_in_the_prediction_frame():
+    rows = [{"player": 1, "at": deadline(6) - 3 * DAY, "minutes": 75}]
+    mine = predicted(espn_rows(prediction_tables({}), rows))
+    assert (mine["cup_minutes_7d"] == 75.0).all()  # frozen at the deadline
+    assert (mine["cup_started_last"] == 1.0).all()
+    assert mine["days_since_app"].tolist() == pytest.approx([3.0] * 6)
+    plain = predicted(prediction_tables({}))
+    assert plain["days_since_app"].tolist() == pytest.approx([6.0] * 6)  # GW5's kickoff
+    assert (plain["cup_minutes_7d"] == 0).all() and plain["cup_started_last"].isna().all()
