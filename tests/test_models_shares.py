@@ -244,6 +244,22 @@ def test_marcel_recovers_planted_shares_and_shrinks_small_samples():
     assert abs(strong.set_index("player_key").loc[1, "g"] - 0.3) < abs(out.loc[1, "g"] - 0.3)
 
 
+def test_price_prior_quadratic_bends_the_share_prior():
+    rows = share_rows(1, 10, 2023, 200, 0.75)
+    curved = dataclasses.replace(
+        toy_fit(), price_goal_curve=((3, -0.2),), price_assist_curve=((3, 0.1),)
+    )
+    out = marcel_shares(rows, POOL, curved, SEASON).set_index("player_key")
+    # New player 3 (MID, 80, center 60: z = 2).
+    assert out.loc[3, "g"] == pytest.approx(0.1 * np.exp(0.5 * 2.0 - 0.2 * 4.0))
+    assert out.loc[3, "a"] == pytest.approx(0.12 * np.exp(0.1 * 2.0 + 0.1 * 4.0))
+    off = dataclasses.replace(
+        curved, params=dataclasses.replace(curved.params, price_prior_quadratic=False)
+    )
+    out = marcel_shares(rows, POOL, off, SEASON).set_index("player_key")
+    assert out.loc[3, "g"] == pytest.approx(0.1 * np.exp(0.5 * 2.0))
+
+
 def test_price_par_sets_the_finishing_par_by_price():
     rows = share_rows(1, 10, 2023, 10, 0.75, goals=0.75)  # 7.5 npxG, finishing at 1
     table = ((4, np.log(0.8), 0.5, 70.0),)

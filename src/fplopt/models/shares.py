@@ -40,7 +40,9 @@ old share with extra shrinkage) × `goals_weight` for fallback rows; D0 = `prior
 the prior mean μ (tuned: 1920, stronger than the plan's ~480). μ is the position + price
 prior: per position a quasi-Poisson regression X ~ D·exp(a + b·z), z = (price − the
 position's mean price) / 10, fitted on the last `FIT_SEASONS` seasons' player-seasons (price
-= his first `player_gw` price of the season; at prediction his pool price). The plan's
+= his first `player_gw` price of the season; at prediction his pool price; with
+`price_prior_quadratic` a c·z² term too, `SharesFit.price_goal_curve` / `price_assist_curve`:
+the midfield prior is concave in price). The plan's
 variant, the league average of his position (Σ X / Σ D) for players with history and the
 price prior for new players only (no played minute in the window), is
 `price_prior_all=False`; it scored a little worse on develop.
@@ -212,6 +214,11 @@ class SharesParams:
     # at 0.80 of npxG, premium ones at 1.00, steeper than the log-linear fit's +2.5-4 % per
     # £1m (develop 2017-22, results/research/diag-goals-price-pp.txt).
     price_par_quadratic: bool = True
+    # A z² term in the goal and assist share price priors too (SharesFit.price_goal_curve,
+    # price_assist_curve). The MID prior is concave in price: xG share / log-linear prior by
+    # band at GW10 of 2018/2020/2022, MID <= £5.0m 0.69-0.89, £5.5-8.0m 1.14-1.60, >= £9.5m
+    # 0.71-0.85 (assists alike); DEF and FWD flat (results/research/diag-prior-bands.txt).
+    price_prior_quadratic: bool = True
 
     def __post_init__(self) -> None:
         if not self.season_weights or any(w < 0 for w in self.season_weights):
@@ -254,6 +261,9 @@ class SharesFit:
     price_finishing: tuple[tuple[int, float, float, float], ...] = field(default=())
     # With price_par_quadratic: (element_type, c), the par × exp(c·z²) on top of price_finishing
     price_finishing_curve: tuple[tuple[int, float], ...] = field(default=())
+    # With price_prior_quadratic: (element_type, c) on top of price_goal / price_assist
+    price_goal_curve: tuple[tuple[int, float], ...] = field(default=())
+    price_assist_curve: tuple[tuple[int, float], ...] = field(default=())
 
 
 # --- inputs ---------------------------------------------------------------------------------
@@ -658,16 +668,17 @@ def marcel_shares(
     price = out["price"].to_numpy(dtype="float64")
     new = out["minutes"].to_numpy() <= 0
     use_price = np.full(len(out), True) if params.price_prior_all else new
-    prior_g = np.where(
-        use_price,
-        _price_prior(fit.price_goal, element_type, price),
-        _position_prior(fit.position_goal, element_type),
-    )
-    prior_a = np.where(
-        use_price,
-        _price_prior(fit.price_assist, element_type, price),
-        _position_prior(fit.position_assist, element_type),
-    )
+    by_price_g = _price_prior(fit.price_goal, element_type, price)
+    by_price_a = _price_prior(fit.price_assist, element_type, price)
+    if params.price_prior_quadratic:
+        by_price_g = by_price_g * _price_curve(
+            fit.price_goal, fit.price_goal_curve, element_type, price
+        )
+        by_price_a = by_price_a * _price_curve(
+            fit.price_assist, fit.price_assist_curve, element_type, price
+        )
+    prior_g = np.where(use_price, by_price_g, _position_prior(fit.position_goal, element_type))
+    prior_a = np.where(use_price, by_price_a, _position_prior(fit.position_assist, element_type))
     prior_g = np.where(np.isnan(prior_g), _position_prior(fit.position_goal, element_type), prior_g)
     prior_a = np.where(
         np.isnan(prior_a), _position_prior(fit.position_assist, element_type), prior_a
@@ -760,6 +771,7 @@ def fit_shares(view: AsOfView, params: SharesParams | None = None) -> SharesFit:
     team_output = _ratio(recent["d"], recent["on_pitch"], 1.3)
     position_goal, position_assist, price_goal, price_assist = [], [], [], []
     position_finishing, price_finishing, price_finishing_curve = [], [], []
+    price_goal_curve, price_assist_curve = [], []
     for position, group in recent.groupby("element_type", sort=True):
         if position != position:
             continue
@@ -822,8 +834,14 @@ def fit_shares(view: AsOfView, params: SharesParams | None = None) -> SharesFit:
             .reset_index()
             .merge(first_price, on=["player_key", "season"], how="left")
         )
-        price_goal.append((int(position), *_price_model(seasons, "xg", "dg")))
-        price_assist.append((int(position), *_price_model(seasons, "xa_", "da")))
+        quadratic = params.price_prior_quadratic
+        goal_model = _price_model(seasons, "xg", "dg", quadratic=quadratic)
+        assist_model = _price_model(seasons, "xa_", "da", quadratic=quadratic)
+        price_goal.append((int(position), *goal_model[:3]))
+        price_assist.append((int(position), *assist_model[:3]))
+        if quadratic:
+            price_goal_curve.append((int(position), goal_model[3]))
+            price_assist_curve.append((int(position), assist_model[3]))
 
     window = teams[teams["season"] > season - FIT_SEASONS]
     known = window[window["team_attempts"].notna()]
@@ -897,6 +915,8 @@ def fit_shares(view: AsOfView, params: SharesParams | None = None) -> SharesFit:
         position_finishing=tuple(position_finishing),
         price_finishing=tuple(price_finishing),
         price_finishing_curve=tuple(price_finishing_curve),
+        price_goal_curve=tuple(price_goal_curve),
+        price_assist_curve=tuple(price_assist_curve),
     )
 
 
