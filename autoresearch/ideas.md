@@ -259,8 +259,54 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
     78.5–87.1. `sub-minutes` (m_sub linear in the row's P(start)): MSE h0 −0.00011, 5 of 6
     seasons better, components unchanged (commit 5b645bc on the server hub). The start
     half is smaller still. Don't retry without a points-level reason.
+13. **The crowd: ownership and deadline transfers** (model; new 2026-10-28, **blocked on
+    the harness**, see *Needs the user*). No model reads FPL managers' choices. Within a
+    P(start) band they predict who starts, most in the rotation band:
+    - Ownership (`player_gw_ownership`, GW t − 1's row at deadline t; 2017–22 head walk
+      d228f87, `diag-ownership.txt`): P(start) 0.3–0.7 at h0, top quintile +4.2 pp over
+      prediction (+0.12 pts), bottom −2.1 pp (−0.075); h1–5 the same. Offline, a logit
+      adjustment fitted on 2017–19 and applied to 2020–22 (`diag-ownership-oos.txt`): MSE h0
+      −0.0016 (2021 −0.0046), h1–5 −0.0025, Brier start h0 −0.13 %.
+    - Deadline net transfers (`player_snapshot.transfers_in/out_event`, the newest snapshot
+      ~3.6 h before the deadline; 2021–22, status `a`, `diag-snap-crowd.txt`): rotation band
+      top quintile +9.7 pp (+0.47 pts), middle −8.3 pp (−0.23). Offline, fitted on 2021/22
+      and applied to 2022/23 (`diag-snap-crowd-oos.txt`): MSE h0 −0.0036, Brier start h0
+      −0.35 %; recalibration without it −0.0003. About −0.001 on the 6-season mean (only
+      2021–22 have snapshots). This is the press-conference news the lags can't see.
+    - Built and tested (commits on the server hub): `ownership` (f2fb2fa) and
+      `net_transfers` (ad62831), each a minutes lag feature with an as-of test. Both fail in
+      the pinned walk: its store has no `player_gw_ownership` table and loads
+      `player_snapshot` without the transfer columns. Not a guard; the harness's input list.
+    - Scoreable proxy, `price_change` (price − first price of the season; prices follow
+      net transfers): DISCARD (MSE h0 −0.00028, 2020 +0.0031; Brier −0.01 %): too coarse.
+    - Next, once the harness reads them: score `net_transfers`, then `ownership` (snapshot
+      `selected_by_percent` for 2021+, `player_gw_ownership` before), one at a time.
+      Promotion check: live `player_gw_ownership` / snapshot transfer coverage for 2026/27,
+      and the bot's snapshot timing (it plans 24 h before the deadline, when the GW's
+      transfers are only partly in).
+14. **Keeper saves points** (model; new 2026-10-28, too small for the judge). 60+ keepers,
+    h0 (`diag-gk-rest.txt`): the saves rate is calibrated in the bulk but its spread is too
+    wide (top band 4.54 predicted vs 4.18 realized), and realized floor(saves / 3) beats the
+    Poisson expectation by ~0.045 per appearance in bands below 3.5 saves per 90 (saves
+    over-dispersed, var / mean 1.1–1.3). Keepers starting are ~3 % of rows: ≤ 0.0001 of
+    pooled MSE. Note for a per-position view, not a loop experiment.
+
+Looked at 2026-10-28, no lead: the team model (λ_against calibrated within 2 % at every
+horizon, P(CS) 0.279 vs 0.281, slope 0.92–0.95, `diag-team-lambda.txt`); P(60+ | start)
+(within 0.01 at h0; `diag-c60.txt`); P(start) by price (premium outfield ±0.02 by season,
+keepers as idea 9; `diag-start-price.txt`); keeper P(start) sharpening within the club
+(best γ 1.25: h0 −0.00028, h1–5 −0.0029, the idea 9 story; `diag-gk-sharpen.txt`); FWD
+finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
+`diag-finish-price-over.txt`).
 
 ## Needs the user (not the loop's to do)
+
+- **The harness can't see the crowd** (2026-10-28, idea 13; the night's main finding). Two
+  input-list changes in the pinned `dev/calibrate_v1.py` (yours): add
+  `"player_gw_ownership"` to `TABLES`, and `transfers_in_event`, `transfers_out_event`,
+  `selected_by_percent` to `SNAPSHOT_COLUMNS`. Then the loop scores `net_transfers`
+  (ad62831) and `ownership` (f2fb2fa). Offline they're the largest model gains since
+  finishing (h0 −0.0016 and −0.0036 on their seasons).
 
 - **Two new keeps on `research`** (2026-10-27): `price_par_quadratic` (625a96f) and
   `price_prior_quadratic` (dbb3265), the price curvature of the finishing par and of the
