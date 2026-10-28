@@ -21,8 +21,9 @@ fixtures (rest days, fixtures this season) are those of earlier GWs / earlier ki
 window holds his old club's fixtures, and `fixtures_at_club` says how long he has been at
 the new one. The prediction frame computes the same lags for a query row placed after every
 visible row (the target GW), so training and prediction features match by construction;
-every horizon fixture gets the lags as of the deadline (frozen), and only `rest_days` (from
-the as-of schedule) and the keys differ per fixture.
+every horizon fixture gets the lags as of the deadline (frozen, the cup minutes included),
+and only `rest_days` (from the as-of schedule), the congestion features (as known at the
+deadline) and the keys differ per fixture.
 
 **Features (`LAG_FEATURES`):**
 - `element_type`, `price` (`player_gw.value` at that GW; the pool's price when predicting);
@@ -31,9 +32,22 @@ the as-of schedule) and the keys differ per fixture.
 - `start_share_season`: his starts at his current club this season / the club's fixtures
   this season before the GW (NaN before the club's first fixture); `start_share_last`: his
   starts last season (any club) / 38 (NaN if he had no row last season);
-- `days_since_app`: days from the GW deadline back to his last appearance (minutes > 0,
-  capped at 365; NaN if none); `rest_days`: days since his club's previous fixture (capped
-  at 30; 30 without one);
+- `days_since_app`: days from the GW deadline back to his last appearance (minutes > 0) in
+  an earlier row or a non-league match (below), capped at 365; NaN if none; `rest_days`:
+  days since his club's previous league fixture (capped at 30; 30 without one);
+- cup and European minutes (`_cup_features`), from his mapped `espn_player_match` rows of
+  non-league matches (`league` != eng.1) available before the GW deadline (kickoff + 3 h):
+  `cup_minutes_7d`: his minutes in those kicking off in the `CUP_WINDOW_DAYS` before the
+  deadline (unknown minutes count 0; 0 without); `cup_started_last`: over those after his
+  last earlier row, 1 if he started the latest, 0 if he was in its squad without starting,
+  NaN if none;
+- congestion, per fixture (`_congestion`; the non-league matches are `club_match` rows known
+  at the GW deadline, i.e. `available_at` before it, and played or not kicked off yet then):
+  `rest_days_all`: days since the club's previous match in any competition (league fixture
+  or such a club match; capped at 30, 30 without one); `days_to_next`: days to its next
+  match in any competition (the next league fixture of the season in the as-of schedule, or
+  a club match; capped at 30, 30 without one); `europe_week`: 1 if it has a UEFA club match
+  (`uefa.*`) within `EUROPE_WINDOW_DAYS` before or after the kickoff;
 - `absent_run`: consecutive 0-minute rows just before (capped at 10); `returned`: 1 if one
   of his last `RETURN_WINDOW` rows is an appearance right after ≥ `ABSENCE_RUN` 0-minute
   rows;
@@ -49,10 +63,9 @@ the as-of schedule) and the keys differ per fixture.
 - `club_fixtures_season`: his club's league fixtures this season before the GW (the phase
   of the season: early on, the lag windows still hold last season's rows).
 
-**Dropped (no source):** European/cup matches (no data; rest days count league fixtures
-only), manager tenure, age. `team_join_date` is not a feature: the snapshot carries it only
-from 2024/25, and the pool's club (a snapshot from 2020/21 GW32) already marks a club change
-(`fixtures_at_club` = 0).
+**Dropped (no source):** manager tenure, age. `team_join_date` is not a feature: the
+snapshot carries it only from 2024/25, and the pool's club (a snapshot from 2020/21 GW32)
+already marks a club change (`fixtures_at_club` = 0).
 
 **Suspensions.** `ban_kind` per player and league fixture from `fplopt.features.bans`
 (0 none, 1 likely, 2 certain): a red card in a domestic match (PL from `player_match`, its
@@ -115,6 +128,9 @@ CONTINUITY_WINDOW = 5  # club fixtures in club_continuity
 BAN_LOOKBACK = pd.Timedelta(days=200)
 # A flag counts once FPL has had this long after the card to set 's' for a ban that runs.
 FLAG_SETTLE = pd.Timedelta(hours=12)
+EUROPE_WINDOW_DAYS = 4.0  # europe_week: a UEFA match this close to the fixture
+EUROPEAN = "uefa."  # league prefix of the UEFA competitions
+CUP_WINDOW_DAYS = 7.0  # cup_minutes_7d
 
 MATCH_COLUMNS = (
     "player_key",
@@ -139,7 +155,12 @@ LAG_FEATURES = (
     "start_share_season",
     "start_share_last",
     "days_since_app",
+    "cup_minutes_7d",
+    "cup_started_last",
     "rest_days",
+    "rest_days_all",
+    "days_to_next",
+    "europe_week",
     "absent_run",
     "returned",
     "yellows_season",
@@ -150,6 +171,8 @@ LAG_FEATURES = (
     "club_continuity",
     "club_fixtures_season",
 )
+CONGESTION = ("rest_days_all", "days_to_next", "europe_week")  # per fixture (`_congestion`)
+CUP_PLAYER = ("cup_minutes_7d", "cup_started_last", "days_since_app")  # `_cup_features`
 TARGETS = ("minutes", "start", "sixty", "sub")
 TRAINING_KEYS = (
     ("player_key", "int64"),
@@ -378,6 +401,7 @@ def _lags(rows: pd.DataFrame) -> pd.DataFrame:
     last_appearance = appearance.groupby(player).ffill().to_numpy()
     since = _days(rows["ref_time"]) - np.where(has_prior, last_appearance[prev], np.nan)
     out["days_since_app"] = np.clip(since, 0, APPEARANCE_CAP_DAYS)
+    out["_last_row"] = np.where(has_prior, kickoff[prev], np.nan)  # his last earlier row
 
     # Consecutive 0-minute rows ending at each row; the run just before the block.
     nonzero = pd.Series(np.where(appeared > 0, index, np.nan)).groupby(player).ffill()
@@ -422,25 +446,184 @@ ESPN_RED_COLUMNS = (
     "team_key",
     "event_time",
 )
+ESPN_PLAYER_COLUMNS = (
+    "espn_athlete_id",
+    "espn_event_id",
+    "league",
+    "starter",
+    "minutes",
+    "event_time",
+    "available_at",
+)
+
+
+def _club_sides(view: AsOfView) -> pd.DataFrame:
+    """team_key, league, kickoff_time, available_at, played per PL side of every visible
+    `club_match` (scheduled ones included)."""
+    columns = ["league", "kickoff_time", "available_at", "played"]
+    clubs = view.table("club_match", columns=[*columns, "home_team_key", "away_team_key"])
+    sides = pd.concat(
+        [
+            clubs[[*columns, side]].rename(columns={side: "team_key"})
+            for side in ("home_team_key", "away_team_key")
+        ],
+        ignore_index=True,
+    ).dropna(subset=["team_key"])
+    return sides.astype({"team_key": "int64"})[["team_key", *columns]].reset_index(drop=True)
 
 
 def _cup_sides(view: AsOfView, since: pd.Timestamp | None) -> pd.DataFrame:
     """team_key, kickoff_time per PL side of every visible domestic cup `club_match`
     (scheduled ones included) kicking off from `since` on (None: all)."""
-    cups = view.table(
-        "club_match", columns=["league", "kickoff_time", "home_team_key", "away_team_key"]
-    )
-    cups = cups[cups["league"].isin(DOMESTIC_CUPS).to_numpy(dtype=bool)]
+    sides = _club_sides(view)
+    keep = sides["league"].isin(DOMESTIC_CUPS)
     if since is not None:
-        cups = cups[cups["kickoff_time"] >= since]
+        keep &= sides["kickoff_time"] >= since
+    keep = keep.to_numpy(dtype=bool)
+    return sides.loc[keep, ["team_key", "kickoff_time"]].reset_index(drop=True)
+
+
+def _league_sides(schedule: pd.DataFrame) -> pd.DataFrame:
+    """team_key, season, fixture_key, kickoff_time per side of the scheduled fixtures (with a
+    kickoff), sorted by (team_key, kickoff_time, fixture_key)."""
+    schedule = schedule[schedule["kickoff_time"].notna()]
+    columns = ["season", "fixture_key", "kickoff_time"]
     sides = pd.concat(
         [
-            cups[["kickoff_time", side]].rename(columns={side: "team_key"})
+            schedule[columns].assign(team_key=schedule[side])
             for side in ("home_team_key", "away_team_key")
         ],
         ignore_index=True,
-    ).dropna(subset=["team_key"])
-    return sides.astype({"team_key": "int64"})[["team_key", "kickoff_time"]]
+    )
+    sides = sides.astype(
+        {"team_key": "int64", "season": "int64", "fixture_key": "int64", "kickoff_time": UTC_US}
+    )
+    sides = sides.sort_values(["team_key", "kickoff_time", "fixture_key"], kind="mergesort")
+    return sides[["team_key", *columns]].reset_index(drop=True)
+
+
+def _congestion(
+    fixtures: pd.DataFrame, league_sides: pd.DataFrame, club_sides: pd.DataFrame
+) -> pd.DataFrame:
+    """rest_days_all, days_to_next, europe_week (float64, index of `fixtures`) per fixture row
+    (team_key, season, kickoff_time, ref_time, rest_days). A club match (`club_sides`) counts
+    if known at the row's ref_time (`available_at` before it) and played or not kicked off
+    yet then; the league fixtures are `league_sides` (the schedule) of the row's season."""
+    n = len(fixtures)
+    left = fixtures[["team_key", "season", "kickoff_time", "ref_time"]].assign(_row=np.arange(n))
+    left = left.astype(
+        {"team_key": "int64", "season": "int64", "kickoff_time": UTC_US, "ref_time": UTC_US}
+    )
+    # The club's next league fixture of the season.
+    following = league_sides[["team_key", "season", "kickoff_time"]].assign(
+        next_league=league_sides["kickoff_time"]
+    )
+    merged = pd.merge_asof(
+        left.sort_values("kickoff_time", kind="mergesort"),
+        following.sort_values("kickoff_time", kind="mergesort"),
+        on="kickoff_time",
+        by=["team_key", "season"],
+        direction="forward",
+        allow_exact_matches=False,
+    )
+    gap = (merged["next_league"] - merged["kickoff_time"]) / pd.Timedelta(days=1)
+    to_league = np.full(n, np.inf)
+    to_league[merged["_row"].to_numpy()] = gap.to_numpy(dtype="float64", na_value=np.inf)
+    # Club matches within REST_CAP_DAYS of the kickoff, as known at the row's ref_time.
+    clubs = club_sides.astype({"team_key": "int64", "kickoff_time": UTC_US})
+    pairs = left.merge(clubs, on="team_key", suffixes=("", "_club"))
+    days = (pairs["kickoff_time_club"] - pairs["kickoff_time"]) / pd.Timedelta(days=1)
+    days = days.to_numpy(dtype="float64")
+    ref = pairs["ref_time"]
+    known = (
+        (pairs["available_at"] < ref).to_numpy(dtype=bool)
+        & (pairs["played"] | (pairs["kickoff_time_club"] >= ref)).to_numpy(dtype=bool)
+        & (np.abs(days) <= REST_CAP_DAYS)
+    )
+    rows, days = pairs["_row"].to_numpy()[known], days[known]
+    european = pairs["league"].str.startswith(EUROPEAN).to_numpy(dtype=bool)[known]
+    since_club = np.full(n, np.inf)
+    np.minimum.at(since_club, rows[days < 0], -days[days < 0])
+    to_club = np.full(n, np.inf)
+    np.minimum.at(to_club, rows[days > 0], days[days > 0])
+    europe = np.zeros(n)
+    europe[rows[european & (np.abs(days) <= EUROPE_WINDOW_DAYS)]] = 1.0
+    rest = fixtures["rest_days"].to_numpy(dtype="float64")
+    return pd.DataFrame(
+        {
+            "rest_days_all": np.minimum(rest, since_club),
+            "days_to_next": np.minimum(np.minimum(to_league, to_club), REST_CAP_DAYS),
+            "europe_week": europe,
+        },
+        index=fixtures.index,
+    )
+
+
+def _cup_rows(view: AsOfView) -> pd.DataFrame:
+    """player_key, event_time, available_at, minutes (float64, NaN unknown), starter of the
+    visible, mapped ESPN rows of non-league matches (one per player and match); `cum`: his
+    cumulative minutes (unknown = 0) in kickoff order. Sorted by (player_key, event_time)."""
+    rows = view.table("espn_player_match", columns=list(ESPN_PLAYER_COLUMNS))
+    rows = rows[(rows["league"] != "eng.1").to_numpy(dtype=bool)]
+    mapped = view.lookup("espn_map", rows["espn_athlete_id"].unique())
+    mapped = mapped.dropna(subset=["player_key"]).astype({"player_key": "int64"})
+    rows = rows.merge(mapped[["espn_athlete_id", "player_key"]], on="espn_athlete_id")
+    rows = rows.drop_duplicates(["player_key", "espn_event_id"])
+    rows = rows.sort_values(["player_key", "event_time"], kind="mergesort")
+    minutes = rows["minutes"].to_numpy(dtype="float64", na_value=np.nan)
+    rows = rows.assign(minutes=minutes, starter=rows["starter"].astype("float64"))
+    rows["cum"] = (
+        pd.Series(np.nan_to_num(minutes), index=rows.index).groupby(rows["player_key"]).cumsum()
+    )
+    columns = ["player_key", "event_time", "available_at", "minutes", "starter", "cum"]
+    return rows[columns].astype({"event_time": UTC_US, "available_at": UTC_US})
+
+
+def _latest_before(
+    left: pd.DataFrame, at: pd.Series, right: pd.DataFrame, on: str, columns: list[str]
+) -> pd.DataFrame:
+    """Per `left` row (player_key, `_row` = 0..n-1): `columns` of the player's latest `right`
+    row with `right[on]` before `at` (NaN without one); rows in `_row` order."""
+    query = left[["player_key", "_row"]].assign(_at=at.astype(UTC_US).array)
+    found = right[["player_key", on, *columns]].rename(columns={on: "_at"})
+    merged = pd.merge_asof(
+        query.sort_values("_at", kind="mergesort"),
+        found.sort_values("_at", kind="mergesort"),
+        on="_at",
+        by="player_key",
+        allow_exact_matches=False,
+    )
+    return merged.set_index("_row")[columns].reindex(np.arange(len(left)))
+
+
+def _cup_features(view: AsOfView, rows: pd.DataFrame) -> pd.DataFrame:
+    """cup_minutes_7d, cup_started_last and the updated days_since_app (float64, index of
+    `rows`) per row (player_key, ref_time, `_last_row`, days_since_app), from his non-league
+    ESPN rows available before ref_time (`_cup_rows`; `available_at` = kickoff + 3 h, so
+    they come in kickoff order)."""
+    cups = _cup_rows(view)
+    left = rows[["player_key"]].astype("int64").reset_index(drop=True)
+    left = left.assign(_row=np.arange(len(rows)))
+    ref = rows["ref_time"].astype(UTC_US).reset_index(drop=True)
+    latest = _latest_before(left, ref, cups, "available_at", ["event_time", "starter", "cum"])
+    window = pd.Timedelta(days=CUP_WINDOW_DAYS)
+    older = _latest_before(left, ref - window, cups, "event_time", ["cum"])
+    minutes = latest["cum"].fillna(0.0) - older["cum"].fillna(0.0)
+    # The latest non-league row counts if it came after his last league row.
+    last_row = rows["_last_row"].to_numpy(dtype="float64")
+    after = _days(latest["event_time"]) > np.nan_to_num(last_row, nan=-np.inf)
+    started = np.where(after, latest["starter"].to_numpy(dtype="float64"), np.nan)
+    appeared = cups[cups["minutes"].to_numpy() > 0]
+    app = _latest_before(left, ref, appeared, "available_at", ["event_time"])
+    since = np.clip(_days(ref) - _days(app["event_time"]), 0, APPEARANCE_CAP_DAYS)
+    return pd.DataFrame(
+        {
+            "cup_minutes_7d": minutes.to_numpy(dtype="float64"),
+            "cup_started_last": started,
+            "days_since_app": np.fmin(rows["days_since_app"].to_numpy(dtype="float64"), since),
+        },
+        index=rows.index,
+    )
 
 
 def _bans(
@@ -541,6 +724,7 @@ def training_frame(view: AsOfView) -> pd.DataFrame:
     matches = _sorted(_matches(view, gameweeks).rename(columns={"deadline_time": "ref_time"}))
     lags = _lags(matches)
     frame = pd.concat([matches, lags], axis=1)
+    frame[list(CUP_PLAYER)] = _cup_features(view, frame)
     fixtures = _team_fixtures(matches)
     frame["_club_fixtures"] = _fixtures_before(fixtures, frame)
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -549,8 +733,18 @@ def training_frame(view: AsOfView) -> pd.DataFrame:
     fixtures["previous"] = fixtures.groupby("team_key")["kickoff_time"].shift(1)
     rest = (fixtures["kickoff_time"] - fixtures["previous"]) / pd.Timedelta(days=1)
     fixtures["rest_days"] = rest.clip(upper=REST_CAP_DAYS).fillna(REST_CAP_DAYS)
+    deadlines = matches[["team_key", "fixture_key", "ref_time"]].drop_duplicates(
+        ["team_key", "fixture_key"]
+    )
+    fixtures = fixtures.merge(
+        deadlines, on=["team_key", "fixture_key"], how="left", validate="one_to_one"
+    )
+    seasons = sorted(int(s) for s in matches["season"].unique())
+    schedule = pd.concat([view.schedule(s) for s in seasons] or [view.schedule(0)])
+    congestion = _congestion(fixtures, _league_sides(schedule), _club_sides(view))
+    fixtures = pd.concat([fixtures, congestion], axis=1)
     frame = frame.merge(
-        fixtures[["team_key", "fixture_key", "rest_days"]],
+        fixtures[["team_key", "fixture_key", "rest_days", *CONGESTION]],
         on=["team_key", "fixture_key"],
         how="left",
         validate="many_to_one",
@@ -587,20 +781,12 @@ def training_frame(view: AsOfView) -> pd.DataFrame:
 
 
 def _horizon_fixtures(view: AsOfView, season: int) -> pd.DataFrame:
-    """Per club and horizon fixture: keys, kickoff and rest days (from the as-of schedule:
-    days since the club's previous scheduled fixture of the season, capped)."""
+    """Per club and horizon fixture: keys, kickoff, rest days (from the as-of schedule:
+    days since the club's previous scheduled fixture of the season, capped) and the
+    congestion features (`_congestion`, as known at the deadline)."""
     upcoming = upcoming_fixtures(view)
     upcoming = upcoming[upcoming["fixture_key"].notna()]
-    schedule = view.schedule(season)
-    schedule = schedule[schedule["kickoff_time"].notna()]
-    sides = pd.concat(
-        [
-            schedule[["fixture_key", "kickoff_time"]].assign(team_key=schedule["home_team_key"]),
-            schedule[["fixture_key", "kickoff_time"]].assign(team_key=schedule["away_team_key"]),
-        ],
-        ignore_index=True,
-    )
-    sides = sides.sort_values(["team_key", "kickoff_time", "fixture_key"], kind="mergesort")
+    sides = _league_sides(view.schedule(season))
     previous = sides.groupby("team_key")["kickoff_time"].shift(1)
     rest = (sides["kickoff_time"] - previous) / pd.Timedelta(days=1)
     sides = sides.assign(rest_days=rest.clip(upper=REST_CAP_DAYS).fillna(REST_CAP_DAYS))
@@ -612,6 +798,8 @@ def _horizon_fixtures(view: AsOfView, season: int) -> pd.DataFrame:
         validate="one_to_one",
     )
     out["rest_days"] = out["rest_days"].fillna(REST_CAP_DAYS)
+    congestion = _congestion(out.assign(ref_time=view.deadline), sides, _club_sides(view))
+    out = pd.concat([out, congestion], axis=1)
     return out.sort_values(["team_key", "kickoff_time", "fixture_key"], kind="mergesort")
 
 
@@ -653,6 +841,7 @@ def prediction_frame(view: AsOfView) -> pd.DataFrame:
     lags = lags[rows["_query"].to_numpy(dtype=bool)].reset_index(drop=True)
     queried = rows.loc[rows["_query"].to_numpy(dtype=bool), ["player_key", "team_key"]]
     frame = pd.concat([queried.reset_index(drop=True), lags], axis=1)
+    frame[list(CUP_PLAYER)] = _cup_features(view, frame.assign(ref_time=view.deadline))
     frame = frame.merge(
         pool[["player_key", "element_type", "price"]],
         on="player_key",
@@ -681,6 +870,7 @@ def prediction_frame(view: AsOfView) -> pd.DataFrame:
                 "horizon",
                 "kickoff_time",
                 "rest_days",
+                *CONGESTION,
             ]
         ],
         on="team_key",

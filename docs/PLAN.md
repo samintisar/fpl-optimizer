@@ -261,7 +261,7 @@ Blending rule everywhere: equal weights or a single fixed weight — never weigh
 - Each component model is split into `fit(view)` and `predict(view, fitted)`. The fit for deadline d uses `view.earlier(cutoff)`, where the cutoff is the deadline of the season's latest refit GW ≤ d (`gw_index` 1, 5, 9, …). The registered model is still one callable on the view, so the leakage check covers the fit. The backtester's `Caches` memoizes fits by cutoff; model modules keep no state.
 - LightGBM runs only through `fplopt.models.gbm`: fixed `seed`, `num_threads=1`, `deterministic=True`, `force_row_wise=True`.
 - `starts` is null before 2022/23 GW16. Before then, a team's 11 players with the most minutes in a fixture count as its starters; Task 3 measures the accuracy (§6.3).
-- Minutes features with no source are dropped: manager tenure, age. (European/cup matches: from ESPN since 2026-10-27, spec `docs/superpowers/specs/2026-10-27-espn-cup-data-design.md`; bans and features follow in their own PRs.)
+- Minutes features with no source are dropped: manager tenure, age. (European/cup matches: from ESPN since 2026-10-27, spec `docs/superpowers/specs/2026-10-27-espn-cup-data-design.md`; used for bans and the congestion and cup-minutes features.)
 - Phase 5 criterion 1 ("beat both baselines on component metrics") is tested on xP and decision metrics, because the baselines have no components. On validate, `v1` vs `rolling` and vs `ep_next` must have:
   - lower MSE per player-GW (one-sided Diebold-Mariano clustered by GW, p < 0.10);
   - lower candidate-weighted MSE;
@@ -390,7 +390,7 @@ Hurdle structure:
 - P(60+ | start)
 - P(sub appearance | not start) and expected sub minutes
 
-Features: recent starts/minutes, starts share of **team** matches, days rest, midweek European/cup match, recent return from absence, positional competition, price, new signing (`team_join_date`), manager tenure, age.
+Features: recent starts/minutes, starts share of **team** matches, days rest, congestion (since 2026-10-27, ESPN `club_match` as known at the deadline: rest days and days to the next match in any competition, a UEFA match within 4 days), his own cup/European minutes in the last 7 days and whether he started the latest cup tie since his last PL fixture (appearances there also count for days since the last appearance), recent return from absence, positional competition, price, new signing (`team_join_date`), manager tenure, age. Full list and definitions: the `fplopt.features.history` docstring.
 
 Post-processing:
 - **Team normalization:** Σ P(start) ≈ 11 and Σ expected minutes ≈ 990 per team per fixture.
