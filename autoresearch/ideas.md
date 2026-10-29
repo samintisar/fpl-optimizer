@@ -250,6 +250,8 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
       user** to reopen or not. Small n in the high bands.
     - Bench-player minutes are not it: `sub-minutes` (E[minutes | sub app] by P(start))
       DISCARD on the min gain, idea 12.
+    - DEF goal spread (2026-10-29): over-dispersed when pooled, small within a season;
+      closed, idea 16.
 12. **Minutes given the appearance** (model; new 2026-10-27, one variant DISCARD on the min
     gain). Develop P(start) is calibrated in every band (head walk d228f87 h0,
     `diag-low-minutes.txt`), but E[minutes] is over-predicted for low-p_start players at
@@ -260,7 +262,8 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
     seasons better, components unchanged (commit 5b645bc on the server hub). The start
     half is smaller still. Don't retry without a points-level reason.
 13. **The crowd: ownership and deadline transfers** (model; new 2026-10-28, **blocked on
-    the harness**, see *Needs the user*). No model reads FPL managers' choices. Within a
+    the harness**, see *Needs the user*; re-checked 2026-10-29 after the harness hash
+    changed: still the same KeyErrors). No model reads FPL managers' choices. Within a
     P(start) band they predict who starts, most in the rotation band:
     - Ownership (`player_gw_ownership`, GW t − 1's row at deadline t; 2017–22 head walk
       d228f87, `diag-ownership.txt`): P(start) 0.3–0.7 at h0, top quintile +4.2 pp over
@@ -291,6 +294,35 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
     over-dispersed, var / mean 1.1–1.3). Keepers starting are ~3 % of rows: ≤ 0.0001 of
     pooled MSE. Note for a per-position view, not a loop experiment.
 
+15. **Match strength and big-club rotation** (model; new 2026-10-29, **two keeps**). The
+    minutes model saw no opponent. Head walk d228f87 h0 (`diag-match-strength.txt`):
+    regulars (P(start) > 0.7) started 3.7 pp under prediction when λ_for − λ_against > 1.6,
+    in all 6 seasons (−1.8 to −4.9 pp), and +1 to +2 pp in even matches; rotation players
+    +1.1 pp in the same lopsided matches.
+    - `win_expectancy` (the club's Elo expected score in the fixture): KEEP, MSE h0 −0.00216,
+      5 of 6 seasons. Its walk (`diag-we-walk`, 4092f44; `diag-match-strength-we.txt`)
+      halves the big-favourite gap (−3.7 → −2.0 pp).
+    - What it left (`diag-own-opp.txt`): top-6 clubs' regulars still −1.3 to −1.7 pp against
+      mid and bottom sides, the other clubs' +0.4 to +2.4 pp: big clubs rotate (European
+      fixtures, not in our data), whatever the opponent. `club_rating` (own Elo): KEEP,
+      MSE h0 −0.00212, **all 6 seasons better**.
+    - Forward congestion, `next_rest_days` (days to the next league fixture; big favourites
+      with the next match ≤ 3.5 days away −5.1 pp, `diag-next-gap.txt`): DISCARD, seasons
+      3–3, minutes log loss worse. The two Elo features and `rest_days` already carry it.
+    - Two variants kept; a third Elo variable (the opponent's own rating) adds nothing the
+      two don't imply (with home advantage). Next: re-slice on a walk at ba78638 (the big-club
+      residual left, and 2022's regulars +3.5 pp in every band, `diag-match-strength-we.txt`,
+      which is the five-subs season of idea 2). The real fix for the club effect is
+      European / cup fixtures as a source (`main` has the ESPN adapter and congestion
+      features since #51, which `research` lacks: see *Needs the user*).
+16. **DEF goal spread: closed** (model; new 2026-10-29, one variant DISCARD). Starters'
+    realized DEF goals on E[goals] have slope 0.68 at h0 / 0.66 at h1–5 (MID 0.95, FWD
+    0.98), top share quintile 0.85 of expected, bottom 1.19 (`diag-def-spread.txt`).
+    `goal_prior_by_position=((2, 3840),)`: MSE h0 −0.00019 (min gain), 4 of 6 seasons. The
+    pooled slope is mostly between-season level: in-season slopes are 0.69–0.97, and even a
+    perfect in-season rescale of DEF goal points is worth ≤ −0.0005 pooled in any season
+    (`diag-def-ceiling.txt`). Not worth another value.
+
 Looked at 2026-10-28, no lead: the team model (λ_against calibrated within 2 % at every
 horizon, P(CS) 0.279 vs 0.281, slope 0.92–0.95, `diag-team-lambda.txt`); P(60+ | start)
 (within 0.01 at h0; `diag-c60.txt`); P(start) by price (premium outfield ±0.02 by season,
@@ -300,6 +332,19 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 `diag-finish-price-over.txt`).
 
 ## Needs the user (not the loop's to do)
+
+- **Two new keeps on `research`** (2026-10-29, idea 15): `win_expectancy` (1ff8914) and
+  `club_rating` (6e09a1c), Elo match strength and the club's own Elo as minutes lag
+  features. Together MSE h0 −0.00428 (4.24715 → 4.24287), h1–5 −0.00225, 2017–22 all
+  better. Promotion checks: (1) `fplopt check leakage` on the two features (they read
+  `team_rating` per fixture: the training rows take the match's own pre-match rating, the
+  horizon fixtures the deadline rating); (2) live `team_rating` coverage for 2026/27 (built
+  from football-data results: is the current season's Elo up to date at each deadline?);
+  (3) it overlaps with `main`'s ESPN congestion features (#51): compare against them, or
+  merge `main` into `research` first so the loop tests on top of them.
+- **Crowd still blocked** (2026-10-29): the harness hash changed (62719625 → b7e2afde,
+  same baseline metrics), but the walk still lacks `player_gw_ownership` and the snapshot
+  transfer columns. Both re-runs failed with the same KeyErrors (ledger `crowd-recheck`).
 
 - **The harness can't see the crowd** (2026-10-28, idea 13; the night's main finding). Two
   input-list changes in the pinned `dev/calibrate_v1.py` (yours): add
@@ -376,6 +421,13 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
   `state/bot.sqlite`.
 
 ## Done
+
+- **Club rating** (model, KEEP 2026-10-29, 6e09a1c): `club_rating` in `LAG_FEATURES`, the
+  club's own Elo before the fixture. MSE h0 −0.00212, h1–5 −0.00126, all 6 seasons better,
+  Brier start h0 −0.13 %. Big clubs rotate whatever the opponent (idea 15).
+- **Win expectancy** (model, KEEP 2026-10-29, 1ff8914): `win_expectancy` in `LAG_FEATURES`,
+  the club's Elo expected score in the fixture (home advantage 60). MSE h0 −0.00216, h1–5
+  −0.00099, 5 of 6 seasons better (2020 +0.0008), Brier start h0 −0.11 %.
 
 - **Share prior curvature** (model, KEEP 2026-10-27, dbb3265):
   `SharesParams.price_prior_quadratic`, a ridged z² term in the goal and assist share price
