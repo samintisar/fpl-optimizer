@@ -10,10 +10,14 @@ gains a Triple Captain and a Bench Boost would have added in that GW.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
 from fplopt.backtest.chip_values import GAIN_COLUMNS
+from fplopt.backtest.rules import backtest_rules
+from fplopt.seasons import DEVELOP_SEASONS
 
 __all__ = (
     "CELL",
@@ -25,6 +29,7 @@ __all__ = (
     "gap_by_cell",
     "gap_by_chip",
     "gw_kind",
+    "holding_value",
     "paired",
     "start_type",
 )
@@ -195,3 +200,56 @@ def forecast_slope(predicted: pd.Series, realized: pd.Series) -> dict[str, float
     resid = y - (intercept + slope * x)
     se = float(np.sqrt(resid @ resid / (n - 2) / sxx)) if sxx > 0 else nan
     return {"slope": slope, "se": se, "intercept": intercept, "bias": float((y - x).mean()), "n": n}
+
+
+def holding_value(
+    rows: pd.DataFrame, realized: dict[str, str], table: dict[str, tuple[float, ...]]
+) -> pd.DataFrame:
+    """Per chip, window and GWs left `L`: `ex_ante` (the mean over runs of the best ex-ante
+    gain among the window's last L GWs: `chip_values.estimate_terminal_values`, unclipped
+    and per window), `realized` (the mean realized gain at that ex-ante best GW, from the
+    column `realized[chip]`; NaN for chips without one), `table` (`table[chip][L − 1]`, the
+    value P plans with), `exante_ratio` and `realized_ratio` (each over `table`), and n."""
+    rules = backtest_rules(max(DEVELOP_SEASONS))
+    out = []
+    for chip, column in GAIN_COLUMNS.items():
+        real_col = realized.get(chip)
+        for window in [w for w in rules.chips if w.name == chip]:
+            span = window.stop - window.start + 1
+            sums = np.zeros(span)
+            real_sums = np.zeros(span)
+            counts = np.zeros(span, dtype="int64")
+            for _, run in rows.groupby(["season", "policy", "start_id"], sort=True):
+                by_gw = run.set_index("gw_index")
+                best, best_real = -math.inf, math.nan
+                for left in range(1, span + 1):
+                    gw = window.stop - left + 1
+                    if gw in by_gw.index and not pd.isna(by_gw.at[gw, column]):
+                        gain = float(by_gw.at[gw, column])
+                        if gain > best:
+                            best = gain
+                            best_real = float(by_gw.at[gw, real_col]) if real_col else math.nan
+                    if best > -math.inf:
+                        sums[left - 1] += best
+                        real_sums[left - 1] += best_real
+                        counts[left - 1] += 1
+            values = table.get(chip, ())
+            for left in range(1, span + 1):
+                n = int(counts[left - 1])
+                ex_ante = sums[left - 1] / n if n else math.nan
+                real = real_sums[left - 1] / n if n and real_col else math.nan
+                tab = float(values[left - 1]) if left <= len(values) else math.nan
+                out.append(
+                    {
+                        "chip": chip,
+                        "window_start": window.start,
+                        "left": left,
+                        "n": n,
+                        "ex_ante": ex_ante,
+                        "realized": real,
+                        "table": tab,
+                        "exante_ratio": ex_ante / tab if tab else math.nan,
+                        "realized_ratio": real / tab if tab else math.nan,
+                    }
+                )
+    return pd.DataFrame(out)

@@ -5,6 +5,9 @@ import pandas as pd
 import pytest
 
 from fplopt.backtest import chip_diagnostics as cd
+from fplopt.backtest.chip_values import estimate_terminal_values
+from fplopt.backtest.rules import backtest_rules
+from fplopt.seasons import DEVELOP_SEASONS
 
 
 def gws(season=2018, start="template@1", n=10, chips=None, points=None):
@@ -126,3 +129,56 @@ def test_forecast_slope_recovers_a_planted_slope():
 def test_forecast_slope_skips_missing_pairs_and_needs_three():
     got = cd.forecast_slope(pd.Series([1.0, 2.0, np.nan, 4.0]), pd.Series([1.0, 2.0, 3.0, np.nan]))
     assert got["n"] == 2 and np.isnan(got["slope"])
+
+
+def season_rows(seed, start="template@1", season=2018):
+    rng = np.random.default_rng(seed)
+    n = 38
+    return pd.DataFrame(
+        {
+            "season": season,
+            "start_id": start,
+            "policy": "s0",
+            "gw_index": np.arange(1, n + 1),
+            "gain_tc": rng.uniform(3, 12, n),
+            "gain_bb": rng.uniform(0, 8, n),
+            "gain_fh": rng.uniform(-2, 10, n),
+            "gain_wc": rng.uniform(-5, 20, n),
+            "captain_points": rng.integers(0, 20, n),
+            "bench_points": rng.integers(0, 15, n),
+        }
+    )
+
+
+def test_holding_value_ex_ante_matches_the_terminal_value_estimate():
+    # estimate_terminal_values pools a chip's windows per L: compare the n-weighted mean
+    rows = pd.concat([season_rows(1), season_rows(2, start="random0@1")], ignore_index=True)
+    table = {c: (1.0,) * 19 for c in ("3xc", "bboost", "freehit", "wildcard")}
+    got = cd.holding_value(rows, {"3xc": "captain_points", "bboost": "bench_points"}, table)
+    pooled = (
+        got.assign(w=got["ex_ante"] * got["n"])
+        .groupby(["chip", "left"])[["w", "n"]]
+        .sum()
+        .pipe(lambda t: t["w"] / t["n"])
+    )
+    for chip, values in estimate_terminal_values(rows).items():
+        mine = pooled.loc[chip].sort_index().to_numpy()[: len(values)]
+        np.testing.assert_allclose(np.clip(mine, 0, None), values)
+
+
+def test_holding_value_realized_is_taken_at_the_ex_ante_best_gw():
+    rows = season_rows(3)
+    rules = backtest_rules(max(DEVELOP_SEASONS))
+    stop = max(w.stop for w in rules.chips if w.name == "3xc" and w.start == 1)
+    # L = 1: the window's last GW only
+    last = rows.loc[rows["gw_index"] == stop].iloc[0]
+    # L = 2: the better of the last two by gain_tc
+    two = rows[rows["gw_index"].isin([stop - 1, stop])].sort_values("gain_tc").iloc[-1]
+    got = cd.holding_value(rows, {"3xc": "captain_points"}, {"3xc": (2.0,) * 19})
+    tc = got[(got["chip"] == "3xc") & (got["window_start"] == 1)].set_index("left")
+    assert tc.loc[1, "realized"] == last["captain_points"]
+    assert tc.loc[2, "realized"] == two["captain_points"]
+    assert tc.loc[1, "table"] == 2.0
+    assert tc.loc[1, "realized_ratio"] == pytest.approx(last["captain_points"] / 2.0)
+    fh = got[got["chip"] == "freehit"]
+    assert fh["realized"].isna().all()  # no realized column given
