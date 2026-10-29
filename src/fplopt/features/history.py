@@ -53,7 +53,13 @@ the as-of schedule) and the keys differ per fixture.
   it), horizon fixtures from both clubs' newest ratings before the deadline (NaN without
   one). Big clubs rest regulars against weak sides: develop 2017-22 h0, regulars (P(start)
   > 0.7) start 3.7 pp under prediction when λ_for − λ_against > 1.6, in all 6 seasons
-  (results/research/diag-match-strength.txt); the lags alone can't see the opponent.
+  (results/research/diag-match-strength.txt); the lags alone can't see the opponent;
+- `club_rating`: his club's own Elo before the fixture (training rows `rating_before` of
+  the match, horizon fixtures its newest `rating_after` before the deadline). With
+  win_expectancy alone, top-6 clubs' regulars still start 1.3-1.7 pp under prediction
+  against mid and bottom sides and the other clubs' 0.4-2.4 pp over (develop 2017-22 h0,
+  results/research/diag-own-opp.txt): big clubs rotate (European fixtures we don't have),
+  which the match's expectancy can't tell from a weak opponent.
 
 **Dropped (no source):** European/cup matches (no data; rest days count league fixtures
 only), manager tenure, age. `team_join_date` is not a feature: the snapshot carries it only
@@ -153,6 +159,7 @@ LAG_FEATURES = (
     "club_continuity",
     "club_fixtures_season",
     "win_expectancy",
+    "club_rating",
 )
 TARGETS = ("minutes", "start", "sixty", "sub")
 TRAINING_KEYS = (
@@ -435,8 +442,10 @@ def _competition(frame: pd.DataFrame, by: list[str]) -> pd.DataFrame:
 
 def _match_expectancy(view: AsOfView) -> pd.DataFrame:
     """Per played (team_key, fixture_key) in `team_rating`: the side's Elo `expected_score`
-    before the match, as `win_expectancy`."""
-    ratings = view.table("team_rating", columns=["team_key", "fixture_key", "expected_score"])
+    and `rating_before` before the match, as `win_expectancy` and `club_rating`."""
+    ratings = view.table(
+        "team_rating", columns=["team_key", "fixture_key", "expected_score", "rating_before"]
+    )
     ratings = ratings[ratings["fixture_key"].notna() & ratings["expected_score"].notna()]
     ratings = ratings.drop_duplicates(["team_key", "fixture_key"], keep="last")
     return pd.DataFrame(
@@ -444,6 +453,7 @@ def _match_expectancy(view: AsOfView) -> pd.DataFrame:
             "team_key": ratings["team_key"].astype("int64").to_numpy(),
             "fixture_key": ratings["fixture_key"].astype("int64").to_numpy(),
             "win_expectancy": ratings["expected_score"].astype("float64").to_numpy(),
+            "club_rating": ratings["rating_before"].astype("float64").to_numpy(),
         }
     )
 
@@ -544,6 +554,7 @@ def _horizon_fixtures(view: AsOfView, season: int) -> pd.DataFrame:
         + home * ELO_HOME_ADVANTAGE
     )
     out["win_expectancy"] = 1.0 / (1.0 + 10.0 ** (-edge / 400.0))
+    out["club_rating"] = out["team_key"].map(elo).astype("float64")
     out = out.sort_values(["team_key", "kickoff_time", "fixture_key"], kind="mergesort")
     out["club_fixture_order"] = out.groupby("team_key").cumcount().astype("float64")
     return out
@@ -616,6 +627,7 @@ def prediction_frame(view: AsOfView) -> pd.DataFrame:
                 "kickoff_time",
                 "rest_days",
                 "win_expectancy",
+                "club_rating",
                 "club_fixture_order",
             ]
         ],

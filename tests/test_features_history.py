@@ -384,6 +384,8 @@ def test_win_expectancy_is_the_clubs_elo_expected_score(synthetic):
     got = frame.set_index(["team_key", "fixture_key"])["win_expectancy"]
     assert got.notna().all()
     np.testing.assert_allclose(got, expected.loc[got.index, "expected_score"])
+    club = frame.set_index(["team_key", "fixture_key"])["club_rating"]
+    np.testing.assert_allclose(club, expected.loc[club.index, "rating_before"])
     at = gameweeks.loc[gameweeks["gw"] == 6, "deadline_time"].iloc[0]
     predicted = prediction_frame(store.as_of(at))
     assert predicted["win_expectancy"].between(0, 1, inclusive="neither").all()
