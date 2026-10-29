@@ -13,14 +13,19 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from fplopt.backtest.chip_values import GAIN_COLUMNS
+
 __all__ = (
     "CELL",
     "KEYS",
     "WC_SPAN",
     "attribute_chips",
+    "gain_distribution",
     "gap_by_cell",
     "gap_by_chip",
+    "gw_kind",
     "paired",
+    "start_type",
 )
 
 KEYS = ["season", "start_id", "gw_index"]
@@ -93,3 +98,80 @@ def gap_by_cell(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
         .agg(n=("diff", "size"), mean_diff=("diff", "mean"), mean_diff_xg=("diff_xg", "mean"))
         .reset_index()
     )
+
+
+def start_type(start_id: pd.Series) -> pd.Series:
+    """ "template" or "random" from a start id (template@1, random0@20, ...)."""
+    return start_id.str.extract(r"^(template|random)", expand=False)
+
+
+def _kind(n: int) -> str:
+    return "blank" if n == 0 else "single" if n == 1 else "double"
+
+
+def gw_kind(schedule: pd.DataFrame, player_gw: pd.DataFrame, rows: pd.DataFrame) -> pd.DataFrame:
+    """Per row of `rows` (season, gw, captain = player_key), in row order:
+    `captain_fixtures` (his club's league fixtures that GW, his club from `player_gw`),
+    `captain_kind` (blank / single / double), `n_double_clubs` and `n_blank_clubs` (the
+    season's clubs with ≥ 2 / 0 fixtures that GW; a season's clubs are the schedule's) and
+    `gw_type` (normal, double, blank or double+blank)."""
+    sides = pd.concat(
+        [
+            schedule[["season", "gw", "home_team_key"]].rename(
+                columns={"home_team_key": "team_key"}
+            ),
+            schedule[["season", "gw", "away_team_key"]].rename(
+                columns={"away_team_key": "team_key"}
+            ),
+        ]
+    )
+    sides = sides[sides["team_key"] > 0]
+    counts = sides.groupby(["season", "gw", "team_key"]).size().rename("n").reset_index()
+    clubs = sides.drop_duplicates(["season", "team_key"])[["season", "team_key"]]
+    gws_ = schedule.drop_duplicates(["season", "gw"])[["season", "gw"]]
+    grid = gws_.merge(clubs, on="season").merge(counts, on=["season", "gw", "team_key"], how="left")
+    grid["n"] = grid["n"].fillna(0).astype("int64")
+    per_gw = grid.groupby(["season", "gw"]).agg(
+        n_double_clubs=("n", lambda s: int((s >= 2).sum())),
+        n_blank_clubs=("n", lambda s: int((s == 0).sum())),
+    )
+    club = player_gw[["player_key", "season", "gw", "team_key"]].rename(
+        columns={"player_key": "captain"}
+    )
+    out = rows[["season", "gw", "captain"]].reset_index(drop=True)
+    out = out.merge(club, on=["season", "gw", "captain"], how="left")
+    out = out.merge(counts, on=["season", "gw", "team_key"], how="left")
+    out["captain_fixtures"] = out["n"].fillna(0).astype("int64")
+    out["captain_kind"] = out["captain_fixtures"].map(_kind)
+    out = out.join(per_gw, on=["season", "gw"])
+    out[["n_double_clubs", "n_blank_clubs"]] = (
+        out[["n_double_clubs", "n_blank_clubs"]].fillna(0).astype("int64")
+    )
+    double, blank = out["n_double_clubs"] > 0, out["n_blank_clubs"] > 0
+    out["gw_type"] = np.select(
+        [double & blank, double, blank], ["double+blank", "double", "blank"], "normal"
+    )
+    out.index = rows.index
+    return out[["captain_fixtures", "captain_kind", "n_double_clubs", "n_blank_clubs", "gw_type"]]
+
+
+def gain_distribution(rows: pd.DataFrame, by: list[str]) -> pd.DataFrame:
+    """Each chip's ex-ante gain (`GAIN_COLUMNS`) per group of `by`: n, mean, median, p75,
+    p90. Rows without a gain (chip unavailable) are left out, chips without any gain too."""
+    parts = []
+    for chip, column in GAIN_COLUMNS.items():
+        part = rows[by + [column]].rename(columns={column: "gain"}).dropna(subset=["gain"])
+        if part.empty:
+            continue
+        g = part.groupby(by)["gain"]
+        table = pd.DataFrame(
+            {
+                "n": g.size(),
+                "mean": g.mean(),
+                "median": g.median(),
+                "p75": g.quantile(0.75),
+                "p90": g.quantile(0.9),
+            }
+        ).reset_index()
+        parts.append(table.assign(chip=chip))
+    return pd.concat(parts, ignore_index=True)[["chip", *by, "n", "mean", "median", "p75", "p90"]]

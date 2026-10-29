@@ -1,5 +1,6 @@
 """Tests for fplopt.backtest.chip_diagnostics (spec 2026-10-29-chip-diagnostics-design)."""
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -58,3 +59,54 @@ def test_gap_by_cell_uses_8_gw_cells():
 def test_paired_refuses_runs_that_dont_match():
     with pytest.raises(ValueError, match="rows"):
         cd.paired(gws(n=10), gws(n=9))
+
+
+def schedule_rows(rows):
+    """rows = [(season, gw, home, away)]."""
+    return pd.DataFrame(
+        [
+            {"fixture_key": k, "season": s, "gw": g, "home_team_key": h, "away_team_key": a}
+            for k, (s, g, h, a) in enumerate(rows)
+        ]
+    )
+
+
+def test_gw_kind_counts_the_captains_fixtures_and_the_gws_doubles_and_blanks():
+    # clubs 1-4; GW1 normal, GW2 clubs 1 and 2 play each other twice, clubs 3-4 blank
+    schedule = schedule_rows([(2018, 1, 1, 2), (2018, 1, 3, 4), (2018, 2, 1, 2), (2018, 2, 1, 2)])
+    player_gw = pd.DataFrame(
+        {"player_key": [7, 7, 8], "season": 2018, "gw": [1, 2, 2], "team_key": [1, 1, 3]}
+    )
+    rows = pd.DataFrame(
+        {
+            "season": 2018,
+            "start_id": "t",
+            "gw": [1, 2, 2],
+            "gw_index": [1, 2, 2],
+            "captain": [7, 7, 8],
+        }
+    )
+    got = cd.gw_kind(schedule, player_gw, rows)
+    assert list(got["captain_fixtures"]) == [1, 2, 0]
+    assert list(got["captain_kind"]) == ["single", "double", "blank"]
+    assert list(got["n_double_clubs"]) == [0, 2, 2]
+    assert list(got["n_blank_clubs"]) == [0, 2, 2]
+    assert list(got["gw_type"]) == ["normal", "double+blank", "double+blank"]
+
+
+def test_gain_distribution_quantiles_per_chip_and_group():
+    rows = pd.DataFrame(
+        {
+            "start_id": ["template@1"] * 4 + ["random0@1"] * 4,
+            "gain_tc": [1.0, 2.0, 3.0, 4.0, 10.0, 10.0, 10.0, 10.0],
+            "gain_bb": np.nan,
+            "gain_fh": np.nan,
+            "gain_wc": np.nan,
+        }
+    )
+    rows["start_type"] = cd.start_type(rows["start_id"])
+    table = cd.gain_distribution(rows, ["start_type"])
+    tc = table[table["chip"] == "3xc"].set_index("start_type")
+    assert tc.loc["template", "median"] == 2.5 and tc.loc["random", "p90"] == 10
+    assert tc.loc["template", "n"] == 4
+    assert set(table["chip"]) == {"3xc"}  # chips without gains are left out
