@@ -1,7 +1,7 @@
 //! `fplopt-rs`: the Rust port's CLI. Subcommands and flags match the Python `fplopt` CLI
 //! so a migrated job only swaps the binary name (migration plan §2). Each batch adds the
 //! commands it ports: batch 0 the parity check, batch 1 the archiver (`snapshot`,
-//! `backfill`, `check freshness`).
+//! `backfill`, `check freshness`), batch 2 the build (`build`, `rules export`).
 //!
 //! Archiver jobs run like Python's: a failure is logged and alerted to Telegram (exit 1);
 //! SIGTERM stops a long run cleanly, after its manifest is written (exit 143, no alert); a
@@ -53,6 +53,21 @@ enum Command {
         #[arg(long, default_value_t = history::FIRST_SEASON, value_name = "YEAR")]
         from_season: i32,
     },
+    /// Per-season rules config.
+    Rules {
+        #[arg(value_enum)]
+        command: RulesJob,
+        /// Season label, e.g. 2026-27.
+        season: String,
+        /// Output directory.
+        #[arg(long, default_value = "config/scoring")]
+        out: PathBuf,
+    },
+    /// Build data/<table>.parquet from raw/.
+    Build {
+        /// Table name, or 'all'.
+        target: String,
+    },
     /// Archive health and parity checks.
     Check {
         #[command(subcommand)]
@@ -64,6 +79,11 @@ enum Command {
 enum SnapshotJob {
     Daily,
     Tick,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum RulesJob {
+    Export,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -152,6 +172,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let name = format!("backfill {}", value_name(command));
             Ok(run_job(&name, |ctx| backfill(ctx, command, from_season)))
         }
+        Command::Rules { command: RulesJob::Export, season, out } => {
+            // The label is parsed inside the job, so a bad label is alerted like any failure.
+            Ok(run_job("rules export", |ctx| {
+                let season = fplopt_core::seasons::parse_season_label(&season)?;
+                fplopt_build::rules::export_rules(&ctx.store, season, &out).map(drop)
+            }))
+        }
+        Command::Build { target } => Ok(run_job("build", |ctx| {
+            let mut build_ctx = fplopt_build::BuildContext::new(
+                ctx.store.clone(),
+                &ctx.settings.data_dir,
+                "config",
+            );
+            fplopt_build::build(&[target], &mut build_ctx).map(drop)
+        })),
         Command::Check { check: Check::Freshness { max_age_hours } } => {
             Ok(run_job("check freshness", |ctx| {
                 let max_age = TimeDelta::microseconds((max_age_hours * 3.6e9).round() as i64);

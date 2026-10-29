@@ -1,0 +1,28 @@
+[package]
+name = "fplopt-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+chrono-tz = "0.10.4"
+csv = "1.4.0"
+fplopt-archive = { version = "0.1.0", path = "../fplopt-archive" }
+fplopt-core = { version = "0.1.0", path = "../fplopt-core" }
+log = "0.4.34"
+polars = { version = "0.55.2", features = ["parquet", "dtype-full", "timezones"] }
+rayon = "1.12.0"
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+unicode-normalization = "0.1.26"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -1025,6 +1025,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fplopt-build"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "chrono-tz",
+ "csv",
+ "fplopt-archive",
+ "fplopt-core",
+ "log",
+ "polars",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "fplopt-cli"
 version = "0.1.0"
 dependencies = [
@@ -1034,6 +1054,7 @@ dependencies = [
  "dotenvy",
  "env_logger",
  "fplopt-archive",
+ "fplopt-build",
  "fplopt-core",
  "fplopt-parity",
  "gethostname",
@@ -2292,6 +2313,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
+ "chrono-tz",
  "crossbeam-queue",
  "fast-float2",
  "fastrand",
@@ -2336,6 +2358,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "495117c99362a05d4ea744c21f54d570991fd8ae3ec9dfb1f0e01f055747553f"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "fallible-streaming-iterator",
  "hashbrown 0.17.1",
  "indexmap",
