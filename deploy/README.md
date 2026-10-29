@@ -219,21 +219,25 @@ Each file records the snapshot it came from (`source.path`, `source.snapshot_at`
 
 ## Rust archiver shadow (migration batch 1)
 
-Gate (b) of the Rust migration (`docs/superpowers/plans/2026-10-28-rust-migration.md`): the Rust
-archiver runs beside the live one for a week, writing only to `raw-shadow/` (gitignored), from
-its own timers 2 (tick) and 15 (daily) minutes after the live ones. It doesn't ping the heartbeat;
+Gate (b) of the Rust migration (`docs/superpowers/plans/2026-10-28-rust-migration.md`), run in
+the week before the switch to Rust (the whole migration switches over at once, from the
+`rust-migration` branch). The Rust archiver runs beside the live one for a week, writing only
+to `raw-shadow/` (gitignored), from its own timers 2 (tick) and 15 (daily) minutes after the live ones. It doesn't ping the heartbeat;
 its failures alert as `fplopt-rs ... failed`. It doubles the archiver's API calls for that week,
 odds credits included (~80 a month more, within the free 500).
 
-Rust lives in the `fplopt` user's home (`~/.cargo`, installed with rustup, no sudo):
+Rust lives in the `fplopt` user's home (`~/.cargo`, installed with rustup, no sudo). The binary
+is built in its own checkout of the branch, `~/fpl-optimizer-rs`; the live `~/fpl-optimizer`
+stays on `main` (the shadow units run there only for `.env` and `config/`):
 
 ```bash
-cd ~/fpl-optimizer && git pull && nice -n 15 ~/.cargo/bin/cargo build --release --locked -j 8
+git clone -b rust-migration https://github.com/samintisar/fpl-optimizer.git ~/fpl-optimizer-rs
+cd ~/fpl-optimizer-rs && nice -n 15 ~/.cargo/bin/cargo build --release --locked -j 8
 cp deploy/systemd-shadow/* ~/.config/systemd/user/ && systemctl --user daemon-reload
 systemctl --user enable --now fplopt-rs-shadow-tick.timer fplopt-rs-shadow-daily.timer
 ```
 
-After a `git pull` during the week, rebuild (the units run `target/release/fplopt-rs`). Logs:
+After a `git pull` in `~/fpl-optimizer-rs` during the week, rebuild there (the units run its `target/release/fplopt-rs`). Logs:
 `journalctl --user -u 'fplopt-rs-shadow-*' --since today`. After a week, compare (`--since`
 skips the first shadow daily, which backfills what `raw/` already had):
 
@@ -241,7 +245,7 @@ skips the first shadow daily, which backfills what `raw/` already had):
 .venv/bin/python dev/shadow_compare.py --since <UTC time after the first shadow daily>
 ```
 
-**Cutover** (once both gates pass): in `fplopt-tick.service`, `fplopt-daily.service` and
+**Cutover** (at the switch, once every batch's gates pass): in `fplopt-tick.service`, `fplopt-daily.service` and
 `fplopt-freshness.service`, `ExecStart` runs `%h/fpl-optimizer/target/release/fplopt-rs` instead
 of `.venv/bin/fplopt` (same arguments); re-copy, `daemon-reload`, then disable and remove the
 shadow timers and `raw-shadow/`. Rollback: revert the three units (the Python CLI stays

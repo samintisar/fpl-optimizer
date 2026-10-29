@@ -7,10 +7,11 @@ Type=oneshot
 TimeoutStartSec=20min
 WorkingDirectory=%h/fpl-optimizer
 # Rust migration batch 1, gate (b): the Rust archiver beside the live one, writing only to
-# raw-shadow/. No heartbeat (the variable is set, so .env can't fill it in); failures alert
-# themselves as "fplopt-rs ... failed".
+# raw-shadow/. The binary is built in ~/fpl-optimizer-rs (a checkout of the rust-migration
+# branch; the live checkout stays on main); .env and config/ are the live ones. No heartbeat
+# (the variable is set, so .env can't fill it in); failures alert as "fplopt-rs ... failed".
 Environment=FPLOPT_RAW_DIR=%h/fpl-optimizer/raw-shadow
 Environment=HEALTHCHECK_PING_URL=
 Nice=10
 ExecStartPre=/bin/sh -c 'for i in $$(seq 24); do getent hosts fantasy.premierleague.com >/dev/null && exit 0; sleep 5; done; echo "fantasy.premierleague.com still not resolving after 2 minutes; starting anyway" >&2; exit 0'
-ExecStart=%h/fpl-optimizer/target/release/fplopt-rs snapshot tick
+ExecStart=%h/fpl-optimizer-rs/target/release/fplopt-rs snapshot tick

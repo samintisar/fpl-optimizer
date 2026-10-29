@@ -2,6 +2,8 @@
 
 **Status: APPROVED by the user, 2026-10-28**, as drafted: bot (batch 5) before models (6); a `v1rs` fallback goes live only with the user's go-ahead; random start states frozen as a fixture (batch 7); notebooks decided in batch 8; one PR per batch. Logged in PLAN §12.
 
+**Amended by the user, 2026-10-29: one branch, one switch.** Every batch lands on the long-lived `rust-migration` branch (a draft PR to `main` runs CI); nothing goes live batch by batch. The server switches to Rust once, when all batches are done and every gate has passed. Batch 0 was merged to `main` before this (no runtime effect); batch 1 onwards live only on the branch. `main` keeps the running Python system: fixes there are merged into the branch, and the gates re-run on the branch before the switch.
+
 **Goal:** the whole project runs in Rust: archiver, build, features, models, optimizer, backtester and bot. We port one batch at a time. Python and Rust run side by side until the last batch deletes Python. Each batch goes live only after it **matches the Python output** on real data (the parity gate), so the live bot keeps the behaviour that passed Phase 6.
 
 **Scope today:** about 27k lines in `src/fplopt`, 23k lines of tests. Third-party code that matters:
@@ -61,13 +63,14 @@ crates/
 
 - Tables: sort by the table's keys (`TABLES`), then integers/strings/dates/booleans equal, floats equal within relative `1e-9` unless the batch says otherwise. Same schema (names, dtypes, nullability).
 - Results are written to `results/parity/<UTC>-<area>/` and appended to `results/experiments.csv` (family `rust parity`), like every other run.
-- **A batch goes live only when its gate passes.** If it can't pass (§6 models), the Rust version is a new variant and goes through the usual model/backtest comparison before it can replace Python.
-- Python tests for a ported module are translated to Rust tests in the same batch. The Python module and its tests are deleted when the batch is live and has run for one full gameweek without a parity regression.
+- **Every batch's gate passes on the branch; the switch waits for all of them.** If it can't pass (§6 models), the Rust version is a new variant and goes through the usual model/backtest comparison before it can replace Python.
+- Python tests for a ported module are translated to Rust tests in the same batch. The Python modules and their tests stay until after the switch: they are deleted (batch 8) once the Rust system has run one full gameweek without a parity regression.
 
 ### 4. Deploy
 
 - ubuntuworker, user `fplopt`, no sudo: install Rust with `rustup` in the user's home and `cargo build --release --locked` in `~/fpl-optimizer` after `git pull` (the LightGBM C library and `libgomp1` are already there for Python's LightGBM).
-- Cutover = edit the systemd unit to `fplopt-rs …`, `daemon-reload`, restart. Rollback = revert the unit. The Python commands stay installed until batch 8.
+- The switch (once, at the end) = merge `rust-migration`, build, edit every unit to `fplopt-rs …`, `daemon-reload`, restart, between two gameweeks. Rollback = revert the units (the Python commands stay installed until batch 8). Each batch's "Cutover" line below names the units it moves at the switch.
+- Shadow runs (batch 1 gate b, and any later ones) come right before the switch, from a separate checkout of the branch, never from `~/fpl-optimizer`.
 - Shadow runs write to a separate directory (`raw-shadow/`, `data-shadow/`, `state/context-shadow/`), never to the live ones. `raw/` stays append-only.
 
 ### 5. Research loop
@@ -101,7 +104,7 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
 - Same paths, file names, timestamps, compression (`.json.gz`, `.csv.gz`, `.json.xz` copied verbatim).
 - **Gate:** (a) recorded HTTP responses → identical decompressed files and paths in both implementations; (b) one week of shadow runs into `raw-shadow/`: same file set per tick (± fetch-time jitter), every file valid and parsable.
 - Cutover: `fplopt-tick`, `fplopt-daily`, `fplopt-freshness` units.
-- *As built:* `crates/fplopt-archive` (adapters behind traits, raw store, jobs, ESPN, backfills; `backfill espn` too, added to Python by #51). Gzip output is deterministic (mtime 0) but its compressed bytes differ from zlib's; the gate compares decompressed contents, as planned. Run manifests are written field for field like Python's `json.dumps` (`fplopt_core::pyjson`, also now used by the experiment log: `ensure_ascii` included). Error lines keep Python's exception names (`kind_name`: `HTTPStatusError`, `InvalidPayload`, `SnapshotError`, ...), so manifests and alerts read the same; alert texts start `fplopt-rs` so shadow alerts are told apart. Status errors name the URL without its query string. SIGTERM sets a flag the long loops check, so a stopped run still writes its manifest (exit 143, no alert, as Python's `SystemExit`). Base URLs can be redirected by `FPLOPT_<SOURCE>_URL` for the harness only. Gate (a): `dev/archiver_parity.py`, 17 scenarios (daily, tick on an empty store / in a window / idle, every backfill, freshness fresh/stale/empty, and five with 404s, 5xx and invalid payloads) all identical (2026-10-29). Gate (b): shadow units in `deploy/systemd-shadow/`, compared by `dev/shadow_compare.py`.
+- *As built:* `crates/fplopt-archive` (adapters behind traits, raw store, jobs, ESPN, backfills; `backfill espn` too, added to Python by #51). Gzip output is deterministic (mtime 0) but its compressed bytes differ from zlib's; the gate compares decompressed contents, as planned. Run manifests are written field for field like Python's `json.dumps` (`fplopt_core::pyjson`, also now used by the experiment log: `ensure_ascii` included). Error lines keep Python's exception names (`kind_name`: `HTTPStatusError`, `InvalidPayload`, `SnapshotError`, ...), so manifests and alerts read the same; alert texts start `fplopt-rs` so shadow alerts are told apart. Status errors name the URL without its query string. SIGTERM sets a flag the long loops check, so a stopped run still writes its manifest (exit 143, no alert, as Python's `SystemExit`). Base URLs can be redirected by `FPLOPT_<SOURCE>_URL` for the harness only. Gate (a): `dev/archiver_parity.py`, 17 scenarios (daily, tick on an empty store / in a window / idle, every backfill, freshness fresh/stale/empty, and five with 404s, 5xx and invalid payloads) all identical (2026-10-29). Gate (b): shadow units in `deploy/systemd-shadow/`, compared by `dev/shadow_compare.py`; it runs in the week before the switch.
 
 ### Batch 2 — Build (~3–4 weeks)
 
@@ -176,7 +179,7 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
 | Fuzzy-match score off by one → a different Understat mapping | Exact port + golden test on every real name pair |
 | A bot cutover breaks during a deadline | Cutover only between gameweeks; rollback by reverting the unit |
 | Research loop breaks | Harness stays on Python until batch 7, re-pinned by the user |
-| Two implementations to maintain for months | Python modules deleted one gameweek after each cutover; no new features in Python for ported areas |
+| Two implementations to maintain for months | No new features in Python for ported areas; Python fixes on `main` merged into the branch, gates re-run before the switch; Python deleted one gameweek after the switch |
 
 ## Open questions for the user
 
@@ -184,4 +187,4 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
 2. Batch 6 fallback: is a `v1rs` variant that passes the comparisons acceptable live, or must Rust match Python v1 exactly?
 3. Batch 7: freeze random start states as a fixture (recommended) or port numpy's RNG?
 4. Batch 8: keep notebooks as Python analysis over Parquet, or drop them?
-5. One PR per batch (as with the earlier phases)?
+5. One PR per batch (as with the earlier phases)? *Changed 2026-10-29: one branch, one switch (see Status).*
