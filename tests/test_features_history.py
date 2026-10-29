@@ -1,6 +1,8 @@
 """Minutes-model history features (`fplopt.features.history`): start inference, lags from
 earlier fixtures only, targets, suspensions, and the prediction frame."""
 
+import functools
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -90,7 +92,17 @@ def league(rows: list[dict], n_gws: int = 12, seasons: tuple[int, ...] = (SEASON
         "player_match": player_match,
         "player_gw": player_gw.reset_index(drop=True),
         "player_season": player_season.reset_index(drop=True),
+        "team_rating": empty_ratings(),
     }
+
+
+@functools.cache
+def _ratings_schema() -> pd.DataFrame:
+    return synthetic_tables(seasons=(2023,), n_clubs=2)["team_rating"].iloc[:0]
+
+
+def empty_ratings() -> pd.DataFrame:
+    return _ratings_schema().copy()
 
 
 def frame_at(tables: dict, gw: int, season: int = SEASON) -> pd.DataFrame:
@@ -361,6 +373,23 @@ def test_prediction_lags_match_the_training_rows_of_that_gameweek(synthetic):
         pd.testing.assert_frame_equal(
             predicted.loc[common, history_only], trained.loc[common, history_only]
         )
+
+
+def test_win_expectancy_is_the_clubs_elo_expected_score(synthetic):
+    gameweeks = synthetic["gameweek"]
+    store = DataStore(tables=synthetic)
+    frame = training_frame(store.as_of(gameweeks["deadline_time"].max()))
+    ratings = synthetic["team_rating"].dropna(subset=["fixture_key"])
+    expected = ratings.astype({"fixture_key": "int64"}).set_index(["team_key", "fixture_key"])
+    got = frame.set_index(["team_key", "fixture_key"])["win_expectancy"]
+    assert got.notna().all()
+    np.testing.assert_allclose(got, expected.loc[got.index, "expected_score"])
+    at = gameweeks.loc[gameweeks["gw"] == 6, "deadline_time"].iloc[0]
+    predicted = prediction_frame(store.as_of(at))
+    assert predicted["win_expectancy"].between(0, 1, inclusive="neither").all()
+    # both sides of a fixture sum to 1 (home advantage moves the split, not the total)
+    sides = predicted.drop_duplicates(["fixture_key", "team_key"])
+    np.testing.assert_allclose(sides.groupby("fixture_key")["win_expectancy"].sum(), 1.0)
 
 
 def test_a_ban_in_the_prediction_frame():

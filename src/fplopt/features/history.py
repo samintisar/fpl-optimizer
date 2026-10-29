@@ -47,7 +47,13 @@ the as-of schedule) and the keys differ per fixture.
   `CONTINUITY_WINDOW` fixtures before the deadline (any season), the mean share of its 11
   starters who also started its previous fixture (NaN before its second fixture);
 - `club_fixtures_season`: his club's league fixtures this season before the GW (the phase
-  of the season: early on, the lag windows still hold last season's rows).
+  of the season: early on, the lag windows still hold last season's rows);
+- `win_expectancy`: his club's Elo expected score in the fixture (`team_rating`, home
+  advantage included): training rows the match's own `expected_score` (ratings just before
+  it), horizon fixtures from both clubs' newest ratings before the deadline (NaN without
+  one). Big clubs rest regulars against weak sides: develop 2017-22 h0, regulars (P(start)
+  > 0.7) start 3.7 pp under prediction when λ_for − λ_against > 1.6, in all 6 seasons
+  (results/research/diag-match-strength.txt); the lags alone can't see the opponent.
 
 **Dropped (no source):** European/cup matches (no data; rest days count league fixtures
 only), manager tenure, age. `team_join_date` is not a feature: the snapshot carries it only
@@ -103,6 +109,7 @@ ABSENCE_RUN = 3  # 0-minute rows before an appearance that make it a return
 RETURN_WINDOW = 3
 RED_WINDOW = 3
 CONTINUITY_WINDOW = 5  # club fixtures in club_continuity
+ELO_HOME_ADVANTAGE = 60.0  # fplopt.build.elo.HOME_ADVANTAGE (win_expectancy at prediction)
 # (yellow cards this season, last gw_index at which reaching them bans, matches banned).
 # Simplified from the Premier League rules: the real cut-offs are the club's 19th / 32nd
 # league match (here gw_index 19 / 32), cup and European cards and matches don't count, and
@@ -145,6 +152,7 @@ LAG_FEATURES = (
     "fixtures_at_club",
     "club_continuity",
     "club_fixtures_season",
+    "win_expectancy",
 )
 TARGETS = ("minutes", "start", "sixty", "sub")
 TRAINING_KEYS = (
@@ -425,6 +433,21 @@ def _competition(frame: pd.DataFrame, by: list[str]) -> pd.DataFrame:
     return frame.assign(comp_start_sum=total - rate, comp_rank=rank.astype("float64"))
 
 
+def _match_expectancy(view: AsOfView) -> pd.DataFrame:
+    """Per played (team_key, fixture_key) in `team_rating`: the side's Elo `expected_score`
+    before the match, as `win_expectancy`."""
+    ratings = view.table("team_rating", columns=["team_key", "fixture_key", "expected_score"])
+    ratings = ratings[ratings["fixture_key"].notna() & ratings["expected_score"].notna()]
+    ratings = ratings.drop_duplicates(["team_key", "fixture_key"], keep="last")
+    return pd.DataFrame(
+        {
+            "team_key": ratings["team_key"].astype("int64").to_numpy(),
+            "fixture_key": ratings["fixture_key"].astype("int64").to_numpy(),
+            "win_expectancy": ratings["expected_score"].astype("float64").to_numpy(),
+        }
+    )
+
+
 def _sorted(rows: pd.DataFrame) -> pd.DataFrame:
     return rows.sort_values(list(SORT_KEYS), kind="mergesort").reset_index(drop=True)
 
@@ -453,6 +476,9 @@ def training_frame(view: AsOfView) -> pd.DataFrame:
         on=["team_key", "fixture_key"],
         how="left",
         validate="many_to_one",
+    )
+    frame = frame.merge(
+        _match_expectancy(view), on=["team_key", "fixture_key"], how="left", validate="many_to_one"
     )
     frame = _competition(frame, ["fixture_key", "team_key"])
     frame["club_continuity"] = _club_continuity(matches, frame)
@@ -507,6 +533,17 @@ def _horizon_fixtures(view: AsOfView, season: int) -> pd.DataFrame:
         validate="one_to_one",
     )
     out["rest_days"] = out["rest_days"].fillna(REST_CAP_DAYS)
+    ratings = view.table("team_rating", columns=["team_key", "event_time", "rating_after"])
+    ratings = ratings.sort_values(["team_key", "event_time"], kind="mergesort")
+    elo = ratings.drop_duplicates("team_key", keep="last").set_index("team_key")["rating_after"]
+    elo = elo.astype("float64")
+    home = out["is_home"].astype("float64").to_numpy() * 2.0 - 1.0  # +1 home, -1 away
+    edge = (
+        out["team_key"].map(elo).to_numpy(dtype="float64")
+        - out["opponent_team_key"].astype("int64").map(elo).to_numpy(dtype="float64")
+        + home * ELO_HOME_ADVANTAGE
+    )
+    out["win_expectancy"] = 1.0 / (1.0 + 10.0 ** (-edge / 400.0))
     out = out.sort_values(["team_key", "kickoff_time", "fixture_key"], kind="mergesort")
     out["club_fixture_order"] = out.groupby("team_key").cumcount().astype("float64")
     return out
@@ -578,6 +615,7 @@ def prediction_frame(view: AsOfView) -> pd.DataFrame:
                 "horizon",
                 "kickoff_time",
                 "rest_days",
+                "win_expectancy",
                 "club_fixture_order",
             ]
         ],

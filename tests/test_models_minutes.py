@@ -150,7 +150,9 @@ def test_horizon_decay_moves_later_gws_to_the_long_run_rate(league, fitted):
     h = frame["horizon"].to_numpy()
     expected = expit(0.8**h * logit(w * p_model + (1 - w) * long_run))
     np.testing.assert_allclose(shrunk["p_start"], expected, rtol=1e-6)
-    assert (shrunk["p_start"][h == 0].to_numpy() == half["p_start"][h == 0].to_numpy()).all()
+    np.testing.assert_allclose(
+        shrunk["p_start"][h == 0].to_numpy(), half["p_start"][h == 0].to_numpy(), rtol=1e-12
+    )
 
 
 def regular_starter(tables, season=2023, gw=4):
