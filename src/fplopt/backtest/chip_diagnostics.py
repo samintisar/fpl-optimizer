@@ -20,6 +20,7 @@ __all__ = (
     "KEYS",
     "WC_SPAN",
     "attribute_chips",
+    "forecast_slope",
     "gain_distribution",
     "gap_by_cell",
     "gap_by_chip",
@@ -175,3 +176,22 @@ def gain_distribution(rows: pd.DataFrame, by: list[str]) -> pd.DataFrame:
         ).reset_index()
         parts.append(table.assign(chip=chip))
     return pd.concat(parts, ignore_index=True)[["chip", *by, "n", "mean", "median", "p75", "p90"]]
+
+
+def forecast_slope(predicted: pd.Series, realized: pd.Series) -> dict[str, float]:
+    """OLS of realized on predicted over the pairs with both: slope, its SE, intercept, bias
+    (mean realized − predicted) and n. Slope < 1: the larger the forecast gain, the more it
+    overstates (the optimizer's curse). NaN statistics under 3 pairs."""
+    frame = pd.DataFrame({"x": predicted, "y": realized}).astype("float64").dropna()
+    n = len(frame)
+    nan = float("nan")
+    if n < 3:
+        return {"slope": nan, "se": nan, "intercept": nan, "bias": nan, "n": n}
+    x, y = frame["x"].to_numpy(), frame["y"].to_numpy()
+    xc = x - x.mean()
+    sxx = float(xc @ xc)
+    slope = float(xc @ (y - y.mean()) / sxx) if sxx > 0 else nan
+    intercept = float(y.mean() - slope * x.mean())
+    resid = y - (intercept + slope * x)
+    se = float(np.sqrt(resid @ resid / (n - 2) / sxx)) if sxx > 0 else nan
+    return {"slope": slope, "se": se, "intercept": intercept, "bias": float((y - x).mean()), "n": n}

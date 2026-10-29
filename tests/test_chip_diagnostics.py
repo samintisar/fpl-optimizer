@@ -110,3 +110,19 @@ def test_gain_distribution_quantiles_per_chip_and_group():
     assert tc.loc["template", "median"] == 2.5 and tc.loc["random", "p90"] == 10
     assert tc.loc["template", "n"] == 4
     assert set(table["chip"]) == {"3xc"}  # chips without gains are left out
+
+
+def test_forecast_slope_recovers_a_planted_slope():
+    rng = np.random.default_rng(0)
+    predicted = pd.Series(rng.uniform(2, 12, 2000))
+    realized = 1.0 + 0.5 * predicted + rng.normal(0, 0.5, 2000)
+    got = cd.forecast_slope(predicted, realized)
+    assert got["slope"] == pytest.approx(0.5, abs=0.02)
+    assert got["intercept"] == pytest.approx(1.0, abs=0.15)
+    assert got["se"] < 0.01 and got["n"] == 2000
+    assert got["bias"] == pytest.approx(float((realized - predicted).mean()))
+
+
+def test_forecast_slope_skips_missing_pairs_and_needs_three():
+    got = cd.forecast_slope(pd.Series([1.0, 2.0, np.nan, 4.0]), pd.Series([1.0, 2.0, 3.0, np.nan]))
+    assert got["n"] == 2 and np.isnan(got["slope"])
