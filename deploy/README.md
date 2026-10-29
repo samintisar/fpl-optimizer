@@ -171,6 +171,9 @@ systemd-run --user --unit=fplopt-bf-vaastav --working-directory="$HOME/fpl-optim
 systemd-run --user --unit=fplopt-bf-fplcache --working-directory="$HOME/fpl-optimizer" \
   -p OnFailure=fplopt-failure@fplopt-bf-fplcache.service \
   "$HOME/fpl-optimizer/.venv/bin/fplopt" backfill fplcache
+systemd-run --user --unit=fplopt-bf-espn --working-directory="$HOME/fpl-optimizer" \
+  -p OnFailure=fplopt-failure@fplopt-bf-espn.service \
+  "$HOME/fpl-optimizer/.venv/bin/fplopt" backfill espn   # ~2-3 h; resumable, re-run after a failure
 
 journalctl --user -u fplopt-bf-vaastav -f          # follow one
 systemctl --user status fplopt-bf-fplcache         # still running?

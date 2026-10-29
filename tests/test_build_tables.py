@@ -30,12 +30,14 @@ def test_table_specs_are_well_formed():
         "team_dim",
         "player_dim",
         "understat_map",
+        "espn_map",
     }
     assert {n for n, k in kinds.items() if k == "schedule"} == {"schedule", "gameweek"}
     assert {n for n, k in kinds.items() if k == "snapshot"} == {
         "player_snapshot",
         "fixture_snapshot",
         "odds_snapshot",
+        "espn_schedule_snapshot",
     }
 
 
@@ -86,3 +88,4 @@ def test_static_tables_declare_public_columns_and_a_visibility_source():
         "web_name",
     )
     assert TABLES["understat_map"].public_columns == ("understat_id", "player_key")
+    assert TABLES["espn_map"].public_columns == ("espn_athlete_id", "player_key")

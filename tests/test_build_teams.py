@@ -19,12 +19,12 @@ from fplopt.ingest.raw_store import RawStore, gzip_bytes
 REPO_CONFIG = Path(__file__).resolve().parents[1] / "config"
 RUN = datetime(2026, 10, 6, 3, 26, 9, tzinfo=UTC)
 
-TEAMS_CSV = """team_key,short_name,fpl_names,football_data,understat,odds_api
-3,ARS,Arsenal,Arsenal,Arsenal,Arsenal
-17,NFO,Nott'm Forest,Nott'm Forest,Nottingham Forest,Nottingham Forest
-88,HUL,Hull;Hull City,Hull,Hull,Hull City
-9,COV,Coventry City,Coventry,,
-1001,WIG,,Wigan,,
+TEAMS_CSV = """team_key,short_name,fpl_names,football_data,understat,odds_api,espn
+3,ARS,Arsenal,Arsenal,Arsenal,Arsenal,359
+17,NFO,Nott'm Forest,Nott'm Forest,Nottingham Forest,Nottingham Forest,393
+88,HUL,Hull;Hull City,Hull,Hull,Hull City,306
+9,COV,Coventry City,Coventry,,,388
+1001,WIG,,Wigan,,,
 """
 
 
@@ -121,6 +121,7 @@ def test_team_dim_from_config_types(tmp_path):
         "football_data_name",
         "understat_name",
         "odds_api_name",
+        "espn_id",
         "in_fpl",
         "event_time",
         "available_at",
@@ -137,7 +138,7 @@ def test_team_dim_from_config_types(tmp_path):
 
 def test_config_rejects_duplicate_names_and_bad_columns(tmp_path):
     path = tmp_path / "teams.csv"
-    path.write_text(TEAMS_CSV + "1002,WGN,,Wigan,,\n", encoding="utf-8")
+    path.write_text(TEAMS_CSV + "1002,WGN,,Wigan,,,\n", encoding="utf-8")
     with pytest.raises(ValueError, match="football_data.*Wigan"):
         read_teams_config(path)
     path.write_text("team_key,short_name\n3,ARS\n", encoding="utf-8")
@@ -253,3 +254,22 @@ def test_repo_teams_config_is_well_formed():
     assert resolver.football_data("Man United") == resolver.understat("Manchester United") == 1
     assert resolver.odds_api("Brighton and Hove Albion") == 36
     assert resolver.fpl_name("Ipswich Town") == resolver.fpl_name("Ipswich") == 40
+
+
+def test_team_dim_carries_espn_ids_and_the_resolver_finds_them():
+    dim = team_dim_from_config(REPO_CONFIG / "teams.csv")
+    by_short = dim.set_index("short_name")["espn_id"]
+    assert by_short["ARS"] == "359" and by_short["CHE"] == "363" and by_short["MUN"] == "360"
+    assert dim.loc[~dim["in_fpl"], "espn_id"].isna().all()  # synthetic pre-2016 clubs
+    assert dim.loc[dim["in_fpl"], "espn_id"].notna().all()
+    resolver = TeamResolver(dim)
+    assert resolver.espn("363") == 8
+    assert resolver.find("espn", "999999") is None
+
+
+def test_teams_config_rejects_a_duplicate_espn_id(tmp_path):
+    text = (REPO_CONFIG / "teams.csv").read_text(encoding="utf-8")
+    path = tmp_path / "teams.csv"
+    path.write_text(text.replace(",363\n", ",359\n"), encoding="utf-8")  # Chelsea -> Arsenal's id
+    with pytest.raises(ValueError, match="espn '359' used by team_key"):
+        read_teams_config(path)

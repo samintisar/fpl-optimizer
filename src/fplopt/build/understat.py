@@ -300,23 +300,29 @@ def fpl_name_variants(player_season: pd.DataFrame) -> dict[int, set[str]]:
     return names
 
 
-def candidate_pairs(upm: pd.DataFrame, fpl_apps: pd.DataFrame) -> pd.DataFrame:
-    """understat_id x player_key pairs that appeared in at least one common fixture:
+def candidate_pairs(
+    upm: pd.DataFrame,
+    fpl_apps: pd.DataFrame,
+    *,
+    id_col: str = "understat_id",
+    minutes_col: str = "us_minutes",
+) -> pd.DataFrame:
+    """<id_col> x player_key pairs that appeared in at least one common fixture:
     together (common fixtures), shared (… with |minutes diff| <= 5), us_apps, fpl_apps (the
     FPL player's appearances in fixtures with any Understat row), overlap (shared / min of the
     two) and coverage (shared / max of the two)."""
-    us = upm[["understat_id", "fixture_key", "us_minutes"]]
+    us = upm[[id_col, "fixture_key", minutes_col]]
     joined = us.merge(fpl_apps[["player_key", "fixture_key", "minutes"]], on="fixture_key")
-    joined["close"] = (joined["us_minutes"] - joined["minutes"]).abs() <= MINUTES_TOLERANCE
+    joined["close"] = (joined[minutes_col] - joined["minutes"]).abs() <= MINUTES_TOLERANCE
     pairs = (
-        joined.groupby(["understat_id", "player_key"])["close"]
+        joined.groupby([id_col, "player_key"])["close"]
         .agg(together="size", shared="sum")
         .reset_index()
     )
-    us_apps = us.groupby("understat_id").size().rename("us_apps")
+    us_apps = us.groupby(id_col).size().rename("us_apps")
     covered = fpl_apps[fpl_apps["fixture_key"].isin(set(us["fixture_key"]))]
     fpl_counts = covered.groupby("player_key").size().rename("fpl_apps")
-    pairs = pairs.join(us_apps, on="understat_id").join(fpl_counts, on="player_key")
+    pairs = pairs.join(us_apps, on=id_col).join(fpl_counts, on="player_key")
     apps = pairs[["us_apps", "fpl_apps"]]
     pairs["overlap"] = pairs["shared"] / apps.min(axis=1)
     pairs["coverage"] = pairs["shared"] / apps.max(axis=1)
@@ -324,9 +330,14 @@ def candidate_pairs(upm: pd.DataFrame, fpl_apps: pd.DataFrame) -> pd.DataFrame:
 
 
 def name_scores(
-    pairs: pd.DataFrame, us_names: dict[int, str], fpl_names: dict[int, set[str]]
+    pairs: pd.DataFrame,
+    us_names: dict[int, str],
+    fpl_names: dict[int, set[str]],
+    *,
+    id_col: str = "understat_id",
 ) -> pd.Series:
-    """Best token_set_ratio between the pair's Understat name and any FPL name variant."""
+    """Best token_set_ratio between the pair's source name (by `id_col`) and any FPL name
+    variant."""
     us_norm = {uid: normalise_name(name) for uid, name in us_names.items()}
     fpl_norm = {key: {normalise_name(n) for n in names} for key, names in fpl_names.items()}
     cache: dict[tuple[str, str], float] = {}
@@ -341,7 +352,7 @@ def name_scores(
         return best
 
     return pd.Series(
-        [score(u, k) for u, k in zip(pairs["understat_id"], pairs["player_key"], strict=True)],
+        [score(u, k) for u, k in zip(pairs[id_col], pairs["player_key"], strict=True)],
         index=pairs.index,
         dtype="float64",
     )
@@ -359,19 +370,17 @@ def acceptable(pairs: pd.DataFrame) -> pd.Series:
     )
 
 
-def greedy_assign(pairs: pd.DataFrame) -> pd.DataFrame:
+def greedy_assign(pairs: pd.DataFrame, *, id_col: str = "understat_id") -> pd.DataFrame:
     """One-to-one assignment of acceptable pairs by (coverage, shared, name) descending."""
     ranked = pairs[acceptable(pairs)].sort_values(
-        ["coverage", "shared", "name_score", "understat_id", "player_key"],
+        ["coverage", "shared", "name_score", id_col, "player_key"],
         ascending=[False, False, False, True, True],
         kind="mergesort",
     )
     used_us: set[int] = set()
     used_fpl: set[int] = set()
     keep = []
-    for idx, uid, key in zip(
-        ranked.index, ranked["understat_id"], ranked["player_key"], strict=True
-    ):
+    for idx, uid, key in zip(ranked.index, ranked[id_col], ranked["player_key"], strict=True):
         if uid in used_us or key in used_fpl:
             continue
         used_us.add(uid)
@@ -380,32 +389,30 @@ def greedy_assign(pairs: pd.DataFrame) -> pd.DataFrame:
     return ranked.loc[keep]
 
 
-def read_overrides(config_dir: Path) -> pd.DataFrame:
-    """Understat rows of config/overrides.csv as understat_id, player_key (both Int64):
-    both set = force the pair; player_key blank = that Understat id maps to nobody;
-    source_id blank = that FPL player has no Understat id."""
+def read_overrides(
+    config_dir: Path, *, source: str = "understat", id_col: str = "understat_id"
+) -> pd.DataFrame:
+    """`source` rows of config/overrides.csv as <id_col>, player_key (both Int64):
+    both set = force the pair; player_key blank = that source id maps to nobody;
+    source_id blank = that FPL player has no id in the source."""
     path = Path(config_dir) / OVERRIDES_FILE
-    out = pd.DataFrame(
-        {"understat_id": pd.Series(dtype="Int64"), "player_key": pd.Series(dtype="Int64")}
-    )
+    out = pd.DataFrame({id_col: pd.Series(dtype="Int64"), "player_key": pd.Series(dtype="Int64")})
     if not path.exists():
         return out
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
-    df = df[df["source"].str.strip() == "understat"]
+    df = df[df["source"].str.strip() == source]
     if df.empty:
         return out
 
     def ints(values: pd.Series) -> pd.arrays.IntegerArray:
         return pd.array([int(v) if v else pd.NA for v in values.str.strip()], dtype="Int64")
 
-    out = pd.DataFrame(
-        {"understat_id": ints(df["source_id"]), "player_key": ints(df["player_key"])}
-    )
-    both_blank = out["understat_id"].isna() & out["player_key"].isna()
-    if both_blank.any() or out.dropna(subset=["understat_id"])["understat_id"].duplicated().any():
-        raise ValueError(f"{path}: understat overrides need a unique source_id or a player_key")
+    out = pd.DataFrame({id_col: ints(df["source_id"]), "player_key": ints(df["player_key"])})
+    both_blank = out[id_col].isna() & out["player_key"].isna()
+    if both_blank.any() or out.dropna(subset=[id_col])[id_col].duplicated().any():
+        raise ValueError(f"{path}: {source} overrides need a unique source_id or a player_key")
     if out.dropna(subset=["player_key"])["player_key"].duplicated().any():
-        raise ValueError(f"{path}: player_key overridden twice for understat")
+        raise ValueError(f"{path}: player_key overridden twice for {source}")
     return out.reset_index(drop=True)
 
 
@@ -441,26 +448,28 @@ MAP_SCHEMA = pa.DataFrameSchema(
 MAP_SORT_BY = ("understat_id",)
 
 
-def map_understat(pairs: pd.DataFrame, overrides: pd.DataFrame) -> pd.DataFrame:
-    """understat_map from scored candidate pairs (`candidate_pairs` + `name_score`): greedy
-    auto assignment, then overrides, which win (see `read_overrides`). An override that
-    only names an FPL player removes his auto mapping and adds no row."""
-    chosen = greedy_assign(pairs).assign(method="auto")
+def map_understat(
+    pairs: pd.DataFrame, overrides: pd.DataFrame, *, id_col: str = "understat_id"
+) -> pd.DataFrame:
+    """understat_map (or another source's map, keyed by `id_col`) from scored candidate
+    pairs (`candidate_pairs` + `name_score`): greedy auto assignment, then overrides, which
+    win (see `read_overrides`). An override that only names an FPL player removes his auto
+    mapping and adds no row."""
+    chosen = greedy_assign(pairs, id_col=id_col).assign(method="auto")
     if len(overrides):
-        overridden_ids = set(overrides["understat_id"].dropna().astype(int))
+        overridden_ids = set(overrides[id_col].dropna().astype(int))
         overridden_keys = set(overrides["player_key"].dropna().astype(int))
         chosen = chosen[
-            ~chosen["understat_id"].isin(overridden_ids)
-            & ~chosen["player_key"].isin(overridden_keys)
+            ~chosen[id_col].isin(overridden_ids) & ~chosen["player_key"].isin(overridden_keys)
         ]
-        forced = overrides.dropna(subset=["understat_id"]).astype({"understat_id": "int64"})
+        forced = overrides.dropna(subset=[id_col]).astype({id_col: "int64"})
         scored = forced.merge(
-            pairs.astype({"player_key": "Int64"}), on=["understat_id", "player_key"], how="left"
+            pairs.astype({"player_key": "Int64"}), on=[id_col, "player_key"], how="left"
         )
         chosen = pd.concat([chosen, scored.assign(method="override")], ignore_index=True)
     out = pd.DataFrame(
         {
-            "understat_id": chosen["understat_id"].astype("int64"),
+            id_col: chosen[id_col].astype("int64"),
             "player_key": chosen["player_key"].astype("Int64"),
             "method": chosen["method"].astype(str),
             "shared": chosen["shared"].astype("Int64"),
@@ -471,7 +480,7 @@ def map_understat(pairs: pd.DataFrame, overrides: pd.DataFrame) -> pd.DataFrame:
     )
     out["event_time"] = pd.Series(EPOCH, index=out.index, dtype=UTC_US)
     out["available_at"] = out["event_time"]
-    return out[MAP_COLUMNS].reset_index(drop=True)
+    return out[[id_col, *MAP_COLUMNS[1:]]].reset_index(drop=True)
 
 
 # --- validation --------------------------------------------------------------------------

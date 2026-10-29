@@ -48,6 +48,7 @@ fpl-optimizer/
     optimize/      # MILP formulation, chips, top-k plans
     backtest/      # season simulator, state generation, policies, metrics
     bot/           # Telegram handlers, alerts, user state
+  crates/          # the Rust port, one crate per area (docs/superpowers/plans/2026-10-28-rust-migration.md)
   notebooks/
   tests/           # incl. leakage tests
   config/          # scoring rules per season, overrides.csv, settings
@@ -78,6 +79,7 @@ fpl-optimizer/
 | The Odds API (free tier: 500 credits/month, live odds only) | EPL h2h + totals (2 credits/call, ~80/month) | Daily + pre-deadline |
 | vaastav/Fantasy-Premier-League | Historical FPL per-GW data, 2016/17+ | One-time backfill, pinned to a commit, copied into `raw/` |
 | football-data.co.uk | Historical results + match odds (1X2, O/U 2.5, Asian handicap); team match xG (`HxG`/`AxG`) from 2026/27 | One-time backfill; current season re-fetched daily |
+| ESPN site API (`site.api.espn.com`, unofficial, no key) | PL, FA Cup, EFL Cup, Community Shield and UEFA club matches of PL clubs from 2016/17: lineups, substitution and card times (`espn_match`, `espn_player_match`, `espn_map`), and the published cup/European schedule (`espn_schedule_snapshot`). Spec `docs/superpowers/specs/2026-10-27-espn-cup-data-design.md` | One-time backfill (`backfill espn`); daily: the last 7 days' results and the next 60 days' schedule. Undocumented API: a format change stops new data, never the archived history |
 
 **Odds columns (football-data):** use an **explicit allowlist** of pre-match columns, never a regex. Closing columns carry a `C` after the bookmaker code (`B365CH`, `PSCH`, `AvgC>2.5`, `AHCh`) from 2019/20 (2018/19: `PSC*` only) — but `CLH` is Coral, not closing. Prefer market averages (`Avg*`) or Betfair Exchange (`BFE*`); Pinnacle (`PS*`) is sparse in 2025/26. Pre-match odds are collected Friday afternoon (weekend) / Tuesday afternoon (midweek), i.e. close to the deadline — treated as as-of-deadline odds for the backfilled seasons (≤ 2025/26). But `E0.csv` lists **played matches only** (checked 2026-10-08: none of the four 2026/27 files on the server, fetched 2026-10-06 → 10-08, has an unplayed row), so for a season we archive live (2026/27 →) a price only reaches `raw/` after kickoff: it is history, never as-of-deadline odds for its own match. Upcoming-match odds for the current season come from The Odds API.
 
@@ -260,7 +262,7 @@ Blending rule everywhere: equal weights or a single fixed weight — never weigh
 - Each component model is split into `fit(view)` and `predict(view, fitted)`. The fit for deadline d uses `view.earlier(cutoff)`, where the cutoff is the deadline of the season's latest refit GW ≤ d (`gw_index` 1, 5, 9, …). The registered model is still one callable on the view, so the leakage check covers the fit. The backtester's `Caches` memoizes fits by cutoff; model modules keep no state.
 - LightGBM runs only through `fplopt.models.gbm`: fixed `seed`, `num_threads=1`, `deterministic=True`, `force_row_wise=True`.
 - `starts` is null before 2022/23 GW16. Before then, a team's 11 players with the most minutes in a fixture count as its starters; Task 3 measures the accuracy (§6.3).
-- Minutes features with no source are dropped: European/cup matches, manager tenure, age.
+- Minutes features with no source are dropped: manager tenure, age. (European/cup matches: from ESPN since 2026-10-27, spec `docs/superpowers/specs/2026-10-27-espn-cup-data-design.md`; used for bans and the congestion and cup-minutes features.)
 - Phase 5 criterion 1 ("beat both baselines on component metrics") is tested on xP and decision metrics, because the baselines have no components. On validate, `v1` vs `rolling` and vs `ep_next` must have:
   - lower MSE per player-GW (one-sided Diebold-Mariano clustered by GW, p < 0.10);
   - lower candidate-weighted MSE;
@@ -389,11 +391,11 @@ Hurdle structure:
 - P(60+ | start)
 - P(sub appearance | not start) and expected sub minutes
 
-Features: recent starts/minutes, starts share of **team** matches, days rest, midweek European/cup match, recent return from absence, positional competition, price, new signing (`team_join_date`), manager tenure, age.
+Features: recent starts/minutes, starts share of **team** matches, days rest, congestion (since 2026-10-27, ESPN `club_match` as known at the deadline: rest days and days to the next match in any competition, a UEFA match within 4 days), his own cup/European minutes in the last 7 days and whether he started the latest cup tie since his last PL fixture (appearances there also count for days since the last appearance), recent return from absence, positional competition, price, new signing (`team_join_date`), manager tenure, age. Full list and definitions: the `fplopt.features.history` docstring.
 
 Post-processing:
 - **Team normalization:** Σ P(start) ≈ 11 and Σ expected minutes ≈ 990 per team per fixture.
-- **Deterministic suspensions:** yellow-card thresholds and red-card bans zero P(start) for the affected GWs.
+- **Deterministic suspensions:** yellow-card thresholds and red-card bans zero P(start) for the affected GWs. Since 2026-10-27 (`fplopt.features.bans`, ESPN data): a domestic red (PL, FA Cup, EFL Cup) bans the club's next *domestic* matches, so a cup tie in between serves part of it; a straight red is 1 certain + 2 likely matches, a second yellow 1; PL yellow bans stay PL-only. Certain and likely banned fixtures each get a fitted start rate (2–7% and about 25% on develop).
 - **Horizon decay:** for GW+2 onward, decay predictions toward the player's long-run start rate.
 
 ### 6.4 Adjustment layer (prediction time only)
@@ -786,3 +788,4 @@ The test and threshold are fixed now; any change before Phase 6 runs must be log
 | 2026-10-11 | **Chip study validate: chips stay manual** (`docs/superpowers/plans/2026-10-11-chip-policy.md` §6d; one run, 2023/24–2024/25). Full-run window t-test, 8-GW cells: P vs H **+1.70/GW**, p 0.083 (needed < 0.0296); P vs no chips +4.18/GW, p 0.025 (pass); H vs no chips +2.49/GW, p 0.106 (fail). | Gate as pre-registered: P needed to beat both H and no chips, and H to beat no chips. P was the best arm in both seasons (season totals 1,971 / 1,954 vs H 1,903 / 1,928 and none 1,840 / 1,814) but its edge over the rules isn't established on two seasons. `/chips` stays information only. |
 | 2026-10-11 | Phase 7 design approved (`docs/superpowers/plans/2026-10-11-phase-7-bot.md`): the bot and alert job run on botbox. The v1 xP is computed once per change of the archive as a shared **plan context**; a user's plan is the import + solve on it. SQLite user state keyed by `user_id`. **Invite-only** access (the admin `/allow`s each chat). Full recommendation 24 h before each deadline, plus a silent re-run after the pre-deadline snapshot that messages only on a change of plan 1's moves, captain or vice. System as Phase 6 (`holdout.SYSTEM`), no chips (manual). Plans are shown ranked by objective, with ties within the MIP gap labelled. | Botbox (3.8 GB, no swap) runs `build all` (1.7 GB) and v1 (2.0 GB) one at a time, so v1 can't run per user or per command. Invite-only bounds compute and API calls while the system is new. The tie labels act on the §8 live finding without changing the tested system. |
 | 2026-10-07 | Chip scenarios searched best-first by LP/derived upper bounds (same plan as solving all); bulk PuLP→highspy hand-over; club-aware dominance pruning; top-N 20/60/60/30. | #10 benchmark: 107–750 s → median 14 s per deadline; old dominance lost up to 6.6 pts, 10/30/30/15 up to 1.0. |
+| 2026-10-28 | **Migrate to Rust in batches** (`docs/superpowers/plans/2026-10-28-rust-migration.md`): Cargo workspace beside `src/fplopt`, Python and Rust exchange data only through files (`raw/`, `data/`, `state/`), no bindings. Each batch replaces one writer, goes live only after a parity gate against Python on real data, and its Python module is deleted a gameweek later. Order: foundations, archiver, build, features, optimizer, bot, models + live job, backtester, retire Python. | The goal is a full Rust codebase; file boundaries let the two run side by side, and the parity gate keeps the live system the one Phase 6 validated. Models last before the research tooling because they can't be bit-identical across optimizer libraries (fallback: a `v1rs` variant, live only on the user's go-ahead). |

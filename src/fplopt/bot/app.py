@@ -19,7 +19,7 @@ from fplopt.bot.messages import split_message
 from fplopt.bot.service import BotService, Reply
 from fplopt.redact import redact
 
-__all__ = ("COMMANDS", "build_application", "send_replies")
+__all__ = ("COMMANDS", "build_application", "parse_command", "send_replies")
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +37,17 @@ COMMANDS: dict[str, tuple[str, bool]] = {
     "block": ("block", True),
     "users": ("list_users", False),
 }
+
+
+def parse_command(text: str | None) -> tuple[str, list[str]] | None:
+    """(command, arguments) of a message that reads as one of `COMMANDS` but that Telegram
+    didn't mark as a command: pasted with formatting (e.g. copied from a code block), so it
+    reaches the text handler. The command is case-insensitive and may carry `@botname`."""
+    words = (text or "").split()
+    if not words or not words[0].startswith("/"):
+        return None
+    command = words[0][1:].split("@", 1)[0].lower()
+    return (command, words[1:]) if command in COMMANDS else None
 
 
 async def send_replies(bot: Any, replies: Sequence[Reply]) -> None:
@@ -78,30 +89,38 @@ def build_application(
     application = Application.builder().token(token).defaults(defaults).build()
     private = filters.ChatType.PRIVATE
 
-    def handler(method: str, with_args: bool) -> Callable[..., Any]:
+    async def run(command: str, chat_id: int, args: list[str], bot: Any) -> None:
+        method, with_args = COMMANDS[command]
         call = getattr(service, method)
+        if method in ("plan", "chips"):
+            await bot.send_chat_action(chat_id, "typing")
+        replies = await asyncio.to_thread(
+            (lambda: call(chat_id, args)) if with_args else (lambda: call(chat_id))
+        )
+        await send_replies(bot, replies)
 
+    def handler(command: str) -> Callable[..., Any]:
         async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             chat = update.effective_chat
-            if chat is None:
-                return
-            args = list(context.args or [])
-            if method in ("plan", "chips"):
-                await context.bot.send_chat_action(chat.id, "typing")
-            replies = await asyncio.to_thread(
-                (lambda: call(chat.id, args)) if with_args else (lambda: call(chat.id))
-            )
-            await send_replies(context.bot, replies)
+            if chat is not None:
+                await run(command, chat.id, list(context.args or []), context.bot)
 
         return handle
 
-    for command, (method, with_args) in COMMANDS.items():
-        application.add_handler(CommandHandler(command, handler(method, with_args), private))
+    for command in COMMANDS:
+        application.add_handler(CommandHandler(command, handler(command), private))
 
     async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
-        if chat is not None:
-            await send_replies(context.bot, await asyncio.to_thread(service.unknown, chat.id))
+        if chat is None:
+            return
+        message = update.effective_message
+        parsed = parse_command(message.text if message is not None else None)
+        if parsed is not None:  # a command pasted with formatting
+            command, args = parsed
+            await run(command, chat.id, args, context.bot)
+            return
+        await send_replies(context.bot, await asyncio.to_thread(service.unknown, chat.id))
 
     application.add_handler(MessageHandler(private & (filters.COMMAND | filters.TEXT), unknown))
 
