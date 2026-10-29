@@ -6,11 +6,19 @@
 //! `player_season` also rebuilds `player_match`; rebuilding `player_match` or `player_dim`
 //! clears their Understat columns, so `understat` and `team_match` rerun too.
 
+// Builders key maps by tuples of table columns; naming each tuple type would not help.
+#![allow(clippy::type_complexity)]
+
 pub mod common;
 pub mod fixtures;
+pub mod fuzz;
+pub mod players;
 pub mod rules;
+pub mod scoring;
+pub mod snapshots;
 pub mod table;
 pub mod teams;
+pub mod understat;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -62,6 +70,28 @@ fn run_builder(name: &str, ctx: &mut BuildContext) -> Result<Built> {
         "schedule" => Built::Table(fixtures::build_schedule(ctx)?, fixtures::SCHEDULE_SORT_BY),
         "fixture_snapshot" => {
             Built::Table(fixtures::build_fixture_snapshot(ctx)?, fixtures::FIXTURE_SNAPSHOT_SORT_BY)
+        }
+        "player_snapshot" => {
+            let (rows, counts) = snapshots::build_player_snapshot(ctx)?;
+            let seasons = counts.keys().copied().collect();
+            Built::Written { rows, seasons }
+        }
+        "player_gw" => Built::Table(players::build_player_gw(ctx)?, players::PLAYER_GW_SORT_BY),
+        "player_gw_ownership" => {
+            Built::Table(players::build_player_gw_ownership(ctx)?, players::PLAYER_GW_SORT_BY)
+        }
+        "player_season" => {
+            Built::Table(players::build_player_season(ctx)?, players::PLAYER_SEASON_SORT_BY)
+        }
+        "player_match" => {
+            Built::Table(players::build_player_match(ctx)?, players::PLAYER_MATCH_SORT_BY)
+        }
+        "player_dim" => Built::Table(players::build_player_dim(ctx)?, players::PLAYER_DIM_SORT_BY),
+        "understat" => {
+            Built::Written { rows: understat::build_understat(ctx)?, seasons: Vec::new() }
+        }
+        "team_match" => {
+            Built::Table(understat::build_team_match(ctx)?, understat::TEAM_MATCH_SORT_BY)
         }
         other => bail!("builder {other:?} is not ported yet"),
     })
