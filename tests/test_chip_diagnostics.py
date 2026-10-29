@@ -182,3 +182,32 @@ def test_holding_value_realized_is_taken_at_the_ex_ante_best_gw():
     assert tc.loc[1, "realized_ratio"] == pytest.approx(last["captain_points"] / 2.0)
     fh = got[got["chip"] == "freehit"]
     assert fh["realized"].isna().all()  # no realized column given
+
+
+def test_captain_congestion_flags_a_european_week_or_short_rest():
+    features = pd.DataFrame(
+        {
+            "player_key": [7, 7, 7, 8],
+            "season": 2018,
+            "gw": [1, 2, 2, 2],
+            "europe_week": [0.0, 0.0, 1.0, 0.0],
+            "rest_days_all": [7.0, 6.0, 3.0, 2.5],
+        }
+    )
+    rows = pd.DataFrame({"season": 2018, "gw": [1, 2, 2, 3], "captain": [7, 7, 8, 7]})
+    got = cd.captain_congestion(rows, features)
+    assert list(got) == [False, True, True, False]  # GW3: no feature row -> not flagged
+
+
+def test_ratio_split_and_weighted_share():
+    rows = pd.DataFrame(
+        {
+            "flag": [True, True, False, False],
+            "xp": [5.0, 5.0, 5.0, 5.0],
+            "real": [2.0, 4.0, 6.0, 6.0],
+        }
+    )
+    got = cd.ratio_split(rows, "flag", "xp", "real").set_index("flag")
+    assert got.loc[True, "ratio"] == pytest.approx(0.6) and got.loc[False, "ratio"] == 1.2
+    assert got.loc[True, "n"] == 2
+    assert cd.weighted_share(pd.Series([True, False, False]), pd.Series([2.0, 1.0, 1.0])) == 0.5

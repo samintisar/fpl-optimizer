@@ -21,9 +21,11 @@ from fplopt.seasons import DEVELOP_SEASONS
 
 __all__ = (
     "CELL",
+    "CONGESTED_REST",
     "KEYS",
     "WC_SPAN",
     "attribute_chips",
+    "captain_congestion",
     "forecast_slope",
     "gain_distribution",
     "gap_by_cell",
@@ -31,7 +33,9 @@ __all__ = (
     "gw_kind",
     "holding_value",
     "paired",
+    "ratio_split",
     "start_type",
+    "weighted_share",
 )
 
 KEYS = ["season", "start_id", "gw_index"]
@@ -253,3 +257,37 @@ def holding_value(
                     }
                 )
     return pd.DataFrame(out)
+
+
+CONGESTED_REST = 3.0  # rest_days_all at or below: a short-rest fixture
+
+
+def captain_congestion(rows: pd.DataFrame, features: pd.DataFrame) -> pd.Series:
+    """Per row (season, gw, captain = player_key): True if any of his fixtures that GW has
+    `europe_week` = 1 or `rest_days_all` ≤ `CONGESTED_REST`. `features`: player_key, season,
+    gw, europe_week, rest_days_all (one row per player fixture, e.g. `training_frame`). Rows
+    without a feature row are False."""
+    flag = (features["europe_week"] == 1) | (features["rest_days_all"] <= CONGESTED_REST)
+    per = (
+        features.assign(flag=flag)
+        .groupby(["player_key", "season", "gw"])["flag"]
+        .any()
+        .rename_axis(["captain", "season", "gw"])
+    )
+    keys = pd.MultiIndex.from_frame(rows[["captain", "season", "gw"]])
+    return pd.Series(per.reindex(keys).fillna(False).to_numpy(dtype=bool), index=rows.index)
+
+
+def ratio_split(rows: pd.DataFrame, flag: str, xp: str, real: str) -> pd.DataFrame:
+    """Per value of `flag`: n, the summed `xp` and `real`, and ratio = Σ real / Σ xp."""
+    g = rows.groupby(flag)
+    table = pd.DataFrame({"n": g.size(), "xp": g[xp].sum(), "realized": g[real].sum()})
+    table["ratio"] = table["realized"] / table["xp"]
+    return table.reset_index()
+
+
+def weighted_share(flag: pd.Series, weight: pd.Series) -> float:
+    """Σ weight over flagged rows / Σ weight: the share a chip-gain-weighted pick would land
+    in flagged fixtures."""
+    w = weight.astype("float64").clip(lower=0)
+    return float(w[flag.astype(bool)].sum() / w.sum())
