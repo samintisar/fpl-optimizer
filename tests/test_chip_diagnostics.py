@@ -211,3 +211,33 @@ def test_ratio_split_and_weighted_share():
     assert got.loc[True, "ratio"] == pytest.approx(0.6) and got.loc[False, "ratio"] == 1.2
     assert got.loc[True, "n"] == 2
     assert cd.weighted_share(pd.Series([True, False, False]), pd.Series([2.0, 1.0, 1.0])) == 0.5
+
+
+def test_attribution_works_positionally_with_duplicate_index_labels():
+    a = gws(start="a", n=4, chips={1: "3xc"})
+    b = gws(start="b", n=4)
+    got = cd.attribute_chips(pd.concat([a, b]))  # no ignore_index: labels repeat
+    assert list(got) == ["3xc", "none", "none", "none", "none", "none", "none", "none"]
+
+
+def test_paired_refuses_duplicate_keys_that_mask_a_missing_one():
+    a, b = gws(n=3), gws(n=3)
+    a["gw_index"] = [1, 1, 3]
+    with pytest.raises(ValueError, match="runs don't match"):
+        cd.paired(a, b)
+
+
+def test_holding_value_refuses_nan_realized_and_non_develop_seasons():
+    rows = season_rows(1)
+    rows.loc[5, "captain_points"] = np.nan
+    with pytest.raises(ValueError, match="captain_points"):
+        cd.holding_value(rows, {"3xc": "captain_points"}, {})
+    with pytest.raises(ValueError, match="develop seasons only"):
+        cd.holding_value(season_rows(1, season=2024), {}, {})
+
+
+def test_gain_distribution_refuses_rows_without_any_gain():
+    rows = pd.DataFrame({"g": ["x"], "gain_tc": np.nan, "gain_bb": np.nan,
+                         "gain_fh": np.nan, "gain_wc": np.nan})  # fmt: skip
+    with pytest.raises(ValueError, match="no chip gains"):
+        cd.gain_distribution(rows, ["g"])

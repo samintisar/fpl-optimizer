@@ -47,8 +47,9 @@ def attribute_chips(gws: pd.DataFrame) -> pd.Series:
     """Per row, the chip its points are attributed to: the chip played that GW, else
     "wildcard" within `WC_SPAN` GWs of a Wildcard in the same run (season, start_id), else
     "none". Index as `gws`."""
-    out = pd.Series("none", index=gws.index, dtype="object")
-    ordered = gws.sort_values(KEYS, kind="mergesort")
+    out = np.full(len(gws), "none", dtype=object)  # filled by position: labels may repeat
+    ordered = gws[[*KEYS, "chip"]].reset_index(drop=True)
+    ordered = ordered.sort_values(KEYS, kind="mergesort")
     for _, run in ordered.groupby(["season", "start_id"], sort=False):
         left = 0  # GWs of a Wildcard's span still to credit
         for idx, chip in zip(run.index, run["chip"], strict=True):
@@ -60,7 +61,7 @@ def attribute_chips(gws: pd.DataFrame) -> pd.Series:
             elif left > 0:
                 out[idx] = "wildcard"
             left = max(0, left - 1)
-    return out
+    return pd.Series(out, index=gws.index, dtype="object")
 
 
 def paired(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
@@ -69,7 +70,10 @@ def paired(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
     cols = KEYS + ["net_points", "xg_net_points"]
     left = a[cols].assign(chip=attribute_chips(a))
     right = b[cols].assign(chip=attribute_chips(b))
-    m = left.merge(right, on=KEYS, suffixes=("_a", "_b"))
+    try:
+        m = left.merge(right, on=KEYS, suffixes=("_a", "_b"), validate="one_to_one")
+    except ValueError as exc:  # pandas' MergeError: duplicate keys on a side
+        raise ValueError(f"runs don't match: duplicate rows per key ({exc})") from exc
     if not len(m) == len(a) == len(b):
         raise ValueError(f"runs don't match: {len(a)} and {len(b)} rows, {len(m)} paired")
     m["diff"] = (m["net_points_a"] - m["net_points_b"]).astype("float64")
@@ -80,7 +84,7 @@ def paired(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
 def gap_by_chip(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
     """a − b by the pair of attributed chips: n, mean_diff, mean_diff_xg and
     contribution_per_gw (the group's summed diff over all paired rows: the contributions sum
-    to the mean gap per GW). Sorted by contribution, largest first."""
+    to the mean gap per GW). Sorted by |contribution|, largest first."""
     m = paired(a, b)
     total = len(m)
     table = (
@@ -124,7 +128,8 @@ def gw_kind(schedule: pd.DataFrame, player_gw: pd.DataFrame, rows: pd.DataFrame)
     `captain_fixtures` (his club's league fixtures that GW, his club from `player_gw`),
     `captain_kind` (blank / single / double), `n_double_clubs` and `n_blank_clubs` (the
     season's clubs with ≥ 2 / 0 fixtures that GW; a season's clubs are the schedule's) and
-    `gw_type` (normal, double, blank or double+blank)."""
+    `gw_type` (normal, double, blank or double+blank). A captain with no `player_gw` row
+    that GW counts as blank (0 fixtures)."""
     sides = pd.concat(
         [
             schedule[["season", "gw", "home_team_key"]].rename(
@@ -184,6 +189,8 @@ def gain_distribution(rows: pd.DataFrame, by: list[str]) -> pd.DataFrame:
             }
         ).reset_index()
         parts.append(table.assign(chip=chip))
+    if not parts:
+        raise ValueError("no chip gains in these rows: run `backtest run --spec chipgains:...`")
     return pd.concat(parts, ignore_index=True)[["chip", *by, "n", "mean", "median", "p75", "p90"]]
 
 
@@ -214,6 +221,12 @@ def holding_value(
     and per window), `realized` (the mean realized gain at that ex-ante best GW, from the
     column `realized[chip]`; NaN for chips without one), `table` (`table[chip][L − 1]`, the
     value P plans with), `exante_ratio` and `realized_ratio` (each over `table`), and n."""
+    outside = sorted(int(x) for x in rows["season"].unique() if x not in DEVELOP_SEASONS)
+    if outside:
+        raise ValueError(f"chip values are estimated on develop seasons only, got {outside}")
+    for column in {c for c in realized.values()}:
+        if rows[column].isna().any():
+            raise ValueError(f"realized column {column!r} has missing values")
     rules = backtest_rules(max(DEVELOP_SEASONS))
     out = []
     for chip, column in GAIN_COLUMNS.items():
