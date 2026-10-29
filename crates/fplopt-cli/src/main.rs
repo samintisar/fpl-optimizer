@@ -1,19 +1,35 @@
 //! `fplopt-rs`: the Rust port's CLI. Subcommands and flags match the Python `fplopt` CLI
-//! so a migrated job only swaps the binary name (migration plan §2). Batch 0 has only the
-//! parity check; each batch adds the commands it ports.
+//! so a migrated job only swaps the binary name (migration plan §2). Each batch adds the
+//! commands it ports: batch 0 the parity check, batch 1 the archiver (`snapshot`,
+//! `backfill`, `check freshness`).
+//!
+//! Archiver jobs run like Python's: a failure is logged and alerted to Telegram (exit 1);
+//! SIGTERM stops a long run cleanly, after its manifest is written (exit 143, no alert); a
+//! successful `snapshot daily|tick` pings HEALTHCHECK_PING_URL if set.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Result;
-use chrono::Utc;
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use chrono::{TimeDelta, Utc};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use fplopt_archive::adapters::{self, OddsSource, base_url};
+use fplopt_archive::fetch::Http;
+use fplopt_archive::raw_store::RawStore;
+use fplopt_archive::{SystemClock, espn, health, history, jobs, stop};
+use fplopt_core::alerts::send_admin_alert;
 use fplopt_core::experiments::{GIT_SHA, family_variants, log_experiment};
+use fplopt_core::heartbeat::send_heartbeat;
+use fplopt_core::redact::redact;
+use fplopt_core::settings::Settings;
 use fplopt_parity::{Tolerance, diff_tables, read_parquet};
 use serde_json::json;
 
 const DEFAULT_EXPERIMENTS: &str = "results/experiments.csv";
 const PARITY_FAMILY: &str = "rust parity";
+/// Jobs whose success pings HEALTHCHECK_PING_URL: the scheduled archiver runs.
+const HEARTBEAT_JOBS: [&str; 2] = ["snapshot daily", "snapshot tick"];
+const TEAMS_CSV: &str = "config/teams.csv";
 
 #[derive(Parser)]
 #[command(name = "fplopt-rs", about = "Fantasy Premier League decision optimizer (Rust port)")]
@@ -24,15 +40,50 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Checks.
+    /// Archive API snapshots into raw/.
+    Snapshot {
+        #[arg(value_enum)]
+        command: SnapshotJob,
+    },
+    /// One-off backfills into raw/.
+    Backfill {
+        #[arg(value_enum)]
+        command: BackfillJob,
+        /// football-data, espn: first season's start year.
+        #[arg(long, default_value_t = history::FIRST_SEASON, value_name = "YEAR")]
+        from_season: i32,
+    },
+    /// Archive health and parity checks.
     Check {
         #[command(subcommand)]
         check: Check,
     },
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum SnapshotJob {
+    Daily,
+    Tick,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum BackfillJob {
+    ElementSummary,
+    FootballData,
+    Vaastav,
+    Fplcache,
+    Espn,
+}
+
 #[derive(Subcommand)]
 enum Check {
+    /// Fail if the newest bootstrap snapshot is missing or too old (a dead-man's switch for
+    /// the timers).
+    Freshness {
+        /// Fail if the newest bootstrap snapshot is older than this.
+        #[arg(long, default_value_t = health::DEFAULT_MAX_AGE_HOURS, value_name = "H")]
+        max_age_hours: f64,
+    },
     /// Compare Python and Rust outputs (the migration's parity gate).
     Parity {
         #[command(subcommand)]
@@ -86,11 +137,172 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
+        Command::Snapshot { command } => {
+            let name = format!("snapshot {}", value_name(command));
+            Ok(run_job(&name, |ctx| match command {
+                SnapshotJob::Daily => snapshot_daily(ctx),
+                SnapshotJob::Tick => {
+                    let odds = ctx.odds();
+                    let odds = odds.as_ref().map(|o| o as &dyn OddsSource);
+                    jobs::run_tick(&ctx.store, &ctx.fpl(), odds, &SystemClock).map(drop)
+                }
+            }))
+        }
+        Command::Backfill { command, from_season } => {
+            let name = format!("backfill {}", value_name(command));
+            Ok(run_job(&name, |ctx| backfill(ctx, command, from_season)))
+        }
+        Command::Check { check: Check::Freshness { max_age_hours } } => {
+            Ok(run_job("check freshness", |ctx| {
+                let max_age = TimeDelta::microseconds((max_age_hours * 3.6e9).round() as i64);
+                health::check_freshness(&ctx.store, Utc::now(), max_age).map(drop)
+            }))
+        }
         Command::Check { check: Check::Parity { area } } => match area {
             Parity::Table { python, rust, keys, rtol, atol, out, experiments } => {
                 parity_table(&python, &rust, &keys, Tolerance { rtol, atol }, out, &experiments)
             }
         },
+    }
+}
+
+fn value_name(value: impl ValueEnum) -> String {
+    value.to_possible_value().map(|v| v.get_name().to_owned()).unwrap_or_default()
+}
+
+/// What an archiver job runs with. Base URLs can be redirected with `FPLOPT_<NAME>_URL`
+/// (`adapters::base_url`), for the parity harness only.
+struct JobContext {
+    store: RawStore,
+    http: Http,
+    settings: Settings,
+}
+
+impl JobContext {
+    fn fpl(&self) -> adapters::fpl::FplClient<'_> {
+        adapters::fpl::FplClient::new(&self.http, &base_url("FPL", adapters::fpl::BASE_URL))
+    }
+
+    fn odds(&self) -> Option<adapters::odds::OddsClient<'_>> {
+        let key = self.settings.odds_api_key.as_deref()?;
+        let url = base_url("ODDS", adapters::odds::BASE_URL);
+        Some(adapters::odds::OddsClient::new(&self.http, key, &url))
+    }
+
+    fn football_data(&self) -> adapters::football_data::FootballDataClient<'_> {
+        let url = base_url("FOOTBALL_DATA", adapters::football_data::BASE_URL);
+        adapters::football_data::FootballDataClient::new(&self.http, &url)
+    }
+
+    fn espn(&self) -> adapters::espn::EspnClient<'_> {
+        adapters::espn::EspnClient::new(&self.http, &base_url("ESPN", adapters::espn::BASE_URL))
+    }
+}
+
+fn snapshot_daily(ctx: &JobContext) -> Result<()> {
+    let (fpl, odds, fd, espn) = (ctx.fpl(), ctx.odds(), ctx.football_data(), ctx.espn());
+    let odds = odds.as_ref().map(|o| o as &dyn OddsSource);
+    let daily_espn = jobs::DailyEspn { source: &espn, teams_csv: Path::new(TEAMS_CSV) };
+    jobs::run_daily(&ctx.store, &fpl, odds, &SystemClock, Some(&fd), Some(daily_espn))
+}
+
+fn backfill(ctx: &JobContext, command: BackfillJob, from_season: i32) -> Result<()> {
+    let clock = &SystemClock;
+    let github = || base_url("GITHUB_API", adapters::vaastav::API_URL);
+    match command {
+        BackfillJob::ElementSummary => jobs::backfill_element_summaries(
+            &ctx.store,
+            &ctx.fpl(),
+            clock,
+            jobs::ELEMENT_SUMMARY_PAUSE,
+            jobs::MAX_CONSECUTIVE_FAILURES,
+        )
+        .map(drop),
+        BackfillJob::FootballData => history::backfill_football_data(
+            &ctx.store,
+            &ctx.football_data(),
+            clock,
+            history::FOOTBALL_DATA_PAUSE,
+            from_season,
+        )
+        .map(drop),
+        BackfillJob::Espn => {
+            let team_ids = espn::espn_team_ids(Path::new(TEAMS_CSV))?;
+            espn::backfill_espn(&ctx.store, &ctx.espn(), &team_ids, from_season, clock, espn::PAUSE)
+        }
+        BackfillJob::Vaastav => {
+            let raw = base_url("GITHUB_RAW", adapters::vaastav::RAW_URL);
+            let source = adapters::vaastav::VaastavClient::new(&ctx.http, &github(), &raw);
+            history::backfill_vaastav(
+                &ctx.store,
+                &source,
+                adapters::vaastav::PINNED_COMMIT,
+                clock,
+                history::VAASTAV_PAUSE,
+                jobs::MAX_CONSECUTIVE_FAILURES,
+            )
+            .map(drop)
+        }
+        BackfillJob::Fplcache => {
+            let codeload = base_url("CODELOAD", adapters::fplcache::CODELOAD_URL);
+            let source = adapters::fplcache::FplcacheClient::new(&ctx.http, &github(), &codeload);
+            history::backfill_fplcache(&ctx.store, &source, clock).map(drop)
+        }
+    }
+}
+
+/// Run an archiver job the way Python's `main` does: alert on failure (exit 1), exit 143
+/// without an alert when stopped by SIGTERM, heartbeat after a scheduled run succeeds.
+fn run_job(name: &str, job: impl FnOnce(&JobContext) -> Result<()>) -> ExitCode {
+    let settings = Settings::from_env();
+    if settings.telegram_bot_token.is_none() || settings.telegram_admin_chat_id.is_none() {
+        log::warn!(
+            "TELEGRAM_BOT_TOKEN/TELEGRAM_ADMIN_CHAT_ID not set: failures will not be alerted"
+        );
+    }
+    log::info!("job '{name}' starting (raw dir {})", settings.raw_dir.display());
+    register_sigterm();
+    let result = Http::new().map_err(anyhow::Error::from).and_then(|http| {
+        let store = RawStore::new(&settings.raw_dir);
+        job(&JobContext { store, http, settings: settings.clone() })
+    });
+    match result {
+        Ok(()) => {
+            log::info!("job '{name}' done");
+            if let Some(url) = &settings.healthcheck_ping_url
+                && HEARTBEAT_JOBS.contains(&name)
+            {
+                send_heartbeat(url, None);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) if err.is::<stop::Terminated>() => {
+            log::warn!("job '{name}' stopped by SIGTERM");
+            ExitCode::from(143)
+        }
+        Err(err) => {
+            log::error!("job '{name}' failed: {}", redact(&format!("{err:#}")));
+            let host = gethostname::gethostname().to_string_lossy().into_owned();
+            let text = format!(
+                "fplopt-rs {name} failed on {host}: {}: {}",
+                fplopt_archive::kind_name(&err),
+                fplopt_archive::summary(&err)
+            );
+            send_admin_alert(
+                &redact(&text),
+                settings.telegram_bot_token.as_deref(),
+                settings.telegram_admin_chat_id.as_deref(),
+            );
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// SIGTERM sets the stop flag the long loops check (`fplopt_archive::stop`).
+fn register_sigterm() {
+    #[cfg(unix)]
+    if let Err(err) = signal_hook::flag::register(signal_hook::consts::SIGTERM, stop::flag()) {
+        log::warn!("could not install the SIGTERM handler: {err}");
     }
 }
 

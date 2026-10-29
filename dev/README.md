@@ -547,3 +547,30 @@ realized rate; Brier is of the `needed` event:
   `needed` rates are 0.27 / 0.56 / 0.56 / 0.51, random 0.23 / 0.86 / 0.82 / 0.79.
 
 > **Adopted (2026-10-08):** the package's `minutes_bench_weights` now uses the skip-aware weights (`skip_aware_tail`). In the table below, the `minutes` column is the version without skips and `skip` is what is shipped.
+
+## `archiver_parity.py` and `shadow_compare.py`: Rust migration batch 1 gate
+
+`archiver_parity.py` is gate (a): a local replay server answers every source's URLs from real
+payloads in `raw/` (FPL, odds, football-data, vaastav, fplcache; ESPN synthetic), the Python
+jobs run in process against it and `fplopt-rs` runs as a subprocess with `FPLOPT_<SOURCE>_URL`
+overrides, each from the same seed store. The two trees must match: paths with timestamps
+masked, contents decompressed, run-manifest times and failure-reason texts masked (the exception
+type is kept), and the same exit status. Never alerts or pings (the Rust run gets the variables
+set empty and runs outside the repo, away from `.env`).
+
+```sh
+cargo build --release -p fplopt-cli
+uv run python dev/archiver_parity.py [--only daily,tick-window] [--keep DIR]
+```
+
+`shadow_compare.py` is gate (b), on the server after the shadow week
+(`deploy/README.md`, *Rust archiver shadow*): every live snapshot in `raw/` needs a shadow twin
+in `raw-shadow/` within 20 minutes and vice versa (write-once files and element-summary runs as
+sets), and every shadow file must parse. Pass `--since` after the shadow's first daily run, which
+backfills event-live and element summaries the live archive already had.
+
+```sh
+uv run python dev/shadow_compare.py --since 2026-10-31T00:00
+```
+
+Both log a row to `results/experiments.csv` (family `rust parity`) and exit 1 on any difference.
