@@ -74,6 +74,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+from fplopt.backtest.rules import CHIP_NAMES
+
 
 def _frozen(mapping: Mapping) -> Mapping:
     return MappingProxyType(dict(sorted(mapping.items())))
@@ -135,6 +137,12 @@ class OptimizerParams:
     # (index L - 1; the last entry for longer): replaces `chip_value` for the chips it
     # holds (`chips.terminal_value`; estimated, chip pre-registration §3). None = unused.
     chip_value_left: Mapping[str, tuple[float, ...]] | None = None
+    # Chip names left out of the chip scenario search (`chips.scenarios`), e.g. ("3xc",) when
+    # a rule plays Triple Captain instead (chip policy 2, V4). Sorted.
+    exclude_chips: tuple[str, ...] = ()
+    # The share of a Free Hit's gain over the no-chip plan that counts when chip scenarios
+    # are ranked (`search._score`; chip policy 2, V6: the Free Hit forecast slope). 1 = all.
+    fh_scale: float = 1.0
 
     def __post_init__(self) -> None:
         if self.horizon < 1:
@@ -182,6 +190,14 @@ class OptimizerParams:
                         f"chip_value_left[{name!r}] needs finite values >= 0, got {values}"
                     )
             object.__setattr__(self, "chip_value_left", _frozen(table))
+        chips = tuple(sorted({str(c) for c in self.exclude_chips}))
+        unknown = [c for c in chips if c not in CHIP_NAMES]
+        if unknown:
+            raise ValueError(f"exclude_chips: unknown chip names {unknown}")
+        object.__setattr__(self, "exclude_chips", chips)
+        if not math.isfinite(self.fh_scale) or not 0 <= self.fh_scale <= 1:
+            raise ValueError(f"fh_scale must be in [0, 1], got {self.fh_scale}")
+        object.__setattr__(self, "fh_scale", float(self.fh_scale))
         if self.prune_n is not None:
             prune_n = {int(k): int(v) for k, v in self.prune_n.items()}
             if any(v < 0 for v in prune_n.values()):
@@ -222,6 +238,8 @@ class OptimizerParams:
                 self.bench_from_minutes,
                 self.min_minutes,
                 None if self.chip_value_left is None else dict(self.chip_value_left),
+                self.exclude_chips,
+                self.fh_scale,
             ),
         )
 

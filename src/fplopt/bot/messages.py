@@ -255,6 +255,7 @@ def chips_text(options: ChipOptions, shown: int = 6) -> str:
     stopped = unsolved & {label for label, _ in (search.not_optimal if search else ())}
     skipped = len(unsolved - stopped)
     if len(ranked_scenarios) > shown:
+        # "all lower" assumes fh_scale == 1 (the live params): objectives are raw totals
         lines.append(f"· … {len(ranked_scenarios) - shown} more, all lower")
     if skipped > 0:
         lines.append(f"{skipped} other options were ruled out: provably no better than the best.")

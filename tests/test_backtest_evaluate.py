@@ -974,3 +974,16 @@ def test_per_decision_makes_each_decision_once(league, continuation):
         assert _CALLS[b.name] == n_gws
         differ = out[~out["same_decision"]]  # arm B is re-simulated only where they differ
         assert _CALLS[cont.name] == (out["k"] - 1).sum() + (differ["k"] - 1).sum()
+
+
+def test_window_t_test_reports_the_standard_error():
+    import math
+
+    from fplopt.backtest.evaluate import window_t_test
+
+    diffs = pd.DataFrame(
+        {"season": [2020] * 4, "gw_index": [1, 2, 3, 4], "diff": [1.0, 2.0, 3.0, 4.0]}
+    )
+    result = window_t_test(diffs)
+    assert result.se == pytest.approx(math.sqrt(1.6666666666666667 / 4))
+    assert math.isnan(window_t_test(diffs.iloc[:1]).se)

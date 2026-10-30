@@ -10,8 +10,9 @@ first GW's `state.Decision` (transfers paired within position, lineup, chip), wh
 PlanSet`:
 
 1. **Chip scenarios** (`chips.scenarios`; only no-chip when `chips=False`): each is a
-   separate MILP, ranked by `Plan.total_objective` (horizon objective + terminal value of
-   the unused chips). The best is plan #1; ties go to the earlier scenario (no chip first).
+   separate MILP, ranked by `search._score` (= `Plan.total_objective`, the horizon objective
+   plus the terminal value of the unused chips, unless `params.fh_scale < 1`). The best is
+   plan #1; ties go to the earlier scenario (no chip first).
    `scenario_search="bound"` (`search`) solves only the scenarios whose upper bound (LP
    relaxation, or a bound derived from a related scenario) could beat the best plan found,
    and returns the same plan as `"all"`, which solves every scenario. The solved
@@ -124,7 +125,8 @@ class Plan:
     """A solved plan. `objective` = Σ of the GWs' `objective`, recomputed from the
     integral solution (the solver's objective up to its tolerances), excluding the chip
     terminal value; `terminal_value` is the scenario's value of chips left unused
-    (`chips.terminal_value`) and `total_objective` their sum, which plans are ranked by.
+    (`chips.terminal_value`) and `total_objective` their sum, which plans are ranked by
+    (`search._score`, equal to it unless `params.fh_scale < 1`).
     `status` is HiGHS's model status as PuLP reports it (`Optimal` also when stopped at
     `mip_gap`; `NodeLimit`/`SolutionLimit`/`TimeLimit` when a limit stopped it with a
     solution, see `OptimizerParams`: then the plan is not within `mip_gap`); `mip_gap` the
@@ -182,7 +184,9 @@ class Plan:
 class PlanSet:
     """`plans`: the top-k plans by objective, distinct in first-GW transfer sets (plan #1
     first); `roll`: the roll plan (None if not asked for); `scenario_objectives`: chip
-    scenario label → that scenario's best `total_objective`, in enumeration order;
+    scenario label → that scenario's best `total_objective` (not `search._score`; the plan
+    #1 ranking uses `_score`, which is the same unless `params.fh_scale < 1`), in
+    enumeration order;
     `seconds`: wall time of the whole `optimize` call. With `scenario_search="bound"`
     only the scenarios that were solved are in `scenario_objectives`; `scenario_bounds`
     holds every scenario's upper bound on its best `total_objective` (the MILP's dual bound

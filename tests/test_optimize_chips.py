@@ -456,3 +456,113 @@ def test_chip_value_left_is_validated() -> None:
     assert params.chip_value_left["bboost"] == (1.0, 2.0)
     with pytest.raises(TypeError):
         params.chip_value_left["bboost"] = (3.0,)
+
+
+def test_terminal_values_by_window() -> None:
+    from fplopt.optimize.chips import chip_value
+
+    table = {"wildcard@1": (1.0,), "wildcard@2": (5.0,), "freehit": (2.0,)}
+    params = replace(EXACT, chip_value={}, chip_value_left=table)
+    assert chip_value(params, "wildcard", 3, window=1) == 1.0
+    assert chip_value(params, "wildcard", 3, window=2) == 5.0
+    assert chip_value(params, "freehit", 3, window=2) == 2.0  # no window key: the name's
+    assert chip_value(params, "wildcard", 3) == 1.0  # default window 1
+    # GWs 5-7: WC1 1 + WC2 5 + FH 2 per window; BB/TC not in either table: 0.
+    assert terminal_value(problem_at(5, 3), params, NO_CHIP) == 1 + 5 + 2 * 2
+    # Ordinals follow window start, not chip id: swap the wildcard ids.
+    swapped = tuple(
+        replace(w, chip_id={1: 2, 2: 1}[w.chip_id]) if w.name == "wildcard" else w
+        for w in RULES.chips
+    )
+    rules = replace(RULES, chips=swapped)
+    assert terminal_value(problem_at(5, 3, rules=rules), params, NO_CHIP) == 1 + 5 + 2 * 2
+    # Only set 2 open (GWs 21-23): its wildcard is @2 whatever its chip id.
+    assert terminal_value(problem_at(21, 3, rules=rules), params, NO_CHIP) == 5 + 2
+
+
+def test_terminal_values_with_a_known_double() -> None:
+    table = {"3xc@1+1": (9.0,), "3xc@1": (1.0,), "3xc@2": (2.0,), "3xc@2+1": (7.0,)}
+    params = replace(EXACT, chip_value={}, chip_value_left=table)
+    problem = problem_at(5, 3)
+    assert problem.doubles == frozenset()
+    assert terminal_value(problem, params, NO_CHIP) == 1 + 2
+    # A double in GW12: after the horizon (5-7), inside set 1 (..19), before set 2 (20..).
+    doubled = replace(problem, doubles=frozenset({12}))
+    assert terminal_value(doubled, params, NO_CHIP) == 9 + 2  # not bleeding into set 2
+    # The window's stop is inclusive; GW20 belongs to set 2, not set 1.
+    last_of_set1 = replace(problem, doubles=frozenset({19}))
+    assert terminal_value(last_of_set1, params, NO_CHIP) == 9 + 2
+    first_of_set2 = replace(problem, doubles=frozenset({20}))
+    assert terminal_value(first_of_set2, params, NO_CHIP) == 1 + 7
+    # A double inside the horizon doesn't count (the horizon plans it already).
+    inside = replace(problem, doubles=frozenset({6}))
+    assert terminal_value(inside, params, NO_CHIP) == 1 + 2
+
+
+def test_scenarios_without_excluded_chips() -> None:
+    problem = problem_at(5, 2)
+    params = replace(EXACT, exclude_chips=("3xc",))
+    assert params.exclude_chips == ("3xc",)
+    kept = labels(problem, params)
+    assert kept[0] == "none" and not any("3xc" in label for label in kept)
+    assert set(labels(problem)) - set(kept) == {s for s in labels(problem) if "3xc" in s}
+
+
+def test_exclude_chips_and_fh_scale_are_validated_and_pickle() -> None:
+    import pickle
+
+    with pytest.raises(ValueError, match="exclude_chips"):
+        OptimizerParams(exclude_chips=("bogus",))
+    with pytest.raises(ValueError, match="fh_scale"):
+        OptimizerParams(fh_scale=1.5)
+    params = OptimizerParams(exclude_chips=["3xc", "bboost"], fh_scale=0.4)
+    assert params.exclude_chips == ("3xc", "bboost")  # sorted
+    assert pickle.loads(pickle.dumps(params)) == params
+
+
+@pytest.mark.parametrize("how", ["bound", "all"])
+def test_fh_scale_shrinks_the_free_hit_gain(how) -> None:
+    """The Free Hit GW6 of test_free_hit_for_one_big_gw_reverts wins at full value and
+    loses when none of its gain counts (holding the chip is worth 4)."""
+    state, pool, xp, _ = team([1.0, 1.0, 1.0], other_xp=[0.0, 8.0, 0.0])
+    params = chip_params(3, freehit=4.0)
+    problem = state_problem(state, pool, xp, params)
+    assert optimize(problem, params, top_k=1, scenario_search=how).best.scenario == "freehit@gw6"
+    shrunk = replace(params, fh_scale=0.0)
+    assert optimize(problem, shrunk, top_k=1, scenario_search=how).best.scenario == "none"
+
+
+def test_fh_scale_bound_search_uses_the_score_for_its_incumbent() -> None:
+    """With the Free Hit's gain unranked, 3xc@gw6 is the best plan; a bound search whose
+    incumbent used the raw total (the Free Hit plan) would stop before solving it."""
+    state, pool, xp, _ = team([1.0, 1.0, 1.0], other_xp=[0.0, 8.0, 0.0])
+    params = replace(chip_params(3, freehit=4.0, **{"3xc": 0.0}), fh_scale=0.0)
+    problem = state_problem(state, pool, xp, params)
+    found = {
+        how: optimize(problem, params, top_k=1, scenario_search=how).best
+        for how in ("bound", "all")
+    }
+    assert found["bound"].scenario == found["all"].scenario == "3xc@gw6"
+    assert found["bound"].total_objective == pytest.approx(found["all"].total_objective)
+
+
+def test_score_counts_only_positive_free_hit_gw_gains() -> None:
+    from types import SimpleNamespace as NS
+
+    from fplopt.optimize.search import _score
+
+    def plan(total, *gw_objectives):
+        return NS(total_objective=total, gws=[NS(objective=o) for o in gw_objectives])
+
+    params = OptimizerParams(fh_scale=0.25)
+    base = plan(10.0, 4.0, 3.0, 3.0)
+    # the Free Hit GW (1) gains 2; GW 0 differs by +5 and GW 2 by -1, which don't count
+    gain = plan(20.0, 9.0, 5.0, 2.0)
+    scenarios = [NS(chips=()), NS(chips=((1, "freehit"),))]
+    assert _score({0: base, 1: gain}, 1, scenarios, params) == pytest.approx(20.0 - 0.75 * 2.0)
+    # a negative Free Hit GW gain is clipped at 0: no bonus for a worse Free Hit GW
+    loss = plan(12.0, 9.0, 1.0, 2.0)
+    assert _score({0: base, 1: loss}, 1, scenarios, params) == pytest.approx(12.0)
+    assert _score({0: base, 1: loss}, 0, scenarios, params) == pytest.approx(10.0)
+    # fh_scale == 1 returns the total unchanged
+    assert _score({0: base, 1: gain}, 1, scenarios, OptimizerParams()) == 20.0

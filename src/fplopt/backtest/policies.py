@@ -29,15 +29,18 @@ Ties are broken by `player_key` everywhere, so decisions are deterministic.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
 
+from fplopt.backtest.chip_doubles import known_doubles
 from fplopt.backtest.gw_score import Lineup
 from fplopt.backtest.rules import Rules, best_xi
 from fplopt.backtest.state import (
@@ -339,6 +342,27 @@ class GreedyPolicy:
         return Decision(transfers=transfers, lineup=lineup, chip=None)
 
 
+def _table_tag(table: Mapping[str, Sequence[float]]) -> str:
+    """First-last value and a weighted checksum per key, so a re-estimated table gives a
+    different policy name (the experiment log keys on names)."""
+    return "/".join(
+        f"{k}:{v[0]:.2f}-{v[-1]:.2f}#{sum((i + 1) * x for i, x in enumerate(v)):.3f}"
+        for k, v in table.items()
+    )
+
+
+def _season_tables_tag(tables: Mapping[int, Mapping[str, Sequence[float]]]) -> str:
+    """10 hex digits of the SHA-1 of the per-season tables' canonical JSON. A readable
+    `_table_tag` per season would run to kilobytes (7 seasons x up to 24 keys) in every
+    printed and logged policy name; the hash still changes with any value."""
+    canonical = json.dumps(
+        {str(s): {k: list(v) for k, v in sorted(t.items())} for s, t in sorted(tables.items())},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha1(canonical.encode()).hexdigest()[:10]
+
+
 def _optimizer_extras(params: OptimizerParams) -> list[str]:
     """`OptimizerPolicy.name` parts for the parameters other than the hit safeguards that
     differ from `OptimizerParams()`'s (so distinct policies get distinct names)."""
@@ -357,15 +381,7 @@ def _optimizer_extras(params: OptimizerParams) -> list[str]:
     if params.chip_value != default.chip_value:
         parts.append("cv=" + "/".join(f"{k}:{v!r}" for k, v in params.chip_value.items()))
     if params.chip_value_left is not None:
-        # first-last value and a weighted checksum of the whole table per chip, so a
-        # re-estimated table gives a different name (the experiment log keys on names)
-        parts.append(
-            "cvl="
-            + "/".join(
-                f"{k}:{v[0]:.2f}-{v[-1]:.2f}#{sum((i + 1) * x for i, x in enumerate(v)):.3f}"
-                for k, v in params.chip_value_left.items()
-            )
-        )
+        parts.append("cvl=" + _table_tag(params.chip_value_left))
     if params.prune_n != default.prune_n:
         prune_n = params.prune_n
         prune = "all" if prune_n is None else "/".join(f"{k}:{v}" for k, v in prune_n.items())
@@ -386,6 +402,10 @@ def _optimizer_extras(params: OptimizerParams) -> list[str]:
         parts.append(f"bfm={int(params.bench_from_minutes)}")
     if params.min_minutes != default.min_minutes:
         parts.append(f"minm={float(params.min_minutes)!r}")
+    if params.exclude_chips != default.exclude_chips:
+        parts.append("nochip=" + "/".join(params.exclude_chips))
+    if params.fh_scale != default.fh_scale:
+        parts.append(f"fhs={params.fh_scale!r}")
     return parts
 
 
@@ -402,17 +422,38 @@ class OptimizerPolicy:
 
     `name`: `optimizer(<xp>,mh=<max_hits|inf>,m=<hit_margin>[,...][,chips])`; the hit
     safeguards are always listed (their defaults are being tuned), other parameters only
-    when they differ from `OptimizerParams()`."""
+    when they differ from `OptimizerParams()`.
+
+    Chip policy 2 options: `season_tables`, `double_lead`, `tc_rule` (field comments)."""
 
     xp_model: str = "ep_next"
     params: OptimizerParams = field(default_factory=OptimizerParams)
     chips: bool = False
+    # Chip policy 2: season → terminal value table (leave-one-season-out), replacing
+    # `params.chip_value_left` in that season's decisions; the known-double lookahead for
+    # double-aware tables (None = no doubles); Triple Captain by rule at this captain xP
+    # (needs "3xc" in `params.exclude_chips`; None = the optimizer plays it).
+    season_tables: Mapping[int, Mapping[str, tuple[float, ...]]] | None = None
+    double_lead: int | None = None
+    tc_rule: float | None = None
 
     def __post_init__(self) -> None:
         _check_model(self.xp_model)
         if not isinstance(self.params, OptimizerParams):
             raise TypeError(f"params must be OptimizerParams, got {type(self.params).__name__}")
         _check_horizon(self.params.horizon)
+        if self.tc_rule is not None and (not self.chips or "3xc" not in self.params.exclude_chips):
+            raise ValueError("tc_rule needs chips and '3xc' in params.exclude_chips")
+        if self.double_lead is not None and self.double_lead < 1:
+            raise ValueError(f"double_lead must be >= 1, got {self.double_lead}")
+        if self.season_tables is not None:
+            # validated and normalised as OptimizerParams does (str keys, float tuples), but
+            # kept as plain dicts so the policy pickles into worker processes
+            tables = {
+                int(s): dict(replace(self.params, chip_value_left=t).chip_value_left)
+                for s, t in sorted(self.season_tables.items())
+            }
+            object.__setattr__(self, "season_tables", tables)
 
     @property
     def name(self) -> str:
@@ -420,13 +461,29 @@ class OptimizerPolicy:
         max_hits = "inf" if params.max_hits is None else str(params.max_hits)
         parts = [self.xp_model, f"mh={max_hits}", f"m={float(params.hit_margin)!r}"]
         parts += _optimizer_extras(params)
+        if self.season_tables is not None:
+            parts.append("loso#" + _season_tables_tag(self.season_tables))
+        if self.double_lead is not None:
+            parts.append(f"dl={self.double_lead}")
+        if self.tc_rule is not None:
+            parts.append(f"tcr={float(self.tc_rule)!r}")
         if self.chips:
             parts.append("chips")
         return f"optimizer({','.join(parts)})"
 
     def decide(self, ctx: DecisionContext) -> Decision:
-        problem = PlanInput.from_context(ctx.state, ctx.pool, ctx.xp, ctx.rules, self.params)
-        plans = optimize(problem, self.params, top_k=1, chips=self.chips, roll=False)
+        params = self.params
+        if self.season_tables is not None:
+            table = self.season_tables.get(ctx.state.season)
+            if table is None:
+                raise ValueError(f"no leave-one-season-out table for season {ctx.state.season}")
+            params = replace(params, chip_value_left=table)
+        problem = PlanInput.from_context(ctx.state, ctx.pool, ctx.xp, ctx.rules, params)
+        if self.double_lead is not None:
+            state = ctx.state
+            doubles = known_doubles(ctx.view, state.season, state.gw_index, self.double_lead)
+            problem = replace(problem, doubles=doubles)
+        plans = optimize(problem, params, top_k=1, chips=self.chips, roll=False)
         status = plans.solver_status
         if status != "Optimal":
             log.warning(
@@ -438,7 +495,30 @@ class OptimizerPolicy:
                 status,
                 100 * plans.best.mip_gap,
             )
-        return replace(plans.decision(), solver_status=status, mip_gap=plans.best.mip_gap)
+        decision = replace(plans.decision(), solver_status=status, mip_gap=plans.best.mip_gap)
+        if self.tc_rule is not None and decision.chip is None:
+            return self._rule_tc(ctx, problem, params, plans) or decision
+        return decision
+
+    def _rule_tc(
+        self, ctx: DecisionContext, problem: PlanInput, params: OptimizerParams, plans: Any
+    ) -> Decision | None:
+        """Triple Captain this GW when available and plan #1's captain's xP ≥ `tc_rule` or
+        this is its window's last GW: re-planned with TC fixed here (None otherwise, or if
+        that plan is infeasible)."""
+        state, rules = ctx.state, ctx.rules
+        if not chip_available(state, "3xc", rules):
+            return None
+        stop = {w.chip_id: w.stop for w in rules.chips}[chip_window(state, "3xc", rules)]
+        captain = _target_xp_of(ctx.xp, plans.best.first.captain)
+        if captain < self.tc_rule and state.gw_index != stop:
+            return None
+        try:
+            plan = solve_plan(problem, params, chips={0: "3xc"})
+        except InfeasiblePlan:
+            log.warning("%s: no plan with 3xc at gw_index %d", self.name, state.gw_index)
+            return None
+        return replace(plan.decision(), solver_status=plan.status, mip_gap=plan.mip_gap)
 
 
 # --- chip study (docs/superpowers/plans/2026-10-11-chip-policy.md) -----------------------
