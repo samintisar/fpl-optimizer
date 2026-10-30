@@ -3,7 +3,10 @@ and the Rust code on the same `data/` (docs/superpowers/plans/2026-10-28-rust-mi
 Batch 6). Dev only: never imported by `fplopt`.
 
 Deadlines: the leakage check's edge list plus `--n-random` (default 10) sampled ones
-(`fplopt.features.leakcheck.sample_deadlines`, seed 0). At each, Python computes each
+(`fplopt.features.leakcheck.sample_deadlines`, seed 0); or, with `--seasons 2025,2026`, every
+deadline of those seasons up to the first one ahead of the data's newest snapshot (the plan's
+gate 2: "every 2025/26 and 2026/27 deadline so far"; the holdout season is only run, never
+scored). At each, Python computes each
 `--models` frame (`fplopt.models.MODELS`) and writes it as Parquet; then `fplopt-rs models
 dump` writes the same frames, and each pair is compared with `fplopt-rs check parity table`
 on (player_key, horizon) plus the row order. Tolerances: the baselines are arithmetic on the
@@ -11,9 +14,14 @@ same rows, so rtol 1e-9; `v1` fits models, so the plan's gate applies (xP within
 0.01). Components (`COMPONENTS`: v1's parts, fitted at the deadline itself) compare their
 frame on its key and their fitted values, both within the plan's relative 1e-6.
 
+`--plans` (with v1; the plan's gate 3): at each deadline the Rust planner plans the template
+squad (`fplopt-rs optimize plan --start template --no-chips`, the bot's setting) on Python's
+v1 frame and on Rust's; plan #1 must be the same (its lines, the solver's gap aside). Batch 4
+showed the two planners agree on the same frame, so this isolates the xP's effect.
+
     cargo build --release -p fplopt-cli
     uv run python dev/models_parity.py [--data data] [--models rolling,ep_next,ep_next_fade]
-        [--n-random 10] [--keep DIR]
+        [--n-random 10 | --seasons 2025,2026] [--keep DIR]
 
 Logs one row to results/experiments.csv (family `rust parity`) and exits 1 on any difference.
 """
@@ -25,6 +33,7 @@ import dataclasses
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -166,6 +175,57 @@ def compare_fits(python: dict, rust: dict, where: str = "") -> list[str]:
     return problems
 
 
+def plan_one(text: str) -> list[str]:
+    """Plan #1's lines of an `optimize plan` output, the solver's gap left out."""
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith("Plan #1:")), None)
+    if start is None:
+        return ["(no plan #1)", *lines[-3:]]
+    block = []
+    for line in lines[start:]:
+        if not line.strip():
+            break
+        block.append(re.sub(r", gap [0-9.]+%", "", line))
+    return block
+
+
+def compare_plans(binary: Path, work: Path, picked: list, data: Path) -> dict[str, str]:
+    """Per deadline: '' if plan #1 is the same on both v1 frames, else what differs."""
+    gameweeks = pd.read_parquet(
+        data / "gameweek.parquet", columns=["season", "gw", "deadline_time"]
+    )
+    out = {}
+    for i, deadline in enumerate(picked):
+        row = gameweeks[gameweeks["deadline_time"] == deadline].iloc[0]
+        plans = {}
+        for who in ("python", "rust"):
+            frame = work / who / f"{i:02d}" / "v1.parquet"
+            command = [
+                str(binary), "optimize", "plan", "--season", str(int(row["season"])),
+                "--gw", str(int(row["gw"])), "--xp", "v1", "--xp-file", str(frame),
+                "--start", "template", "--no-chips",
+            ]  # fmt: skip
+            done = subprocess.run(command, cwd=REPO, capture_output=True, text=True)
+            (work / who / f"{i:02d}" / "plan.txt").write_text(done.stdout + done.stderr)
+            plans[who] = plan_one(done.stdout + done.stderr)
+        same = plans["python"] == plans["rust"]
+        out[f"{i:02d} {deadline}"] = "" if same else f"{plans['python'][:2]} vs {plans['rust'][:2]}"
+    return out
+
+
+def season_deadlines(data: Path, seasons: list[int]) -> list[pd.Timestamp]:
+    """Every deadline of `seasons` up to the first one after the newest player snapshot."""
+    gameweeks = pd.read_parquet(data / "gameweek.parquet", columns=["season", "deadline_time"])
+    newest = pd.read_parquet(data / "player_snapshot.parquet", columns=["snapshot_at"]).max()
+    newest = newest.iloc[0]
+    times = sorted(
+        gameweeks.loc[gameweeks["season"].isin(seasons), "deadline_time"].dropna().unique()
+    )
+    past = [pd.Timestamp(t) for t in times if t <= newest]
+    ahead = [pd.Timestamp(t) for t in times if t > newest]
+    return past + ahead[:1]
+
+
 def deadlines(data: Path, n_random: int) -> list[pd.Timestamp]:
     tables = {
         "gameweek": pd.read_parquet(data / "gameweek.parquet"),
@@ -183,6 +243,10 @@ def main() -> int:
     parser.add_argument("--bin", type=Path, default=REPO / "target" / "release" / "fplopt-rs")
     parser.add_argument("--models", default="rolling,ep_next,ep_next_fade")
     parser.add_argument("--n-random", type=int, default=10)
+    parser.add_argument("--seasons", help="every deadline of these seasons (e.g. 2025,2026)")
+    parser.add_argument(
+        "--plans", action="store_true", help="v1: compare plan #1 of the template on both frames"
+    )
     parser.add_argument("--keep", type=Path, help="keep the frames here")
     parser.add_argument("--experiments", type=Path, default=REPO / "results" / "experiments.csv")
     args = parser.parse_args()
@@ -197,7 +261,10 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="models-parity-")) if args.keep is None else args.keep
     work.mkdir(parents=True, exist_ok=True)
 
-    picked = deadlines(data, args.n_random)
+    if args.seasons:
+        picked = season_deadlines(data, [int(x) for x in args.seasons.split(",") if x.strip()])
+    else:
+        picked = deadlines(data, args.n_random)
     listing = work / "deadlines.txt"
     listing.write_text("".join(f"{d.isoformat()}\n" for d in picked), encoding="utf-8")
     print(f"{len(picked)} deadlines from {picked[0]} to {picked[-1]}", flush=True)
@@ -279,6 +346,17 @@ def main() -> int:
                 print("\n  ".join([label, *lines[:8]]), flush=True)
             results[label] = ok
 
+    plan_results: dict[str, str] = {}
+    if args.plans and "v1" in models:
+        started = time.monotonic()
+        plan_results = compare_plans(binary, work, picked, data)
+        timings["plans_s"] = time.monotonic() - started
+        for label, difference in plan_results.items():
+            results[f"{label} plan #1"] = not difference
+            if difference:
+                problems.append(f"{label} plan #1: {difference}")
+        same = sum(not d for d in plan_results.values())
+        print(f"plan #1 (template): {same}/{len(plan_results)} the same", flush=True)
     passed = not problems and all(results.values())
     print(f"\n{'PASS' if passed else 'FAIL'}: {sum(results.values())}/{len(results)} frames")
     for problem in problems[:40]:

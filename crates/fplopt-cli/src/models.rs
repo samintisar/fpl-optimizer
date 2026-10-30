@@ -9,6 +9,15 @@ use fplopt_features::leakcheck::fmt_micros;
 
 #[derive(Subcommand)]
 pub enum ModelsJob {
+    /// Build the plan context for the next deadline after --now from data/ (no rebuild) and
+    /// write it under <out>/ as `live prepare` would (the batch 6 gate's entry point).
+    Context {
+        /// An ISO 8601 instant.
+        #[arg(long)]
+        now: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Write each model's xP frame at each deadline to <out>/<NN>/<model>.parquet (NN: the
     /// deadline's line number in the file, from 00); a component (`fplopt_models::COMPONENTS`)
     /// writes its frame and <model>.json, its fitted values at that deadline.
@@ -55,6 +64,28 @@ pub fn dump(data_dir: &Path, models: &str, deadlines: &Path, out: &Path) -> Resu
                 frame.height(),
                 started.elapsed().as_secs_f64()
             );
+        }
+    }
+    Ok(())
+}
+
+pub fn context(data_dir: &Path, now: &str, out: &Path) -> Result<()> {
+    let now = chrono::DateTime::from_timestamp_micros(crate::parse_deadline(now)?)
+        .ok_or_else(|| anyhow::anyhow!("--now out of range"))?;
+    let store = fplopt_store::DataStore::open(data_dir)?;
+    let built = fplopt_bot::builder::build_context(
+        &store,
+        now,
+        "",
+        None,
+        None,
+        fplopt_bot::builder::LIVE_XP,
+    )?;
+    match built {
+        None => log::info!("no deadline ahead in the data: no context"),
+        Some(context) => {
+            let dir = fplopt_bot::context::ContextStore::new(out).write(&context)?;
+            log::info!("plan context {}: written to {}", context.context_id, dir.display());
         }
     }
     Ok(())

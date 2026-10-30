@@ -82,7 +82,7 @@ impl BotFpl for FplBot {
 }
 
 /// The bot's command logic on the state directory (Python `_bot_service`).
-fn bot_service(settings: &Settings) -> Result<BotService> {
+pub fn bot_service(settings: &Settings) -> Result<BotService> {
     let admin = match settings.telegram_admin_chat_id.as_deref().filter(|a| !a.is_empty()) {
         Some(a) => Some(a.trim().parse::<i64>().context("TELEGRAM_ADMIN_CHAT_ID: not an integer")?),
         None => None,

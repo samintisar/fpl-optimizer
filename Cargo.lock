@@ -1037,14 +1037,19 @@ dependencies = [
  "anyhow",
  "chrono",
  "chrono-tz",
+ "fplopt-archive",
  "fplopt-build",
  "fplopt-core",
+ "fplopt-features",
+ "fplopt-models",
  "fplopt-optimize",
+ "fplopt-store",
  "log",
  "reqwest 0.13.5",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

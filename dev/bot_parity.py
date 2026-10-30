@@ -23,6 +23,12 @@ the same bytes. Checks per session:
 - where a plan differs: the batch 4 rule (plan #1's objective within 1e-6, the same plan #1
   unless it ties plan #2 within 1e-6) decides whether it is a tie broken differently.
 
+`--rust-contexts` (batch 6): at the local deadlines the Rust bot plans on a context built by
+the Rust v1 model (`fplopt-rs models context`), the Python bot on Python's, so the whole live
+stack is compared. Then the contexts' ids differ and their xP agrees to ~1e-8, so plan logs
+compare with every number within OBJECTIVE_TOL (the decisions still exactly) and the
+recommendations' context_id is not compared; replies and alert texts stay byte for byte.
+
     cargo build --release -p fplopt-cli
     uv run python dev/bot_parity.py --server DIR [--data data] [--deadlines 2026:4,2026:8]
         [--teams 1,2,...] [--fpl DIR] [--keep DIR]
@@ -57,19 +63,25 @@ OBJECTIVE_TOL = 1e-6
 MIP_GAP_RTOL = 1e-9
 
 
+FLOAT_TOL: float | None = None  # --rust-contexts: plan-log numbers within OBJECTIVE_TOL
+
+
 def same_log(a: Any, b: Any) -> bool:
-    """Two parsed plan logs equal, `mip_gap` within MIP_GAP_RTOL."""
+    """Two parsed plan logs equal, `mip_gap` within MIP_GAP_RTOL (every float within
+    FLOAT_TOL when set)."""
     if isinstance(a, dict) and isinstance(b, dict):
         if a.keys() != b.keys():
             return False
         return all(
-            math.isclose(a[k], b[k], rel_tol=MIP_GAP_RTOL)
+            math.isclose(a[k], b[k], rel_tol=MIP_GAP_RTOL, abs_tol=FLOAT_TOL or 0.0)
             if k == "mip_gap" and isinstance(a[k], float) and isinstance(b[k], float)
             else same_log(a[k], b[k])
             for k in a
         )
     if isinstance(a, list) and isinstance(b, list):
         return len(a) == len(b) and all(same_log(x, y) for x, y in zip(a, b, strict=True))
+    if FLOAT_TOL is not None and isinstance(a, float) and isinstance(b, (int, float)):
+        return math.isclose(a, b, rel_tol=0.0, abs_tol=FLOAT_TOL)
     return a == b
 
 
@@ -207,6 +219,23 @@ def local_context(data: Path, season: int, gw: int, root: Path) -> Path:
     return root
 
 
+def rust_context(binary: Path, data: Path, deadline, root: Path) -> Path:
+    """The Rust-built v1 context for the deadline `local_context` planned (`fplopt-rs models
+    context` two days before it), written under `root` (reused)."""
+    from fplopt.bot.context import ContextStore
+
+    if ContextStore(root / "context").ids():
+        return root
+    now = (deadline - timedelta(days=2)).isoformat()
+    env = {**os.environ, **QUIET, "FPLOPT_DATA_DIR": str(data), "RUST_LOG": "warn"}
+    command = [str(binary), "models", "context", "--now", now, "--out", str(root / "context")]
+    done = subprocess.run(command, cwd=REPO, env=env, capture_output=True, text=True)
+    if done.returncode != 0 or not ContextStore(root / "context").ids():
+        tail = (done.stdout + done.stderr)[-800:]
+        raise SystemExit(f"fplopt-rs models context failed: {tail}")
+    return root
+
+
 def replay_python(script: Path, state: Path, fpl: Path, out: Path) -> None:
     from bot_replay import replay
 
@@ -214,8 +243,17 @@ def replay_python(script: Path, state: Path, fpl: Path, out: Path) -> None:
     out.write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
 
 
-def run_session(name: str, base: Path, script: dict, fpl: Path, binary: Path, work: Path) -> dict:
-    """Both runs of one session; their results and databases."""
+def run_session(
+    name: str,
+    base: Path,
+    script: dict,
+    fpl: Path,
+    binary: Path,
+    work: Path,
+    rust_base: Path | None = None,
+) -> dict:
+    """Both runs of one session (the Rust one from `rust_base` if given); their results and
+    databases."""
     from bot_replay import dump_db
 
     root = work / name
@@ -231,7 +269,7 @@ def run_session(name: str, base: Path, script: dict, fpl: Path, binary: Path, wo
 
     def run(who: str) -> None:
         state = root / who
-        shutil.copytree(base, state)
+        shutil.copytree(rust_base if who == "rust" and rust_base else base, state)
         if who == "python":
             command = [*commands[who], str(state), str(fpl), str(root / f"{who}.json")]
         else:
@@ -303,6 +341,8 @@ def check(session: dict) -> dict:
     rs_recs = session["rust_db"].get("recommendations", [])
     for a, b in zip(py_recs, rs_recs, strict=False):
         rest = {k for k in a if a.get(k) != b.get(k)}
+        if FLOAT_TOL is not None:
+            rest.discard("context_id")  # each side's own context
         if rest == {"plans"} and same_plans(a["plans"], b["plans"]):
             rest = set()
         if not rest:
@@ -376,8 +416,16 @@ def main() -> int:
     parser.add_argument("--fpl", type=Path, help="recorded FPL responses (fetched if missing)")
     parser.add_argument("--bin", type=Path, default=REPO / "target" / "release" / "fplopt-rs")
     parser.add_argument("--keep", type=Path, help="keep the work directory here")
+    parser.add_argument(
+        "--rust-contexts",
+        action="store_true",
+        help="the Rust bot plans on Rust-built contexts at the local deadlines (batch 6)",
+    )
     parser.add_argument("--experiments", type=Path, default=REPO / "results" / "experiments.csv")
     args = parser.parse_args()
+    global FLOAT_TOL
+    if args.rust_contexts:
+        FLOAT_TOL = OBJECTIVE_TOL
     binary = args.bin if args.bin.exists() else args.bin.with_suffix(".exe")
     if not binary.exists():
         parser.error(f"no Rust binary at {args.bin} (cargo build --release -p fplopt-cli)")
@@ -404,7 +452,7 @@ def main() -> int:
     record_fpl(fpl, sorted({*teams, *(t for _, t in users)}))
     print(f"FPL responses in {fpl} ({time.monotonic() - started:.0f} s)", flush=True)
 
-    sessions: list[tuple[str, Path, dict]] = []
+    sessions: list[tuple] = []
     if args.server is not None:
         context = ContextStore(args.server / "context").latest()
         if context is None:
@@ -415,7 +463,7 @@ def main() -> int:
             name = context.context_id
             shutil.copytree(args.server / "context" / name, base / "context" / name)
             shutil.copy(args.server / "bot.sqlite", base / "bot.sqlite")
-        sessions.append(("server", base, session_script(context.deadline, users, teams)))
+        sessions.append(("server", base, session_script(context.deadline, users, teams), None))
     for item in [d for d in args.deadlines.split(",") if d.strip()]:
         season, gw = (int(x) for x in item.split(":"))
         started = time.monotonic()
@@ -424,11 +472,22 @@ def main() -> int:
         took = time.monotonic() - started
         print(f"context {season} GW{gw}: {context.context_id} ({took:.0f} s)", flush=True)
         script = session_script(context.deadline, [], sorted({*teams, *(t for _, t in users)}))
-        sessions.append((f"local-{season}-{gw}", base, script))
+        rust_base = None
+        if args.rust_contexts:
+            started = time.monotonic()
+            rust_base = rust_context(
+                binary, args.data.resolve(), context.deadline, work / f"base-rust-{season}-{gw}"
+            )
+            rust_id = ContextStore(rust_base / "context").latest().context_id
+            took = time.monotonic() - started
+            print(f"rust context {season} GW{gw}: {rust_id} ({took:.0f} s)", flush=True)
+        sessions.append((f"local-{season}-{gw}", base, script, rust_base))
 
     started = time.monotonic()
     with ThreadPoolExecutor(len(sessions) or 1) as pool:
-        done = list(pool.map(lambda s: run_session(*s, fpl, binary, work), sessions))
+        done = list(
+            pool.map(lambda s: run_session(s[0], s[1], s[2], fpl, binary, work, s[3]), sessions)
+        )
     print(f"sessions replayed ({time.monotonic() - started:.0f} s)", flush=True)
     results = []
     for session in done:
@@ -452,7 +511,12 @@ def main() -> int:
     log_experiment(
         args.experiments,
         shlex.join(["python", "dev/bot_parity.py", *sys.argv[1:]]),
-        {"gate": "batch 5 bot", "data": str(args.data), "binary": str(binary), "teams": teams},
+        {
+            "gate": "batch 6 live stack" if args.rust_contexts else "batch 5 bot",
+            "data": str(args.data),
+            "binary": str(binary),
+            "teams": teams,
+        },
         {
             "passed": passed,
             "sessions": len(results),

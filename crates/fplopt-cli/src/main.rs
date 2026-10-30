@@ -10,6 +10,7 @@
 //! successful `snapshot daily|tick` pings HEALTHCHECK_PING_URL if set.
 
 mod bot;
+mod live;
 mod models;
 mod optimize;
 mod optimize_plan;
@@ -94,6 +95,11 @@ enum Command {
     Optimize {
         #[command(subcommand)]
         command: optimize::OptimizeJob,
+    },
+    /// Go-live jobs: plan contexts and deadline alerts.
+    Live {
+        #[arg(value_enum)]
+        command: live::LiveJob,
     },
     /// The Telegram bot.
     Bot {
@@ -252,6 +258,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 features_dump(&ctx.settings.data_dir, &deadlines, &out)
             }))
         }
+        Command::Models { command: models::ModelsJob::Context { now, out } } => {
+            Ok(run_job("models context", |ctx| models::context(&ctx.settings.data_dir, &now, &out)))
+        }
         Command::Models { command: models::ModelsJob::Dump { models, deadlines, out } } => {
             Ok(run_job("models dump", |ctx| {
                 models::dump(&ctx.settings.data_dir, &models, &deadlines, &out)
@@ -265,6 +274,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
             optimize::OptimizeJob::Plan(args) => optimize_plan::plan(&args),
             optimize::OptimizeJob::Squad(args) => optimize_plan::squad(&args),
         },
+        Command::Live { command } => {
+            let name = match command {
+                live::LiveJob::Tick => "live tick",
+                live::LiveJob::Prepare => "live prepare",
+            };
+            Ok(run_job(name, |ctx| live::run(command, &ctx.store, &ctx.fpl(), &ctx.settings)))
+        }
         Command::Bot { command: bot::BotJob::Run } => Ok(run_job("bot run", |ctx| {
             bot::run(&ctx.settings)?;
             Ok(stop::check()?)
@@ -318,7 +334,9 @@ fn features_dump(data_dir: &Path, deadlines: &Path, out: &Path) -> Result<()> {
 fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
     use fplopt_features::leakcheck::{FEATURE_TABLES, check_leakage, sample_deadlines};
     let started = std::time::Instant::now();
-    let tables = fplopt_store::load_tables(data_dir, FEATURE_TABLES)?;
+    let names: Vec<&str> =
+        FEATURE_TABLES.iter().chain(fplopt_models::MODEL_TABLES).copied().collect();
+    let tables = fplopt_store::load_tables(data_dir, &names)?;
     let holdout: Vec<i64> =
         fplopt_core::seasons::HOLDOUT_SEASONS.iter().map(|&s| i64::from(s)).collect();
     let deadlines = sample_deadlines(&tables, n_deadlines, seed, &holdout)?;
@@ -326,7 +344,9 @@ fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
         // Checking nothing must not read as a pass.
         anyhow::bail!("no eligible deadlines: the leakage check was not performed");
     };
-    let builders = fplopt_features::FRAMES;
+    // Every feature and history frame, and the xP models as 'model:<name>'.
+    let builders: Vec<(&'static str, fplopt_features::FeatureBuilder)> =
+        fplopt_features::FRAMES.iter().chain(fplopt_models::LEAKAGE_BUILDERS).copied().collect();
     log::info!(
         "leakage check: {} deadline(s) from {} to {}, {} frame(s), seed {seed}",
         deadlines.len(),
@@ -334,7 +354,7 @@ fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
         fmt_micros(last),
         builders.len()
     );
-    let leaks = check_leakage(tables, &deadlines, seed, builders)?;
+    let leaks = check_leakage(tables, &deadlines, seed, &builders)?;
     if let Some(leak) = leaks.first() {
         for leak in &leaks {
             log::error!(

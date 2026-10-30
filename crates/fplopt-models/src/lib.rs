@@ -97,6 +97,17 @@ pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Valu
     }
 }
 
+/// The models as the leakage check's builders (`model:<name>`, Python's `checked_builders`).
+pub const LEAKAGE_BUILDERS: &[(&str, fplopt_features::FeatureBuilder)] = &[
+    ("model:rolling", baseline::xp_rolling),
+    ("model:ep_next", baseline::xp_ep_next),
+    ("model:ep_next_fade", baseline::xp_ep_next_fade),
+    ("model:v1", assemble::xp_v1),
+];
+
+/// Tables the models read beyond the features' (`leakcheck::FEATURE_TABLES`).
+pub const MODEL_TABLES: &[&str] = &["team_match"];
+
 /// The xP frame of model `name` at the view.
 pub fn predict(name: &str, view: &AsOfView) -> Result<Table> {
     match name {
