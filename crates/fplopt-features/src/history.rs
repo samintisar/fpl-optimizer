@@ -14,7 +14,7 @@ use crate::bans::{
     BanEvent, CupRed, DOMESTIC_CUPS, LeagueRow, RedKind, ban_events, club_timelines, serve_bans,
 };
 use crate::baseline::{player_pool, upcoming_fixtures};
-use crate::util::{Kahan, days_between, floats, positions};
+use crate::util::{Kahan, days_between, floats, positions, rolling_mean};
 
 pub use crate::baseline::HORIZON;
 
@@ -280,9 +280,8 @@ fn club_continuity(m: &Matches, teams: &[i64], refs: &[Micros]) -> Vec<f64> {
             *entry += 1.0;
         }
     }
-    // Per team: (kickoff, rolling mean) in fixture order.
-    let mut means: HashMap<i64, Vec<(Micros, f64)>> = HashMap::new();
-    let mut window: HashMap<i64, Vec<f64>> = HashMap::new();
+    // Per team, in fixture order: (kickoff, continuity), then pandas' rolling mean.
+    let mut series: HashMap<i64, Vec<(Micros, f64)>> = HashMap::new();
     for i in 0..fixtures.team_key.len() {
         let team = fixtures.team_key[i];
         let o = order[&(team, fixtures.fixture_key[i])];
@@ -291,17 +290,16 @@ fn club_continuity(m: &Matches, teams: &[i64], refs: &[Micros]) -> Vec<f64> {
         } else {
             kept.get(&(team, o)).map_or(f64::NAN, |k| k / N_STARTERS as f64)
         };
-        let values = window.entry(team).or_default();
-        values.push(continuity);
-        let recent = &values[values.len().saturating_sub(CONTINUITY_WINDOW)..];
-        let known: Vec<f64> = recent.iter().copied().filter(|x| !x.is_nan()).collect();
-        let mean = if known.is_empty() {
-            f64::NAN
-        } else {
-            known.iter().sum::<f64>() / known.len() as f64
-        };
-        means.entry(team).or_default().push((fixtures.kickoff[i], mean));
+        series.entry(team).or_default().push((fixtures.kickoff[i], continuity));
     }
+    let means: HashMap<i64, Vec<(Micros, f64)>> = series
+        .into_iter()
+        .map(|(team, rows)| {
+            let values: Vec<f64> = rows.iter().map(|r| r.1).collect();
+            let rolled = rolling_mean(&values, CONTINUITY_WINDOW, 1);
+            (team, rows.iter().zip(rolled).map(|(r, m)| (r.0, m)).collect())
+        })
+        .collect();
     teams
         .iter()
         .zip(refs)

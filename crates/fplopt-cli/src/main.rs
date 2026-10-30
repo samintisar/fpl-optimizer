@@ -10,6 +10,7 @@
 //! successful `snapshot daily|tick` pings HEALTHCHECK_PING_URL if set.
 
 mod bot;
+mod models;
 mod optimize;
 mod optimize_plan;
 
@@ -83,6 +84,11 @@ enum Command {
     Features {
         #[command(subcommand)]
         command: FeaturesJob,
+    },
+    /// xP models' frames at given deadlines (the batch 6 parity gate; not in the Python CLI).
+    Models {
+        #[command(subcommand)]
+        command: models::ModelsJob,
     },
     /// The MILP planner.
     Optimize {
@@ -244,6 +250,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Features { command: FeaturesJob::Dump { deadlines, out } } => {
             Ok(run_job("features dump", |ctx| {
                 features_dump(&ctx.settings.data_dir, &deadlines, &out)
+            }))
+        }
+        Command::Models { command: models::ModelsJob::Dump { models, deadlines, out } } => {
+            Ok(run_job("models dump", |ctx| {
+                models::dump(&ctx.settings.data_dir, &models, &deadlines, &out)
             }))
         }
         Command::Optimize { command } => match command {

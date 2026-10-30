@@ -9,7 +9,7 @@ pub mod bans;
 pub mod baseline;
 pub mod history;
 pub mod leakcheck;
-mod util;
+pub mod util;
 
 use anyhow::Result;
 use fplopt_store::{AsOfView, Table};

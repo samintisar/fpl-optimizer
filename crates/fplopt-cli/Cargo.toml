@@ -17,6 +17,7 @@ fplopt-bot = { version = "0.1.0", path = "../fplopt-bot" }
 fplopt-build = { version = "0.1.0", path = "../fplopt-build" }
 fplopt-core = { version = "0.1.0", path = "../fplopt-core" }
 fplopt-features = { version = "0.1.0", path = "../fplopt-features" }
+fplopt-models = { version = "0.1.0", path = "../fplopt-models" }
 fplopt-optimize = { version = "0.1.0", path = "../fplopt-optimize" }
 fplopt-parity = { version = "0.1.0", path = "../fplopt-parity" }
 fplopt-store = { version = "0.1.0", path = "../fplopt-store" }

@@ -1082,6 +1082,7 @@ dependencies = [
  "fplopt-build",
  "fplopt-core",
  "fplopt-features",
+ "fplopt-models",
  "fplopt-optimize",
  "fplopt-parity",
  "fplopt-store",
@@ -1130,6 +1131,20 @@ dependencies = [
  "anyhow",
  "cmake",
  "flate2",
+ "serde_json",
+]
+
+[[package]]
+name = "fplopt-models"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fplopt-build",
+ "fplopt-core",
+ "fplopt-features",
+ "fplopt-lgbm",
+ "fplopt-store",
+ "log",
  "serde_json",
 ]
 
