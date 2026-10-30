@@ -518,3 +518,15 @@ def test_exclude_chips_and_fh_scale_are_validated_and_pickle() -> None:
     params = OptimizerParams(exclude_chips=["3xc", "bboost"], fh_scale=0.4)
     assert params.exclude_chips == ("3xc", "bboost")  # sorted
     assert pickle.loads(pickle.dumps(params)) == params
+
+
+@pytest.mark.parametrize("how", ["bound", "all"])
+def test_fh_scale_shrinks_the_free_hit_gain(how) -> None:
+    """The Free Hit GW6 of test_free_hit_for_one_big_gw_reverts wins at full value and
+    loses when none of its gain counts (holding the chip is worth 4)."""
+    state, pool, xp, _ = team([1.0, 1.0, 1.0], other_xp=[0.0, 8.0, 0.0])
+    params = chip_params(3, freehit=4.0)
+    problem = state_problem(state, pool, xp, params)
+    assert optimize(problem, params, top_k=1, scenario_search=how).best.scenario == "freehit@gw6"
+    shrunk = replace(params, fh_scale=0.0)
+    assert optimize(problem, shrunk, top_k=1, scenario_search=how).best.scenario == "none"

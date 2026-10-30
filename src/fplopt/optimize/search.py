@@ -35,7 +35,9 @@ scenario, same objective; ties go to the earlier scenario in enumeration order i
 and like `"all"` it is within `mip_gap` of the best plan over all scenarios: each solved
 scenario's plan is within `mip_gap` of that scenario's optimum, and each skipped scenario's
 optimum is below the returned plan. Bounds carry a small relative margin
-(`model.BOUND_MARGIN`) for HiGHS's feasibility tolerances.
+(`model.BOUND_MARGIN`) for HiGHS's feasibility tolerances. With `params.fh_scale < 1`
+scenarios are ranked by `_score`, which never exceeds the total objective, so the bounds
+still prune soundly.
 
 The guarantee assumes every solve reaches `mip_gap`. A solve stopped by a limit
 (`OptimizerParams.node_limit`/`time_limit`) is never silent: its (label, status) goes into
@@ -112,6 +114,22 @@ def chip_extra(problem: PlanInput, params: OptimizerParams, t: int, name: str) -
     return math.inf
 
 
+def _score(plans: dict[int, Plan], i: int, candidates, params: OptimizerParams) -> float:
+    """What scenario i's plan is ranked by: its total objective, less (1 − `fh_scale`) of
+    its Free Hit gain over the no-chip plan (scenario 0) in the Free Hit GWs (never below
+    0). Only lowers a scenario's value, so the search's upper bounds stay valid."""
+    plan = plans[i]
+    if params.fh_scale == 1.0:
+        return plan.total_objective
+    base = plans[0]
+    gain = sum(
+        plan.gws[t].objective - base.gws[t].objective
+        for t, name in candidates[i].chips
+        if name == "freehit"
+    )
+    return plan.total_objective - (1.0 - params.fh_scale) * max(0.0, gain)
+
+
 def search(
     problem: PlanInput,
     params: OptimizerParams,
@@ -178,7 +196,7 @@ def search(
         solve_seconds=clock["solve"],
         not_optimal=tuple(not_optimal),
     )
-    best = max(plans, key=lambda i: (plans[i].total_objective, -i))
+    best = max(plans, key=lambda i: (_score(plans, i, candidates, params), -i))
     objectives = {candidates[i].label: plans[i].total_objective for i in sorted(plans)}
     return SearchResult(plans[best], candidates[best], objectives, bounds, stats)
 
@@ -235,8 +253,8 @@ def _bound_search(
             break
         i = max(open_, key=lambda j: (upper(j), -j))
         u = upper(i)
-        incumbent = max(plans, key=lambda j: (plans[j].total_objective, -j))
-        z = plans[incumbent].total_objective
+        incumbent = max(plans, key=lambda j: (_score(plans, j, candidates, params), -j))
+        z = _score(plans, incumbent, candidates, params)
         if u < z or (u <= z and i > incumbent):
             break  # no open scenario can beat (or tie earlier than) the incumbent
         b = base[i]
