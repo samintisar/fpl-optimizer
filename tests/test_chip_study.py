@@ -198,16 +198,36 @@ def test_estimate_terminal_values_by_window():
 
 
 def test_estimate_terminal_values_split_by_known_doubles():
-    # A double known (at every deadline of 2020) in GW15 only.
-    doubles = {(2020, gw): frozenset({15}) for gw in range(1, 39)}
-    frames = pd.concat([gains_frame(start_id=str(i)) for i in range(40)])  # n >= MIN_CELL
+    # 2019 gains rise with the GW (best of the window's last L GWs = 19 in set 1), 2020's are 0.
+    frames = pd.concat(
+        [gains_frame(season=2019, start_id=str(i)) for i in range(30)]
+        + [gains_frame(season=2020, values=lambda gw: 0.0, start_id=str(i)) for i in range(30)]
+    )  # 30 runs each = MIN_CELL
+    # Set 1 (GWs 1/2-19), L = 5 -> decision GW 19-5-6+1 = 9: a double in GW15 is in (14, 19].
+    # L = 4 -> decision GW 10, where GW15 is not in (15, 19]. Known only for 2019, only at 9 and 10.
+    doubles = {(2019, 9): frozenset({15}), (2019, 10): frozenset({15})}
     table = estimate_terminal_values(frames, split="double", doubles=doubles, horizon=6)
-    # Set 1, L GWs left = GWs 20-L..19: GW15 is among them for L >= 5.
-    assert table["3xc@1+1"][4] == 19.0 and table["3xc@1+0"][3] == 19.0
-    # Sparse cells fall back to the window value: set 2 never has a double ahead.
+    assert table["3xc@1+1"][4] == 19.0  # 2019 runs only
+    assert table["3xc@1+0"][4] == 0.0  # 2020 runs only
+    # L = 4: every run is d = 0 (n = 60), the d = 1 cell is empty and takes the window value.
+    assert table["3xc@1+0"][3] == pytest.approx(9.5)
+    assert table["3xc@1+1"][3] == table["3xc@1"][3] == pytest.approx(9.5)
+    # Set 2 never has a double ahead: its d = 1 cells are empty.
     assert table["3xc@2+1"] == table["3xc@2"]
     with pytest.raises(ValueError, match="doubles"):
         estimate_terminal_values(frames, split="double")
+
+
+def test_estimate_terminal_values_sparse_cells_fall_back_for_both_flags():
+    # 20 runs each: at L = 4 the 2020 runs have a double ahead (d = 1), the 2019 runs not, so
+    # both d cells hold 20 < MIN_CELL runs and both take the window value (19 and 0 -> 9.5).
+    frames = pd.concat(
+        [gains_frame(season=2019, start_id=str(i)) for i in range(20)]
+        + [gains_frame(season=2020, values=lambda gw: 0.0, start_id=str(i)) for i in range(20)]
+    )
+    doubles = {(2020, 10): frozenset({16})}
+    table = estimate_terminal_values(frames, split="double", doubles=doubles, horizon=6)
+    assert table["3xc@1+0"][3] == table["3xc@1+1"][3] == pytest.approx(9.5)
 
 
 def test_estimate_loso_leaves_each_season_out():

@@ -148,6 +148,8 @@ def estimate_terminal_values(
                         continue
                     cell = [base]
                     if split == "double":
+                        # For long L (set 1, L >= 14 at H = 6) the clamp counts doubles inside the
+                        # GW1 horizon; the optimizer never looks those cells up (left <= 13 at GW1).
                         decision = max(1, stop - left - horizon + 1)
                         ahead = doubles.get((season, decision), frozenset())
                         d = int(any(stop - left < g <= stop for g in ahead))
