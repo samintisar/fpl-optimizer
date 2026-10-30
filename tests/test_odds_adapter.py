@@ -56,3 +56,31 @@ def test_warns_when_credits_low(caplog):
     OddsClient(make_client(httpx.MockTransport(handler)), "KEY").epl_odds()
     assert "credits low: 12" in caplog.text
     assert "KEY" not in caplog.text
+
+
+def test_events_are_free_and_props_ask_for_us_player_markets():
+    seen = []
+
+    def handler(request):
+        seen.append(request.url)
+        return httpx.Response(200, json=[] if request.url.path.endswith("events") else {})
+
+    client = OddsClient(make_client(httpx.MockTransport(handler)), "KEY")
+    client.epl_events()
+    client.event_props("abc123")
+    assert seen[0].path == "/v4/sports/soccer_epl/events"
+    assert dict(seen[0].params) == {"apiKey": "KEY", "dateFormat": "iso"}
+    assert seen[1].path == "/v4/sports/soccer_epl/events/abc123/odds"
+    assert dict(seen[1].params) == {
+        "apiKey": "KEY",
+        "regions": "us",
+        "markets": "player_goal_scorer_anytime,player_assists,player_shots_on_target",
+        "oddsFormat": "decimal",
+        "dateFormat": "iso",
+    }
+
+
+def test_props_refuse_a_bad_event_id():
+    client = OddsClient(make_client(httpx.MockTransport(lambda r: httpx.Response(200))), "KEY")
+    with pytest.raises(ValueError, match="bad event id"):
+        client.event_props("../sports")
