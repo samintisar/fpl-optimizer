@@ -645,3 +645,29 @@ uv run python dev/optimize_parity.py [--data data] [--deadlines 12] [--v1 4] [--
 ```
 
 It logs a row to `results/experiments.csv` (family `rust parity`) and exits 1 on any failure.
+
+## `bot_parity.py`: Rust migration batch 5 gate
+
+`bot_parity.py` replays scripted bot sessions twice on copies of the same state, through
+Python's `BotService` (`tests/bot_replay.py`) and `fplopt-rs bot replay`, with FPL's
+responses recorded once (`--fpl`) so both see the same bytes. Sessions: `server` (a copy of
+the server's `state/`: a backup of `bot.sqlite`, never the live file, and the newest context;
+every registered user plans as now, and public FPL teams register on new chats) and
+`local-<season>-<gw>` (v1 contexts built from `data/`, a new database). Each team: `/plan`,
+`/transfer list`, both alerts, some `/chips` and `/setft`; then FPL down, and after the
+deadline. Checks: every reply and alert text byte for byte, every database row (write times
+aside), and the batch 4 tie rule where a plan differs.
+
+On 2026-10-30 (the server's GW9 context and state copied that day; 2026/27 GW4 and GW8 built
+locally; the registered user's team and 11 public teams): 3/3 sessions identical, 303 steps,
+333 messages, 93 plans logged, no ties. Both implementations fail the same steps (alerts for
+a chat whose team FPL doesn't know, which the alert job never alerts), and at GW4 most
+imports stop at chips played after GW4 (today's FPL history replayed at a past GW), alike in
+both. Python and Rust take about the same time (the solves dominate).
+
+```sh
+cargo build --release -p fplopt-cli
+uv run python dev/bot_parity.py --server DIR [--data data] [--deadlines 2026:4,2026:8] [--fpl DIR] [--keep DIR]
+```
+
+It logs a row to `results/experiments.csv` (family `rust parity`) and exits 1 on any failure.

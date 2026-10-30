@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use crate::params::OptimizerParams;
 use crate::problem::PlanInput;
 use crate::state::{InvalidDecision, chip_window};
+use crate::util::py_sum;
 
 /// A fixed chip assignment: `chips` (t, name) sorted by t, `chip_ids` the windows they use,
 /// `label` e.g. `none`, `bboost@gw7`, `wildcard@gw5+freehit@gw9`.
@@ -104,13 +105,12 @@ pub fn terminal_value(
     let last = problem.gws.last().map_or(0, |g| g.gw_index);
     let mut windows: Vec<_> = problem.rules.chips.iter().collect();
     windows.sort_by_key(|w| w.chip_id);
-    let mut total = 0.0;
-    for w in windows {
-        if !used(w.chip_id) && w.stop > last {
-            total += chip_value(params, &w.name, w.stop - last);
-        }
-    }
-    total
+    py_sum(
+        windows
+            .into_iter()
+            .filter(|w| !used(w.chip_id) && w.stop > last)
+            .map(|w| chip_value(params, &w.name, w.stop - last)),
+    )
 }
 
 /// The value of holding chip `name` with `left` (≥ 1) GWs of its window after the horizon.

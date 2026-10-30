@@ -173,39 +173,7 @@ fn write_string(s: &str, out: &mut String) {
     out.push_str(&fplopt_core::pyjson::dumps(s).expect("a string always serializes"));
 }
 
-/// Python's `repr(float)`: shortest round-trip digits, scientific below 1e-4 or from 1e16.
-pub fn py_float_repr(f: f64) -> String {
-    if f.is_nan() {
-        return "NaN".into();
-    }
-    if f.is_infinite() {
-        return if f > 0.0 { "Infinity".into() } else { "-Infinity".into() };
-    }
-    if f == 0.0 {
-        return if f.is_sign_negative() { "-0.0".into() } else { "0.0".into() };
-    }
-    let sci = format!("{f:e}"); // shortest digits, e.g. "1.5e-5"
-    let (mantissa, exp) = sci.split_once('e').unwrap();
-    let exp: i32 = exp.parse().unwrap();
-    let negative = mantissa.starts_with('-');
-    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
-    let sign = if negative { "-" } else { "" };
-    if (-4..16).contains(&exp) {
-        let point = exp + 1; // digits before the decimal point
-        let body = if point <= 0 {
-            format!("0.{}{digits}", "0".repeat((-point) as usize))
-        } else if point as usize >= digits.len() {
-            format!("{digits}{}.0", "0".repeat(point as usize - digits.len()))
-        } else {
-            format!("{}.{}", &digits[..point as usize], &digits[point as usize..])
-        };
-        format!("{sign}{body}")
-    } else {
-        let rest = if digits.len() > 1 { format!(".{}", &digits[1..]) } else { String::new() };
-        let esign = if exp < 0 { '-' } else { '+' };
-        format!("{sign}{}{rest}e{esign}{:02}", &digits[..1], exp.abs())
-    }
-}
+pub use fplopt_core::pyjson::py_float_repr;
 
 #[cfg(test)]
 mod tests {

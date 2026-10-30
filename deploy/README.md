@@ -253,6 +253,8 @@ of `.venv/bin/fplopt` (same arguments); re-copy, `daemon-reload`, then disable a
 shadow timers and `raw-shadow/`. Rollback: revert the three units (the Python CLI stays
 installed until batch 8).
 
+**Bot cutover** (batch 5, at the same switch, between two gameweeks, never in the 24 h before a deadline): in `fplopt-bot.service`, `ExecStart` runs `%h/fpl-optimizer/target/release/fplopt-rs bot run` instead of `.venv/bin/fplopt bot run` (same environment: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, `FPLOPT_STATE_DIR`); re-copy, `daemon-reload`, `restart`. The Rust bot uses the same `state/bot.sqlite` and reads the plan contexts Python's `live prepare` writes (until batch 6 moves that job too). Before it, re-run the gate on the server against a fresh backup of `bot.sqlite` (`python3 -c "import sqlite3; s = sqlite3.connect('file:state/bot.sqlite?mode=ro', uri=True); d = sqlite3.connect('../fpl-optimizer-rs/gate/bot-copy.sqlite'); s.backup(d)"`) and the newest context, never the live file: `dev/bot_parity.py --server <a directory with both>`. Rollback: revert the unit.
+
 ## Copy raw/ to the dev machine
 
 For notebooks and Phase 1b, from the repo root on the dev machine (Git Bash):

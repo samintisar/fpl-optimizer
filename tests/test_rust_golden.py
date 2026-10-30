@@ -2,7 +2,9 @@
 inputs. This test fails if Python's behaviour drifts from a golden file; regenerate with
 `uv run python tests/test_rust_golden.py` (and the Rust tests then check the new values).
 `names.json.gz` comes from real data (`dev/name_golden.py --data data`); here it is only
-re-checked against the installed rapidfuzz and `normalise_name`."""
+re-checked against the installed rapidfuzz and `normalise_name`. `bot/` is a scripted bot
+session on the synthetic league (`tests/bot_replay.py`): Python's replies and database rows,
+which `crates/fplopt-bot/tests/golden.rs` replays."""
 
 import gzip
 import json
@@ -76,7 +78,24 @@ def test_names_golden_is_current():
     assert all(fuzz.token_set_ratio(a, b) == score for a, b, score in golden["pairs"])
 
 
+def test_bot_golden_is_current(tmp_path):
+    import shutil
+
+    from bot_replay import dump_db, replay
+
+    root = GOLDEN / "bot"
+    shutil.copytree(root / "state", tmp_path / "state")
+    script = json.loads((root / "script.json").read_text(encoding="utf-8"))
+    results = replay(script, tmp_path / "state", root / "fpl")
+    assert results == json.loads((root / "results.json").read_text(encoding="utf-8"))
+    db = json.loads(json.dumps(dump_db(tmp_path / "state" / "bot.sqlite")))
+    assert db == json.loads((root / "db.json").read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
+    from bot_replay import golden
+
+    golden(GOLDEN / "bot")
     GOLDEN.mkdir(parents=True, exist_ok=True)
     text = json.dumps(seasons_golden(), indent=1, sort_keys=True) + "\n"
     (GOLDEN / "seasons.json").write_text(text, encoding="utf-8", newline="\n")

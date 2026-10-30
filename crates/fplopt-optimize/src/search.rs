@@ -16,6 +16,7 @@ use crate::params::OptimizerParams;
 use crate::plans::Plan;
 use crate::problem::PlanInput;
 use crate::state::{GOALKEEPER, is_transfer_chip};
+use crate::util::py_sum;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Search {
@@ -80,11 +81,7 @@ pub fn chip_extra(problem: &PlanInput, params: &OptimizerParams, t: usize, name:
             let mut slots: Vec<f64> = w[1..].iter().map(|x| (1.0 - x).abs()).collect();
             slots.sort_by(|a, b| b.total_cmp(a));
             let mut total = (1.0 - w[0]).abs() * keepers.last().copied().unwrap_or(0.0);
-            let mut extra = 0.0;
-            for (a, x) in slots.iter().zip(outfield.iter().rev()) {
-                extra += a * x;
-            }
-            total += extra;
+            total += py_sum(slots.iter().zip(outfield.iter().rev()).map(|(a, x)| a * x));
             d * total
         }
         _ => f64::INFINITY,
@@ -252,10 +249,7 @@ fn bound_search(s: &mut State) -> Result<Vec<(String, f64)>> {
             make_scenario(problem, &kept).ok().and_then(|sc| index.get(&sc).copied())
         };
         base.push(b);
-        let mut extra = 0.0;
-        for (t, name) in &extras {
-            extra += chip_extra(problem, params, *t, name);
-        }
+        let extra = py_sum(extras.iter().map(|(t, name)| chip_extra(problem, params, *t, name)));
         offset.push(match b {
             None => f64::INFINITY,
             Some(b) => extra + terminal[i] - terminal[b],

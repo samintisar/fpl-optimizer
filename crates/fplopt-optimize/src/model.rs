@@ -17,6 +17,7 @@ use crate::params::OptimizerParams;
 use crate::plans::{GwPlan, Plan};
 use crate::problem::PlanInput;
 use crate::state::{GOALKEEPER, Transfer, is_transfer_chip};
+use crate::util::py_sum;
 
 /// (outs, ins) of a GW's transfers.
 pub type TransferSet = (BTreeSet<i64>, BTreeSet<i64>);
@@ -895,10 +896,7 @@ pub fn solve_plan(
     }
     let x = highs.col_values();
     let gws = read_plan(&model, &x);
-    let mut objective = 0.0;
-    for g in &gws {
-        objective += g.objective;
-    }
+    let objective = py_sum(gws.iter().map(|g| g.objective));
     Ok(Plan {
         gws,
         objective,
@@ -1000,16 +998,10 @@ fn read_plan(model: &Model, x: &[f64]) -> Vec<GwPlan> {
         let bank = if freehit { py_round(x[model.fh_bank[&t]]) } else { kept_bank };
         let ft = py_round(model.ft[t].expr().value(x));
         let ft_value = params.ft_state_value(ft);
-        let mut lineup_xp = 0.0;
-        for k in &starters {
-            lineup_xp += xp[k];
-        }
-        lineup_xp += model.captain_extra(t) * xp[&captain];
+        let lineup_xp =
+            py_sum(starters.iter().map(|k| xp[k])) + model.captain_extra(t) * xp[&captain];
         let weights = model.bench_weights(t);
-        let mut bench_xp = 0.0;
-        for (w, k) in weights.iter().zip(&bench) {
-            bench_xp += w * xp[k];
-        }
+        let bench_xp = py_sum(weights.iter().zip(&bench).map(|(w, k)| w * xp[k]));
         let d = params.decay.powf(gw.horizon as f64);
         let objective = d
             * (lineup_xp + bench_xp + ft_value - previous_ft_value

@@ -50,7 +50,12 @@ fn pairs(v: &Value, key: &str) -> Result<Vec<Vec<i64>>> {
 /// `OptimizerParams` from a JSON object of Python's field names; missing keys keep the
 /// defaults, null means None where Python allows it.
 pub fn params_from_json(v: &Value) -> Result<OptimizerParams> {
-    let mut p = OptimizerParams::default();
+    params_with(OptimizerParams::default(), v)
+}
+
+/// `base` with the fields `v` names replaced (Python's `dataclasses.replace(base, **v)`).
+pub fn params_with(base: OptimizerParams, v: &Value) -> Result<OptimizerParams> {
+    let mut p = base;
     let Some(map) = v.as_object() else { bail!("params: expected an object") };
     let float =
         |x: &Value, k: &str| x.as_f64().with_context(|| format!("params.{k}: not a number"));

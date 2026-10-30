@@ -9,6 +9,7 @@
 //! SIGTERM stops a long run cleanly, after its manifest is written (exit 143, no alert); a
 //! successful `snapshot daily|tick` pings HEALTHCHECK_PING_URL if set.
 
+mod bot;
 mod optimize;
 mod optimize_plan;
 
@@ -87,6 +88,11 @@ enum Command {
     Optimize {
         #[command(subcommand)]
         command: optimize::OptimizeJob,
+    },
+    /// The Telegram bot.
+    Bot {
+        #[command(subcommand)]
+        command: bot::BotJob,
     },
 }
 
@@ -248,6 +254,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             optimize::OptimizeJob::Plan(args) => optimize_plan::plan(&args),
             optimize::OptimizeJob::Squad(args) => optimize_plan::squad(&args),
         },
+        Command::Bot { command: bot::BotJob::Run } => Ok(run_job("bot run", |ctx| {
+            bot::run(&ctx.settings)?;
+            Ok(stop::check()?)
+        })),
+        Command::Bot { command: bot::BotJob::Replay { script, state, fpl, out } } => {
+            bot::replay(&script, &state, &fpl, &out)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Check { check: Check::Parity { area } } => match area {
             Parity::Table { python, rust, keys, rtol, atol, out, experiments } => {
                 parity_table(&python, &rust, &keys, Tolerance { rtol, atol }, out, &experiments)
