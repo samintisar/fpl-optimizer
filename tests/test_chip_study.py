@@ -693,6 +693,28 @@ def test_cli_double_split_table_must_match_the_policys_lead(v2_tables, tmp_path,
         cli.parse_policy_spec(spec)
 
 
+def test_cli_window_split_file_must_hold_a_window_table(v2_tables, tmp_path, monkeypatch):
+    pooled = tmp_path / "pooled.json"
+    pooled.write_text(json.dumps({"values": {"3xc": [4.0]}}), encoding="utf-8")
+    monkeypatch.setitem(cli.CHIP_TABLE_FILES, 1, pooled)
+    for spec in ("chip_split=1", "chip_split=1,loso=1"):
+        with pytest.raises(argparse.ArgumentTypeError, match="not a window-split table"):
+            cli.parse_policy_spec(f"optimizer:v1:{V_BASE},chip_shrink=0.8,{spec}")
+
+
+def test_cli_chip_keys_at_their_defaults_are_dropped(tmp_path, monkeypatch):
+    table = tmp_path / "terminal-values.json"
+    table.write_text(json.dumps({"values": {"bboost": [2.0]}}), encoding="utf-8")
+    monkeypatch.setattr(cli, "CHIP_VALUES_FILE", table)
+    plain = cli.parse_policy_spec(f"optimizer:v1:{V_BASE},chip_shrink=0.5")
+    explicit = cli.parse_policy_spec(
+        f"optimizer:v1:{V_BASE},chip_shrink=0.5,chip_split=0,loso=0,fh_scale=1.0"
+    )
+    assert explicit == plain and str(explicit) == str(plain)
+    assert "chip_split" not in str(plain) and "loso" not in str(plain)
+    assert "fh_scale=0.4" in str(cli.parse_policy_spec(f"optimizer:v1:{V_BASE},fh_scale=0.4"))
+
+
 def test_cli_pooled_chip_shrink_is_unchanged(tmp_path, monkeypatch, v2_tables):
     """`chip_shrink=k` alone: the pooled table, the same policy (and name) as before."""
     from fplopt.backtest.chip_values import load_terminal_values
@@ -781,11 +803,44 @@ def test_backtest_config_logs_chip_policy_2_tables_by_hash(tmp_path, monkeypatch
     args = argparse.Namespace(
         seasons=(2019,), starts="template@1", policy_specs=specs, jobs=1, family="f", command="run"
     )
+    from fplopt.backtest import evaluate
+
+    window, double = v2_tables
+    committed = {window.resolve(): True}
+    monkeypatch.setattr(evaluate, "git_file_committed", lambda p: committed.get(p.resolve(), False))
     logged = cli._backtest_config(args, tmp_path / "out")["chip_values"]
     assert set(logged) == {"0", "1", "2"}
     assert logged["0"] == {"source": "run", "values": {"bboost": [2.0]}}
-    window, _ = v2_tables
     assert logged["1"]["sha1"] == hashlib.sha1(window.read_bytes()).hexdigest()
+    # outside the repo (tmp_path): the absolute path
     assert logged["1"]["file"] == str(window) and logged["1"]["split"] == "window"
+    assert (logged["1"]["committed"], logged["2"]["committed"]) == (True, False)
     assert (logged["2"]["lead"], logged["2"]["horizon"]) == (10, 6)
     assert "values" not in logged["1"] and "loso" not in logged["2"]
+
+
+def test_chip_table_log_path_and_commit_warning(tmp_path, monkeypatch, v2_tables, caplog):
+    """In the repo: a repo-relative POSIX path; an uncommitted table is logged with a warning."""
+    import logging
+
+    from fplopt.backtest import evaluate
+
+    window, _ = v2_tables
+    monkeypatch.setattr(cli, "REPO_ROOT", tmp_path.resolve())
+    for committed in (True, False):
+        monkeypatch.setattr(evaluate, "git_file_committed", lambda p, c=committed: c)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="fplopt"):
+            entry = cli._chip_table_log(1)
+        assert entry["file"] == "w.json" and entry["committed"] is committed
+        warned = [r for r in caplog.records if "not committed" in r.getMessage()]
+        assert len(warned) == (0 if committed else 1)
+        assert not warned or "w.json" in warned[0].getMessage()
+
+
+def test_git_file_committed_outside_a_checkout_is_false(tmp_path):
+    from fplopt.backtest.evaluate import git_file_committed
+
+    table = tmp_path / "t.json"
+    table.write_text("{}", encoding="utf-8")
+    assert git_file_committed(table) is False

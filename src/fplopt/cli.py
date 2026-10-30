@@ -205,7 +205,8 @@ POLICY_PARAMS["chiprules"] = {
     "k_fh": int,
     "t_wc": float,
 }
-CHIP_VALUES_FILE = Path(__file__).resolve().parents[2] / "config" / "chips" / "terminal-values.json"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CHIP_VALUES_FILE = REPO_ROOT / "config" / "chips" / "terminal-values.json"
 # chip_split → table file (patched in tests); 1 and 2 are chip policy 2's
 # (chip_values.WINDOW_VALUES_FILE, DOUBLE_VALUES_FILE). 0 is `CHIP_VALUES_FILE`, looked up
 # when used (`chip_table_file`), so patching that one constant still moves the pooled table.
@@ -213,8 +214,12 @@ CHIP_TABLE_FILES: dict[int, Path] = {
     1: CHIP_VALUES_FILE.with_name("terminal-values-window.json"),
     2: CHIP_VALUES_FILE.with_name("terminal-values-double.json"),
 }
-# `chips values --split` → chip_split (chip_values.SPLITS)
+# `chips values --split` → chip_split: chip_values.SPLITS, copied (pinned by a test) because
+# chip_values imports pandas, which the CLI imports lazily.
 CHIP_SPLITS = ("pooled", "window", "double")
+# Chip spec keys dropped when given at their default, so `chip_split=0,loso=0` is the same
+# spec (and experiment family) as leaving them out.
+CHIP_KEY_DEFAULTS: dict[str, float | int] = {"chip_split": 0, "loso": 0, "fh_scale": 1.0}
 # The horizon a double-split table is estimated for (the variants' horizon=6).
 DOUBLE_TABLE_HORIZON = 6
 DEFAULT_STARTS = "template@1,random:5@1,random:3@20"
@@ -314,8 +319,8 @@ class PolicySpec:
                 if not chips:
                     raise ValueError("chip_shrink needs chips=1")
                 path = chip_table_file(split)
-                if split == 2:
-                    _check_double_table(path, DOUBLE_LEAD, OptimizerParams(**params).horizon)
+                if split:
+                    _check_table_header(path, split, DOUBLE_LEAD, OptimizerParams(**params).horizon)
                 if loso:
                     extra["season_tables"] = estimated_loso_values(float(shrink), path)
                 else:
@@ -358,17 +363,21 @@ def estimated_loso_values(shrink: float, path: Path) -> dict[int, dict[str, tupl
     return load_loso_values(shrink, path)
 
 
-def _check_double_table(path: Path, lead: int, horizon: int) -> None:
-    """A double-split table's `+d` cells count the doubles known `lead` GWs ahead of the
-    decision GW of a `horizon`-GW plan: one estimated with another lead or horizon would
-    hold values for a different flag than the policy sets (ValueError)."""
+def _check_table_header(path: Path, split: int, lead: int, horizon: int) -> None:
+    """The file of `chip_split` = `split` (>= 1) must hold that split's table (ValueError
+    otherwise). A double-split table's `+d` cells count the doubles known `lead` GWs ahead
+    of the decision GW of a `horizon`-GW plan: one estimated with another lead or horizon
+    would hold values for a different flag than the policy sets."""
     if not path.is_file():
         return  # load_*_values reports the missing table
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("split") != "double":
+    name = CHIP_SPLITS[split]
+    if payload.get("split") != name:
         raise ValueError(
-            f"chip_split=2: {path} is not a double-split table (chips values --split double)"
+            f"chip_split={split}: {path} is not a {name}-split table (chips values --split {name})"
         )
+    if split != 2:
+        return
     if payload.get("lead") != lead:
         raise ValueError(
             f"chip_split=2: {path} was estimated with known-double lead {payload.get('lead')}, "
@@ -410,6 +419,10 @@ def make_policy_spec(name: str, xp: str, params: dict[str, str]) -> PolicySpec:
         if isinstance(value, float) and not math.isfinite(value):
             raise argparse.ArgumentTypeError(f"{name} {key}={raw!r}: not finite")
         values.append((key, value))
+    if name == "optimizer":
+        values = [
+            (k, v) for k, v in values if not (k in CHIP_KEY_DEFAULTS and v == CHIP_KEY_DEFAULTS[k])
+        ]
     spec = PolicySpec(name, xp, tuple(sorted(values)))
     given = dict(spec.params)
     if not 1 <= given.get("horizon", 1) <= MAX_PLAN_HORIZON:
@@ -602,8 +615,8 @@ def _backtest_config(args: argparse.Namespace, out: Path) -> dict[str, Any]:
     if used:
         # The estimated terminal values the chip arms ran with (chip pre-registration §3:
         # logged), by chip_split: the pooled table itself; a chip policy 2 file (with its
-        # leave-one-season-out tables, ~10-50 kB) by path and SHA-1, the content being in
-        # git at the logged commit.
+        # leave-one-season-out tables, 20-70 kB) by repo-relative path and SHA-1
+        # (`_chip_table_log`).
         config["chip_values"] = {str(split): _chip_table_log(split) for split in sorted(used)}
     if args.command == "compare":
         config |= {
@@ -621,13 +634,33 @@ def _backtest_config(args: argparse.Namespace, out: Path) -> dict[str, Any]:
 
 
 def _chip_table_log(split: int) -> dict[str, Any]:
+    """The pooled table itself; a chip policy 2 table as its path (repo-relative POSIX, or
+    absolute outside the repo), `sha1` = the plain SHA-1 of the file's bytes (verifiable as
+    `git show <git_sha>:<file> | sha1sum`; not git's blob hash) and `committed`: whether the
+    file is tracked and unchanged against HEAD, i.e. whether the logged commit holds these
+    bytes (a warning, not a refusal, when it doesn't)."""
+    from fplopt.backtest.evaluate import git_file_committed
+
     path = chip_table_file(split)
     payload = json.loads(path.read_text(encoding="utf-8"))
     if split == 0:
         return payload
+    try:
+        # REPO_ROOT, not CHIP_VALUES_FILE.parents[2]: the latter moves when tests patch it
+        shown = path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        shown = str(path)
+    committed = git_file_committed(path)
+    if not committed:
+        log.warning(
+            "chip table %s is not committed (untracked or changed since HEAD): the logged "
+            "git_sha does not hold the table this run uses",
+            shown,
+        )
     entry: dict[str, Any] = {
-        "file": str(path),
+        "file": shown,
         "sha1": hashlib.sha1(path.read_bytes()).hexdigest(),
+        "committed": committed,
     }
     keys = ("source", "seasons", "split", "lead", "horizon")
     return entry | {k: payload[k] for k in keys if k in payload}
@@ -1901,7 +1934,8 @@ def _chips_values(c: Context) -> object:
         }
     out = args.out or chip_table_file(CHIP_SPLITS.index(args.split))
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    # LF on Windows too: the tables are tracked files (Path.write_text's newline, 3.10+)
+    out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
     for name, values in table.items():
         shown = ", ".join(f"{v:.1f}" for v in values[:6])
         print(f"{name}: L=1..6 {shown} ... L={len(values)} {values[-1]:.1f}", flush=True)

@@ -1338,6 +1338,30 @@ def git_sha() -> str:
     return result.stdout.strip() or "unknown"
 
 
+def git_file_committed(path: Path) -> bool:
+    """Whether `path` is tracked in its checkout and unchanged against HEAD (False when git
+    or the file's checkout isn't available)."""
+    path = Path(path).resolve()
+    try:
+        root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=path.parent,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout.strip()
+        rel = path.relative_to(Path(root).resolve()).as_posix()
+        for command in (
+            ["ls-files", "--error-unmatch", rel],
+            ["diff", "--quiet", "HEAD", "--", rel],
+        ):
+            subprocess.run(["git", *command], cwd=root, capture_output=True, timeout=10, check=True)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return True
+
+
 def json_safe(value: Any) -> Any:
     """`value` with numpy scalars as Python numbers and NaN/inf as None, recursively (for
     strict JSON)."""
