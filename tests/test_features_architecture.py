@@ -19,9 +19,10 @@ of a package):
   modules `rules`, `state`, `gw_score`, `itertools`, `types`, and, attribute by attribute
   (`module_attrs`), the solver (`pulp`, `highspy`: only the names the planner uses, none
   that reads or writes model files) and `time` (only `perf_counter`); no registry;
-- `fplopt/backtest/`: only `policies.py`, `start_states.py`, `probes.py` (what decides at a
-  deadline); may also import the scanned feature, model and optimizer modules, the pure
-  backtest modules `rules`, `state`, `gw_score` and `fplopt.seasons`; registry `PROBES`.
+- `fplopt/backtest/`: only `chip_doubles.py`, `policies.py`, `start_states.py`, `probes.py`
+  (what decides at a deadline); may also import the scanned feature, model and optimizer
+  modules, the pure backtest modules `rules`, `state`, `gw_score` and `fplopt.seasons`, and
+  attribute by attribute `hashlib.sha1` and `json.dumps` (policy names); registry `PROBES`.
 A later scanned package adds an entry the same way.
 
 Rules (`violations`, the same for every target):
@@ -274,12 +275,14 @@ OPTIMIZE_TARGET = ScanTarget(
 )
 BACKTEST_TARGET = ScanTarget(
     package="fplopt.backtest",
-    files=("policies.py", "start_states.py", "probes.py"),
+    files=("chip_doubles.py", "policies.py", "start_states.py", "probes.py"),
     trusted=(FEATURES_TARGET, MODELS_TARGET, OPTIMIZE_TARGET),
     extra_modules=PURE_BACKTEST_MODULES | frozenset({"fplopt.seasons"}),
     restricted={"fplopt.features.store": STORE_NAMES},
     registries={"probes.py": frozenset({"PROBES"})},
     freezing_calls=frozenset({"OptimizerParams"}),  # copies mappings into read-only ones
+    # the policy name's fingerprint of its terminal value tables (no I/O names)
+    module_attrs={"hashlib": frozenset({"sha1"}), "json": frozenset({"dumps"})},
 )
 TARGETS = (FEATURES_TARGET, MODELS_TARGET, GBM_TARGET, OPTIMIZE_TARGET, BACKTEST_TARGET)
 
@@ -615,6 +618,7 @@ def test_scanned_modules_exist():
     assert {p.name for p in feature_modules()} >= {"__init__.py", "baseline.py"}
     assert {p.name for p in scanned_files(MODELS_TARGET)} >= {"__init__.py", "baseline.py"}
     assert [p.name for p in scanned_files(BACKTEST_TARGET)] == [
+        "chip_doubles.py",
         "policies.py",
         "probes.py",
         "start_states.py",

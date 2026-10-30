@@ -4,7 +4,10 @@ size, and the CLI specs."""
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -184,6 +187,87 @@ def test_estimate_terminal_values_refuses_validate_seasons_and_missing_gains():
         estimate_terminal_values(empty)
 
 
+def test_estimate_terminal_values_by_window():
+    table = estimate_terminal_values(gains_frame(), split="window")
+    assert set(table) == {
+        f"{c}@{k}" for c in ("3xc", "bboost", "freehit", "wildcard") for k in (1, 2)
+    }
+    # TC gain = gw_index: set 1's best of its last L GWs is 19, set 2's is 38.
+    assert table["3xc@1"] == (19.0,) * 19
+    assert table["3xc@2"] == (38.0,) * 19
+    assert len(table["freehit@1"]) == 18 and len(table["freehit@2"]) == 19
+    # The pooled table is unchanged by default.
+    assert estimate_terminal_values(gains_frame())["3xc"][0] == pytest.approx((19 + 38) / 2)
+
+
+def test_estimate_terminal_values_split_by_known_doubles():
+    # 2019 gains rise with the GW (best of the window's last L GWs = 19 in set 1), 2020's are 0.
+    frames = pd.concat(
+        [gains_frame(season=2019, start_id=str(i)) for i in range(30)]
+        + [gains_frame(season=2020, values=lambda gw: 0.0, start_id=str(i)) for i in range(30)]
+    )  # 30 runs each = MIN_CELL
+    # Set 1 (GWs 1/2-19), L = 5 -> decision GW 19-5-6+1 = 9: a double in GW15 is in (14, 19].
+    # L = 4 -> decision GW 10, where GW15 is not in (15, 19]. Known only for 2019, only at 9 and 10.
+    doubles = {(2019, 9): frozenset({15}), (2019, 10): frozenset({15})}
+    table = estimate_terminal_values(frames, split="double", doubles=doubles, horizon=6)
+    assert table["3xc@1+1"][4] == 19.0  # 2019 runs only
+    assert table["3xc@1+0"][4] == 0.0  # 2020 runs only
+    # L = 4: every run is d = 0 (n = 60), the d = 1 cell is empty and takes the window value.
+    assert table["3xc@1+0"][3] == pytest.approx(9.5)
+    assert table["3xc@1+1"][3] == table["3xc@1"][3] == pytest.approx(9.5)
+    # Set 2 never has a double ahead: its d = 1 cells are empty.
+    assert table["3xc@2+1"] == table["3xc@2"]
+    with pytest.raises(ValueError, match="doubles"):
+        estimate_terminal_values(frames, split="double")
+
+
+def test_estimate_terminal_values_sparse_cells_fall_back_for_both_flags():
+    # 20 runs each: at L = 4 the 2020 runs have a double ahead (d = 1), the 2019 runs not, so
+    # both d cells hold 20 < MIN_CELL runs and both take the window value (19 and 0 -> 9.5).
+    frames = pd.concat(
+        [gains_frame(season=2019, start_id=str(i)) for i in range(20)]
+        + [gains_frame(season=2020, values=lambda gw: 0.0, start_id=str(i)) for i in range(20)]
+    )
+    doubles = {(2020, 10): frozenset({16})}
+    table = estimate_terminal_values(frames, split="double", doubles=doubles, horizon=6)
+    assert table["3xc@1+0"][3] == table["3xc@1+1"][3] == pytest.approx(9.5)
+
+
+def test_estimate_loso_leaves_each_season_out():
+    from fplopt.backtest.chip_values import estimate_loso
+
+    two = pd.concat([gains_frame(season=2019), gains_frame(season=2020, values=lambda gw: 0.0)])
+    tables = estimate_loso(two, split="window")
+    assert set(tables) == {2019, 2020}
+    assert tables[2019]["3xc@1"][0] == 0.0  # estimated on 2020 only
+    assert tables[2020]["3xc@1"][0] == 19.0  # on 2019 only
+    with pytest.raises(ValueError, match="two seasons"):
+        estimate_loso(gains_frame(), split="window")
+
+
+def test_load_loso_values(tmp_path):
+    from fplopt.backtest.chip_values import load_loso_values, load_terminal_values
+
+    path = tmp_path / "t.json"
+    path.write_text(
+        json.dumps(
+            {
+                "format": 2,
+                "split": "window",
+                "values": {"3xc@1": [2.0]},
+                "loso": {"2019": {"3xc@1": [1.0]}, "2020": {"3xc@1": [3.0]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_loso_values(0.5, path) == {2019: {"3xc@1": (0.5,)}, 2020: {"3xc@1": (1.5,)}}
+    assert load_terminal_values(1.0, path) == {"3xc@1": (2.0,)}
+    plain = tmp_path / "p.json"
+    plain.write_text(json.dumps({"values": {"3xc": [1.0]}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="no leave-one-season-out"):
+        load_loso_values(1.0, plain)
+
+
 # --- the full-run window t-test ---------------------------------------------------------------
 
 
@@ -283,6 +367,14 @@ def test_chip_policies_survive_pickling_into_workers():
     params = replace(SMALL, chip_value_left=table)
     policies = [
         OptimizerPolicy("v1", params, chips=True),
+        OptimizerPolicy(
+            "v1",
+            replace(params, exclude_chips=("3xc",)),
+            chips=True,
+            season_tables={2022: table, 2023: {"wildcard": (2.0, 1.0)}},
+            double_lead=10,
+            tc_rule=8.5,
+        ),
         ChipRulePolicy("v1", params, t_tc=9.0, t_bb=11.0, k_fh=2, t_wc=7.0),
         ChipGainProbe("v1", params),
     ]
@@ -354,7 +446,7 @@ def test_backtest_config_logs_the_estimated_table(tmp_path, monkeypatch):
         seasons=(2020,), starts="template@1", policy_specs=specs, jobs=1, family="f", command="run"
     )
     config = cli._backtest_config(args, tmp_path / "out")
-    assert config["chip_values"] == {"source": "run", "values": {"bboost": [2.0]}}
+    assert config["chip_values"] == {"0": {"source": "run", "values": {"bboost": [2.0]}}}
     args.policy_specs = specs[1:]
     assert "chip_values" not in cli._backtest_config(args, tmp_path / "out")
 
@@ -376,3 +468,379 @@ def test_free_hit_gain_with_an_expected_minutes_floor(league):
     plans = optimize(problem, SMALL, top_k=1, chips=False, roll=False)
     gains = chip_gains(context, problem, SMALL, plans.best)
     assert gains["gain_fh"] > 1.0  # a random squad: a Free Hit rebuilds it
+
+
+# --- chip policy 2 (docs/superpowers/plans/2026-10-30-chip-policy-2.md) ----------------------
+
+
+def test_optimizer_policy_uses_the_seasons_loso_table(league):
+    view, pool, xp = league[8]
+    rules = backtest_rules(2023)
+    state = random_state(view, rules, 3)
+    ctx = DecisionContext(view, state, rules, pool, xp)
+    params = replace(SMALL, chip_value={})
+    # A Wildcard held is worth 0 here: the optimizer plays it at GW8 ...
+    zero = {2023: {"wildcard": (0.0,)}}
+    free = OptimizerPolicy("rolling", params, chips=True, season_tables=zero)
+    assert free.decide(ctx).chip == "wildcard"
+    # ... but 500 in 2023's table: never played (2022's table, with 0, is not used).
+    tables = {2023: {"wildcard": (500.0,)}, 2022: {"wildcard": (0.0,)}}
+    policy = OptimizerPolicy("rolling", params, chips=True, season_tables=tables)
+    assert "loso#" in policy.name and policy.name != free.name
+    assert policy.decide(ctx).chip != "wildcard"
+    # The same decision as the optimizer with 2023's table as `chip_value_left`.
+    direct = OptimizerPolicy("rolling", replace(params, chip_value_left=tables[2023]), True)
+    assert policy.decide(ctx) == direct.decide(ctx)
+    missing = OptimizerPolicy("rolling", params, chips=True, season_tables={2022: {}})
+    with pytest.raises(ValueError, match="no leave-one-season-out table for season 2023"):
+        missing.decide(ctx)
+
+
+def test_optimizer_policy_loso_name_pins_every_table():
+    def name(tables):
+        return OptimizerPolicy("v1", SMALL, chips=True, season_tables=tables).name
+
+    a = name({2022: {"3xc": (1.0, 2.0, 3.0)}, 2023: {"3xc": (1.0,)}})
+    assert a == name({2023: {"3xc": (1,)}, 2022: {"3xc": [1, 2, 3]}})  # canonical
+    assert a != name({2022: {"3xc": (1.0, 2.5, 3.0)}, 2023: {"3xc": (1.0,)}})
+    assert a != name({2021: {"3xc": (1.0, 2.0, 3.0)}, 2023: {"3xc": (1.0,)}})
+    # a short hash, not the tables: 7 seasons x 24 keys would run to kilobytes
+    big = {s: {f"k{i}": tuple(range(38)) for i in range(24)} for s in range(2016, 2023)}
+    assert len(name(big)) == len(a) < 120
+    with pytest.raises(ValueError, match="finite values"):
+        name({2022: {"3xc": (-1.0,)}})
+
+
+def test_optimizer_policy_rule_triple_captain(league):
+    from fplopt.backtest.policies import _target_xp_of
+    from fplopt.optimize import PlanInput, optimize
+
+    rules = backtest_rules(2023)
+    params = replace(SMALL, exclude_chips=("3xc",))
+    always = OptimizerPolicy("rolling", params, chips=True, tc_rule=0.0)
+    never = OptimizerPolicy("rolling", params, chips=True, tc_rule=1e9)
+    assert "tcr=0.0" in always.name and "tcr=1000000000.0" in never.name
+    run = list(contexts(league, never))
+    plan_chips = [d.chip for _, d in run]
+    assert "3xc" not in plan_chips and None in plan_chips
+    # TC at the first GW plan #1 plays no chip (TC playable all of set 1), never again.
+    first = plan_chips.index(None)
+    # The threshold is inclusive: TC at exactly plan #1's captain's xP, not just above.
+    context = run[first][0]
+    assert context.state.gw_index < 19  # not TC's last GW
+    problem = PlanInput.from_context(context.state, context.pool, context.xp, rules, params)
+    plans = optimize(problem, params, top_k=1, chips=True, roll=False)
+    assert plans.decision().chip is None
+    value = _target_xp_of(context.xp, plans.best.first.captain)
+    at = OptimizerPolicy("rolling", params, chips=True, tc_rule=value)
+    above = OptimizerPolicy("rolling", params, chips=True, tc_rule=math.nextafter(value, math.inf))
+    assert at.decide(context).chip == "3xc"
+    assert above.decide(context).chip is None
+    expected = plan_chips[:first] + ["3xc"] + plan_chips[first + 1 :]
+    played = []
+    for context, decision in contexts(league, always):
+        apply_decision(context.state, decision, context.pool, context.rules)  # valid
+        played.append(decision.chip)
+    assert played == expected
+    with pytest.raises(ValueError, match="tc_rule needs"):
+        OptimizerPolicy("rolling", SMALL, chips=True, tc_rule=8.3)  # 3xc not excluded
+    with pytest.raises(ValueError, match="tc_rule needs"):
+        OptimizerPolicy("rolling", params, chips=False, tc_rule=8.3)
+
+
+def test_optimizer_policy_rule_triple_captain_in_its_windows_last_gw():
+    """Below the threshold, TC is still played in the last GW of its window (19), not
+    before; the other set-1 chips are used, so plan #1 plays none."""
+    from fplopt.backtest.simulator import season_schedule
+
+    store = DataStore(tables=synthetic_tables(seasons=(2022, 2023)))
+    rules = backtest_rules(2023)
+    others = tuple((w.chip_id, 5) for w in rules.chips if w.stop == 19 and w.name != "3xc")
+    never = OptimizerPolicy("rolling", replace(SMALL, exclude_chips=("3xc",)), True, tc_rule=1e9)
+    for gw_index, chip in ((18, None), (19, "3xc")):
+        view = store.as_of(season_schedule(store, 2023, gw_index)["deadline_time"].iloc[0])
+        pool = player_pool(view)
+        state = replace(refresh(random_state(view, rules, 3), pool), chips_used=others)
+        context = DecisionContext(view, state, rules, pool, MODELS["rolling"](view))
+        decision = never.decide(context)
+        apply_decision(state, decision, pool, rules)  # valid
+        assert decision.chip == chip
+
+
+def test_optimizer_policy_fills_known_doubles(league, monkeypatch):
+    from fplopt.backtest import policies
+
+    view, pool, xp = league[8]
+    rules = backtest_rules(2023)
+    ctx = DecisionContext(view, random_state(view, rules, 3), rules, pool, xp)
+    doubles = frozenset({ctx.state.gw_index + 8})
+    seen, planned = [], []
+
+    def fake_known_doubles(view, season, gw_index, lead):
+        seen.append((season, gw_index, lead))
+        return doubles
+
+    def recording_optimize(problem, *args, **kwargs):
+        planned.append(problem.doubles)
+        return real_optimize(problem, *args, **kwargs)
+
+    real_optimize = policies.optimize
+    monkeypatch.setattr(policies, "known_doubles", fake_known_doubles)
+    monkeypatch.setattr(policies, "optimize", recording_optimize)
+    policy = OptimizerPolicy("rolling", SMALL, chips=True, double_lead=10)
+    assert "dl=10" in policy.name
+    policy.decide(ctx)
+    assert seen == [(ctx.state.season, ctx.state.gw_index, 10)]
+    assert planned == [doubles]
+
+
+# --- chip policy 2: CLI (docs/superpowers/specs/2026-10-30-chip-policy-2-design.md) ---------
+
+V_BASE = "horizon=6,decay=0.75,max_hits=1,hit_margin=2,chips=1"
+SETTINGS = {"odds_api_key": None, "telegram_bot_token": None, "telegram_admin_chat_id": None}
+
+
+def _v2_table(path, split, **extra):
+    """A format-2 table file: values 4.0, season 2019's leave-one-out table 2.0."""
+    keys = ("3xc@1", "3xc@1+0", "3xc@1+1") if split == "double" else ("3xc@1",)
+    payload = {
+        "source": "s0",
+        "seasons": ["2019-20", "2020-21"],
+        "format": 2,
+        "split": split,
+        **extra,
+        "values": {k: [4.0] for k in keys},
+        "loso": {"2019": {k: [2.0] for k in keys}},
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def v2_tables(tmp_path, monkeypatch):
+    window = _v2_table(tmp_path / "w.json", "window")
+    double = _v2_table(tmp_path / "d.json", "double", lead=10, horizon=6)
+    monkeypatch.setitem(cli.CHIP_TABLE_FILES, 1, window)
+    monkeypatch.setitem(cli.CHIP_TABLE_FILES, 2, double)
+    return window, double
+
+
+def test_cli_chip_splits_match_the_estimator():
+    from fplopt.backtest.chip_values import DOUBLE_VALUES_FILE, SPLITS, WINDOW_VALUES_FILE
+
+    assert cli.CHIP_SPLITS == SPLITS
+    assert cli.CHIP_TABLE_FILES == {1: WINDOW_VALUES_FILE, 2: DOUBLE_VALUES_FILE}
+
+
+def test_cli_chip_policy_2_variant_specs_build(v2_tables):
+    """The spec's Variants V1-V6, verbatim (k* = 0.8 for V4-V6)."""
+    for k in (0.6, 0.8, 1.0):  # V1-V3
+        spec = f"optimizer:v1:{V_BASE},chip_shrink={k},chip_split=1,loso=1"
+        policy = cli.parse_policy_spec(spec).build()
+        assert policy.season_tables == {2019: {"3xc@1": (2.0 * k,)}}
+        assert policy.double_lead is None and policy.tc_rule is None
+        assert policy.params.exclude_chips == () and policy.params.fh_scale == 1.0
+    star = f"optimizer:v1:{V_BASE},chip_shrink=0.8"
+    v4 = cli.parse_policy_spec(f"{star},chip_split=1,loso=1,tc_rule=8.3").build()
+    v5 = cli.parse_policy_spec(f"{star},chip_split=2,loso=1").build()
+    v6 = cli.parse_policy_spec(f"{star},chip_split=1,loso=1,fh_scale=0.4").build()
+    assert all(p.season_tables is not None for p in (v4, v5, v6))
+    assert (v4.tc_rule, v4.params.exclude_chips, v4.double_lead) == (8.3, ("3xc",), None)
+    assert v5.double_lead == 10 and v5.tc_rule is None and v5.params.exclude_chips == ()
+    assert v5.season_tables[2019]["3xc@1+1"] == pytest.approx((1.6,))
+    assert v6.params.fh_scale == 0.4 and v6.double_lead is None and v6.tc_rule is None
+    assert len({p.name for p in (v4, v5, v6)}) == 3
+
+
+def test_cli_chip_split_without_loso_uses_the_files_full_table(v2_tables):
+    policy = cli.parse_policy_spec(f"optimizer:v1:{V_BASE},chip_shrink=0.5,chip_split=1").build()
+    assert policy.season_tables is None
+    assert policy.params.chip_value_left == {"3xc@1": (2.0,)}
+
+
+def test_cli_chip_policy_2_bad_specs(v2_tables):
+    for bad in (
+        "chip_split=1",
+        "loso=1",
+        "chip_split=3,chip_shrink=1",
+        "chip_split=-1,chip_shrink=1",
+    ):
+        with pytest.raises(argparse.ArgumentTypeError):
+            cli.parse_policy_spec(f"optimizer:v1:chips=1,{bad}")
+    with pytest.raises(argparse.ArgumentTypeError, match="tc_rule needs chips"):
+        cli.parse_policy_spec("optimizer:v1:tc_rule=8.3")
+    with pytest.raises(argparse.ArgumentTypeError, match="fh_scale"):
+        cli.parse_policy_spec(f"optimizer:v1:{V_BASE},fh_scale=2")
+    for name in ("chiprules", "chipgains"):  # the chip keys are the optimizer's only
+        for key in ("chip_split=1", "loso=1", "tc_rule=8.3", "fh_scale=0.4"):
+            with pytest.raises(argparse.ArgumentTypeError, match="has no parameter"):
+                cli.parse_policy_spec(f"{name}:v1:{key}")
+
+
+def test_cli_double_split_table_must_match_the_policys_lead(v2_tables, tmp_path, monkeypatch):
+    spec = f"optimizer:v1:{V_BASE},chip_shrink=0.8,chip_split=2,loso=1"
+    for name, extra in (("lead8", {"lead": 8, "horizon": 6}), ("nolead", {"horizon": 6})):
+        table = _v2_table(tmp_path / f"{name}.json", "double", **extra)
+        monkeypatch.setitem(cli.CHIP_TABLE_FILES, 2, table)
+        with pytest.raises(argparse.ArgumentTypeError, match="known-double lead"):
+            cli.parse_policy_spec(spec)
+    table = _v2_table(tmp_path / "h4.json", "double", lead=10, horizon=4)
+    monkeypatch.setitem(cli.CHIP_TABLE_FILES, 2, table)
+    with pytest.raises(argparse.ArgumentTypeError, match="horizon"):
+        cli.parse_policy_spec(spec)
+    monkeypatch.setitem(cli.CHIP_TABLE_FILES, 2, v2_tables[0])  # a window table
+    with pytest.raises(argparse.ArgumentTypeError, match="not a double-split table"):
+        cli.parse_policy_spec(spec)
+
+
+def test_cli_window_split_file_must_hold_a_window_table(v2_tables, tmp_path, monkeypatch):
+    pooled = tmp_path / "pooled.json"
+    pooled.write_text(json.dumps({"values": {"3xc": [4.0]}}), encoding="utf-8")
+    monkeypatch.setitem(cli.CHIP_TABLE_FILES, 1, pooled)
+    for spec in ("chip_split=1", "chip_split=1,loso=1"):
+        with pytest.raises(argparse.ArgumentTypeError, match="not a window-split table"):
+            cli.parse_policy_spec(f"optimizer:v1:{V_BASE},chip_shrink=0.8,{spec}")
+
+
+def test_cli_chip_keys_at_their_defaults_are_dropped(tmp_path, monkeypatch):
+    table = tmp_path / "terminal-values.json"
+    table.write_text(json.dumps({"values": {"bboost": [2.0]}}), encoding="utf-8")
+    monkeypatch.setattr(cli, "CHIP_VALUES_FILE", table)
+    plain = cli.parse_policy_spec(f"optimizer:v1:{V_BASE},chip_shrink=0.5")
+    explicit = cli.parse_policy_spec(
+        f"optimizer:v1:{V_BASE},chip_shrink=0.5,chip_split=0,loso=0,fh_scale=1.0"
+    )
+    assert explicit == plain and str(explicit) == str(plain)
+    assert "chip_split" not in str(plain) and "loso" not in str(plain)
+    assert "fh_scale=0.4" in str(cli.parse_policy_spec(f"optimizer:v1:{V_BASE},fh_scale=0.4"))
+
+
+def test_cli_pooled_chip_shrink_is_unchanged(tmp_path, monkeypatch, v2_tables):
+    """`chip_shrink=k` alone: the pooled table, the same policy (and name) as before."""
+    from fplopt.backtest.chip_values import load_terminal_values
+
+    table = tmp_path / "terminal-values.json"
+    table.write_text(json.dumps({"values": {"bboost": [2.0, 4.0]}}), encoding="utf-8")
+    monkeypatch.setattr(cli, "CHIP_VALUES_FILE", table)
+    params = "horizon=6,decay=0.75,max_hits=1,hit_margin=2,chips=1,chip_shrink=0.5"
+    built = cli.parse_policy_spec(f"optimizer:v1:{params}").build()
+    explicit = cli.parse_policy_spec(f"optimizer:v1:{params},chip_split=0,loso=0").build()
+    chip_value_left = load_terminal_values(0.5, table)
+    expected = OptimizerPolicy(
+        "v1",
+        OptimizerParams(
+            horizon=6, decay=0.75, max_hits=1, hit_margin=2.0, chip_value_left=chip_value_left
+        ),
+        chips=True,
+    )
+    assert built == expected and built.name == expected.name
+    assert built.season_tables is None and built.double_lead is None and built.tc_rule is None
+    assert explicit == expected
+
+
+def test_cli_chips_values_loso(tmp_path):
+    run = tmp_path / "s0"
+    run.mkdir()
+    gws = pd.concat([gains_frame(season=2019), gains_frame(season=2020)])
+    gws.to_parquet(run / "gws.parquet", index=False)
+    out = tmp_path / "t.json"
+    settings = cli.Settings(raw_dir=tmp_path, **SETTINGS)
+    argv = ["chips", "values", "--gains", str(run), "--split", "window", "--loso"]
+    assert cli.main([*argv, "--out", str(out)], settings=settings) == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["format"] == 2 and payload["split"] == "window"
+    assert "lead" not in payload and "horizon" not in payload
+    assert set(payload["loso"]) == {"2019", "2020"} and "3xc@1" in payload["values"]
+    assert set(payload["values"]) == set(payload["loso"]["2019"])
+    # the default (--split pooled, no --loso) writes the old format
+    pooled = tmp_path / "p.json"
+    argv = ["chips", "values", "--gains", str(run), "--out", str(pooled)]
+    assert cli.main(argv, settings=settings) == 0
+    payload = json.loads(pooled.read_text(encoding="utf-8"))
+    assert "format" not in payload and "loso" not in payload and "3xc" in payload["values"]
+
+
+def test_cli_chips_values_double_writes_the_lead(tmp_path, monkeypatch):
+    from fplopt.backtest import chip_values
+
+    run = tmp_path / "s0"
+    run.mkdir()
+    gws = pd.concat([gains_frame(season=2019), gains_frame(season=2020)])
+    gws.to_parquet(run / "gws.parquet", index=False)
+    calls = []
+
+    def fake_doubles(store, seasons, lead):
+        calls.append((store, list(seasons), lead))
+        return {}
+
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: ("store", data_dir))
+    monkeypatch.setattr(chip_values, "known_doubles_by_gw", fake_doubles)
+    out = tmp_path / "d.json"
+    settings = cli.Settings(raw_dir=tmp_path, data_dir=tmp_path / "data", **SETTINGS)
+    argv = ["chips", "values", "--gains", str(run), "--split", "double", "--loso"]
+    assert cli.main([*argv, "--out", str(out)], settings=settings) == 0
+    assert calls == [(("store", tmp_path / "data"), [2019, 2020], 10)]
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert (payload["split"], payload["lead"], payload["horizon"]) == ("double", 10, 6)
+    assert "3xc@1+1" in payload["values"] and "3xc@1+0" in payload["loso"]["2020"]
+    # the file it wrote builds V5
+    monkeypatch.setitem(cli.CHIP_TABLE_FILES, 2, out)
+    spec = f"optimizer:v1:{V_BASE},chip_shrink=0.8,chip_split=2,loso=1"
+    assert cli.parse_policy_spec(spec).build().double_lead == 10
+
+
+def test_backtest_config_logs_chip_policy_2_tables_by_hash(tmp_path, monkeypatch, v2_tables):
+    pooled = tmp_path / "terminal-values.json"
+    pooled.write_text(json.dumps({"source": "run", "values": {"bboost": [2.0]}}), encoding="utf-8")
+    monkeypatch.setattr(cli, "CHIP_VALUES_FILE", pooled)
+    star = f"optimizer:v1:{V_BASE},chip_shrink=0.8"
+    specs = [
+        cli.parse_policy_spec(f"{star},chip_split=1,loso=1"),
+        cli.parse_policy_spec(f"{star},chip_split=2,loso=1"),
+        cli.parse_policy_spec(star),
+        cli.parse_policy_spec("chiprules:v1:t_tc=8.3"),
+    ]
+    args = argparse.Namespace(
+        seasons=(2019,), starts="template@1", policy_specs=specs, jobs=1, family="f", command="run"
+    )
+    from fplopt.backtest import evaluate
+
+    window, double = v2_tables
+    committed = {window.resolve(): True}
+    monkeypatch.setattr(evaluate, "git_file_committed", lambda p: committed.get(p.resolve(), False))
+    logged = cli._backtest_config(args, tmp_path / "out")["chip_values"]
+    assert set(logged) == {"0", "1", "2"}
+    assert logged["0"] == {"source": "run", "values": {"bboost": [2.0]}}
+    assert logged["1"]["sha1"] == hashlib.sha1(window.read_bytes()).hexdigest()
+    # outside the repo (tmp_path): the absolute path
+    assert logged["1"]["file"] == str(window) and logged["1"]["split"] == "window"
+    assert (logged["1"]["committed"], logged["2"]["committed"]) == (True, False)
+    assert (logged["2"]["lead"], logged["2"]["horizon"]) == (10, 6)
+    assert "values" not in logged["1"] and "loso" not in logged["2"]
+
+
+def test_chip_table_log_path_and_commit_warning(tmp_path, monkeypatch, v2_tables, caplog):
+    """In the repo: a repo-relative POSIX path; an uncommitted table is logged with a warning."""
+    import logging
+
+    from fplopt.backtest import evaluate
+
+    window, _ = v2_tables
+    monkeypatch.setattr(cli, "REPO_ROOT", tmp_path.resolve())
+    for committed in (True, False):
+        monkeypatch.setattr(evaluate, "git_file_committed", lambda p, c=committed: c)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="fplopt"):
+            entry = cli._chip_table_log(1)
+        assert entry["file"] == "w.json" and entry["committed"] is committed
+        warned = [r for r in caplog.records if "not committed" in r.getMessage()]
+        assert len(warned) == (0 if committed else 1)
+        assert not warned or "w.json" in warned[0].getMessage()
+
+
+def test_git_file_committed_outside_a_checkout_is_false(tmp_path):
+    from fplopt.backtest.evaluate import git_file_committed
+
+    table = tmp_path / "t.json"
+    table.write_text("{}", encoding="utf-8")
+    assert git_file_committed(table) is False

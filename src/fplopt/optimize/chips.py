@@ -23,7 +23,8 @@ extends past the last horizon `gw_index` with `chip_value`: `params.chip_value[n
 placeholder) or, when `params.chip_value_left` has the chip, its value for the GWs left in
 the window (PLAN §7's "expected best use in the rest of the window, estimated from backtest
 distributions"; chip pre-registration §3); a window closing inside the horizon is worth 0
-(use it or lose it).
+(use it or lose it). Tables may key a chip by window (`3xc@2`) and by a known double ahead
+(`3xc@2+1`); `chip_value` falls back to coarser keys.
 
 Scenario keys `t` are positions in `PlanInput.gws` (equal to the horizon offset unless the
 xP frame skips a GW). Pure: no I/O.
@@ -92,9 +93,8 @@ def make_scenario(problem: PlanInput, chips: Mapping[int, str]) -> ChipScenario:
 def scenarios(problem: PlanInput, params: OptimizerParams) -> tuple[ChipScenario, ...]:
     """Every scenario the rules allow, in a deterministic order: no chip; singles by
     (position, chip name); pairs by (first position, first name, second position, second
-    name). `params` is accepted for future scenario limits; unused."""
-    del params
-    names = sorted({c.name for c in problem.rules.chips})
+    name); chip names in `params.exclude_chips` are left out."""
+    names = sorted({c.name for c in problem.rules.chips} - set(params.exclude_chips))
     positions = range(len(problem.gws))
 
     def allowed(chips: Mapping[int, str]) -> ChipScenario | None:
@@ -116,27 +116,45 @@ def scenarios(problem: PlanInput, params: OptimizerParams) -> tuple[ChipScenario
 
 
 def terminal_value(problem: PlanInput, params: OptimizerParams, scenario: ChipScenario) -> float:
-    """Σ `params.chip_value[name]` over the chip windows unused after the scenario whose
-    window extends past the last horizon `gw_index` (0 for a window closing inside it, and
-    for a chip name missing from `chip_value`). Added to the objective undecayed: it is
-    the value of holding the chip at the horizon's end, in this-GW points."""
+    """Σ `chip_value` over the chip windows unused after the scenario whose window extends
+    past the last horizon `gw_index` (0 for a window closing inside it, and for a chip name
+    missing from the tables). Each window is valued by its ordinal among the chip's windows
+    and whether `problem.doubles` has a double in its part after the horizon. Added to the
+    objective undecayed: it is the value of holding the chip at the horizon's end, in
+    this-GW points."""
     used = {cid for cid, _ in problem.state.chips_used} | set(scenario.chip_ids)
     last = problem.gws[-1].gw_index
+    windows = problem.rules.chips
+    ordinal = {
+        w.chip_id: 1 + sum(1 for o in windows if o.name == w.name and o.start < w.start)
+        for w in windows
+    }
     return float(
         sum(
-            chip_value(params, w.name, w.stop - last)
-            for w in sorted(problem.rules.chips, key=lambda w: w.chip_id)
+            chip_value(
+                params,
+                w.name,
+                w.stop - last,
+                window=ordinal[w.chip_id],
+                double=any(max(last, w.start - 1) < g <= w.stop for g in problem.doubles),
+            )
+            for w in sorted(windows, key=lambda w: w.chip_id)
             if w.chip_id not in used and w.stop > last
         )
     )
 
 
-def chip_value(params: OptimizerParams, name: str, left: int) -> float:
+def chip_value(
+    params: OptimizerParams, name: str, left: int, *, window: int = 1, double: bool = False
+) -> float:
     """The value of holding chip `name` with `left` (≥ 1) GWs of its window after the
-    horizon: `params.chip_value_left[name][left - 1]` (its last entry for a longer window)
-    when the table has the chip, else the flat `params.chip_value[name]` (0 if missing)."""
+    horizon, from `params.chip_value_left` (its last entry for a longer window): the first
+    key of `name@window+double` (0/1), `name@window`, `name` the table has; else the flat
+    `params.chip_value[name]` (0 if missing)."""
     table = params.chip_value_left
-    if table is not None and name in table:
-        values = table[name]
-        return values[min(left, len(values)) - 1]
+    if table is not None:
+        for key in (f"{name}@{window}+{int(double)}", f"{name}@{window}", name):
+            if key in table:
+                values = table[key]
+                return values[min(left, len(values)) - 1]
     return params.chip_value.get(name, 0.0)

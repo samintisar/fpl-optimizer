@@ -30,6 +30,7 @@ GET, for an external dead-man's switch that also notices the server being down.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -182,13 +183,20 @@ POLICY_PARAMS: dict[str, dict[str, Callable[[str], Any]]] = {
         # chips=1 with the estimated terminal values (config/chips/terminal-values.json)
         # times this shrink factor (chip pre-registration §3), instead of the placeholders
         "chip_shrink": float,
+        # chip policy 2 (docs/superpowers/specs/2026-10-30-chip-policy-2-design.md):
+        # the table file (0 pooled, 1 per window, 2 per window and known double), its
+        # leave-one-season-out tables (loso=1), Triple Captain by rule at this captain
+        # xP, and the share of a Free Hit's gain that counts in the chip search
+        "chip_split": int,
+        "loso": parse_flag,
+        "tc_rule": float,
+        "fh_scale": float,
     },
 }
 # The chip study's policies (docs/superpowers/plans/2026-10-11-chip-policy.md): the
 # optimizer's settings, plus the rule thresholds for `chiprules`.
-_OPTIMIZER_KEYS = {
-    k: v for k, v in POLICY_PARAMS["optimizer"].items() if k not in ("chips", "chip_shrink")
-}
+_CHIP_KEYS = ("chips", "chip_shrink", "chip_split", "loso", "tc_rule", "fh_scale")
+_OPTIMIZER_KEYS = {k: v for k, v in POLICY_PARAMS["optimizer"].items() if k not in _CHIP_KEYS}
 POLICY_PARAMS["chipgains"] = dict(_OPTIMIZER_KEYS)
 POLICY_PARAMS["chiprules"] = {
     **_OPTIMIZER_KEYS,
@@ -197,7 +205,23 @@ POLICY_PARAMS["chiprules"] = {
     "k_fh": int,
     "t_wc": float,
 }
-CHIP_VALUES_FILE = Path(__file__).resolve().parents[2] / "config" / "chips" / "terminal-values.json"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CHIP_VALUES_FILE = REPO_ROOT / "config" / "chips" / "terminal-values.json"
+# chip_split → table file (patched in tests); 1 and 2 are chip policy 2's
+# (chip_values.WINDOW_VALUES_FILE, DOUBLE_VALUES_FILE). 0 is `CHIP_VALUES_FILE`, looked up
+# when used (`chip_table_file`), so patching that one constant still moves the pooled table.
+CHIP_TABLE_FILES: dict[int, Path] = {
+    1: CHIP_VALUES_FILE.with_name("terminal-values-window.json"),
+    2: CHIP_VALUES_FILE.with_name("terminal-values-double.json"),
+}
+# `chips values --split` → chip_split: chip_values.SPLITS, copied (pinned by a test) because
+# chip_values imports pandas, which the CLI imports lazily.
+CHIP_SPLITS = ("pooled", "window", "double")
+# Chip spec keys dropped when given at their default, so `chip_split=0,loso=0` is the same
+# spec (and experiment family) as leaving them out.
+CHIP_KEY_DEFAULTS: dict[str, float | int] = {"chip_split": 0, "loso": 0, "fh_scale": 1.0}
+# The horizon a double-split table is estimated for (the variants' horizon=6).
+DOUBLE_TABLE_HORIZON = 6
 DEFAULT_STARTS = "template@1,random:5@1,random:3@20"
 # Wall-clock cap per HiGHS solve for interactive commands (`optimize plan`, `optimize
 # bench`) only; backtests use the deterministic node limit alone (OptimizerParams).
@@ -278,15 +302,35 @@ class PolicySpec:
 
         params = dict(self.params)
         if self.name == "optimizer":
+            from fplopt.backtest.chip_doubles import DOUBLE_LEAD
             from fplopt.optimize import OptimizerParams
 
             chips = bool(params.pop("chips", 0))
             shrink = params.pop("chip_shrink", None)
+            split = int(params.pop("chip_split", 0))
+            loso = bool(params.pop("loso", 0))
+            tc_rule = params.pop("tc_rule", None)
+            extra: dict[str, Any] = {}
+            if not 0 <= split < len(CHIP_SPLITS):
+                raise ValueError(f"chip_split must be one of 0..{len(CHIP_SPLITS) - 1}")
+            if (split or loso) and shrink is None:
+                raise ValueError("chip_split and loso need chip_shrink")
             if shrink is not None:
                 if not chips:
                     raise ValueError("chip_shrink needs chips=1")
-                params["chip_value_left"] = estimated_chip_values(float(shrink))
-            return OptimizerPolicy(self.xp, OptimizerParams(**params), chips=chips)
+                path = chip_table_file(split)
+                if split:
+                    _check_table_header(path, split, DOUBLE_LEAD, OptimizerParams(**params).horizon)
+                if loso:
+                    extra["season_tables"] = estimated_loso_values(float(shrink), path)
+                else:
+                    params["chip_value_left"] = estimated_chip_values(float(shrink), path)
+            if split == 2:
+                extra["double_lead"] = DOUBLE_LEAD
+            if tc_rule is not None:
+                params["exclude_chips"] = ("3xc",)
+                extra["tc_rule"] = float(tc_rule)
+            return OptimizerPolicy(self.xp, OptimizerParams(**params), chips=chips, **extra)
         if self.name in ("chipgains", "chiprules"):
             from fplopt.backtest.policies import ChipGainProbe, ChipRulePolicy
             from fplopt.optimize import OptimizerParams
@@ -299,11 +343,51 @@ class PolicySpec:
         return cls(self.xp, **params)
 
 
+def chip_table_file(split: int) -> Path:
+    """The terminal value table file of `chip_split` = `split` (`CHIP_TABLE_FILES`)."""
+    return CHIP_VALUES_FILE if split == 0 else CHIP_TABLE_FILES[split]
+
+
 def estimated_chip_values(shrink: float, path: Path | None = None) -> dict[str, tuple[float, ...]]:
-    """`chip_values.load_terminal_values` from `CHIP_VALUES_FILE` (patched in tests)."""
+    """`chip_values.load_terminal_values` from `path` (default `CHIP_VALUES_FILE`, patched
+    in tests)."""
     from fplopt.backtest.chip_values import load_terminal_values
 
     return load_terminal_values(shrink, CHIP_VALUES_FILE if path is None else path)
+
+
+def estimated_loso_values(shrink: float, path: Path) -> dict[int, dict[str, tuple[float, ...]]]:
+    """`chip_values.load_loso_values` from `path`."""
+    from fplopt.backtest.chip_values import load_loso_values
+
+    return load_loso_values(shrink, path)
+
+
+def _check_table_header(path: Path, split: int, lead: int, horizon: int) -> None:
+    """The file of `chip_split` = `split` (>= 1) must hold that split's table (ValueError
+    otherwise). A double-split table's `+d` cells count the doubles known `lead` GWs ahead
+    of the decision GW of a `horizon`-GW plan: one estimated with another lead or horizon
+    would hold values for a different flag than the policy sets."""
+    if not path.is_file():
+        return  # load_*_values reports the missing table
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    name = CHIP_SPLITS[split]
+    if payload.get("split") != name:
+        raise ValueError(
+            f"chip_split={split}: {path} is not a {name}-split table (chips values --split {name})"
+        )
+    if split != 2:
+        return
+    if payload.get("lead") != lead:
+        raise ValueError(
+            f"chip_split=2: {path} was estimated with known-double lead {payload.get('lead')}, "
+            f"the policy uses {lead}"
+        )
+    if payload.get("horizon") != horizon:
+        raise ValueError(
+            f"chip_split=2: {path} was estimated for horizon {payload.get('horizon')}, "
+            f"the policy plans {horizon} GWs"
+        )
 
 
 def make_policy_spec(name: str, xp: str, params: dict[str, str]) -> PolicySpec:
@@ -335,6 +419,10 @@ def make_policy_spec(name: str, xp: str, params: dict[str, str]) -> PolicySpec:
         if isinstance(value, float) and not math.isfinite(value):
             raise argparse.ArgumentTypeError(f"{name} {key}={raw!r}: not finite")
         values.append((key, value))
+    if name == "optimizer":
+        values = [
+            (k, v) for k, v in values if not (k in CHIP_KEY_DEFAULTS and v == CHIP_KEY_DEFAULTS[k])
+        ]
     spec = PolicySpec(name, xp, tuple(sorted(values)))
     given = dict(spec.params)
     if not 1 <= given.get("horizon", 1) <= MAX_PLAN_HORIZON:
@@ -519,9 +607,17 @@ def _backtest_config(args: argparse.Namespace, out: Path) -> dict[str, Any]:
         "jobs": args.jobs,
         "family": args.family,
     }
-    if any("chip_shrink" in dict(spec.params) for spec in args.policy_specs):
-        # The estimated terminal values P ran with (chip pre-registration §3: logged).
-        config["chip_values"] = json.loads(CHIP_VALUES_FILE.read_text(encoding="utf-8"))
+    used = {
+        int(dict(spec.params).get("chip_split", 0))
+        for spec in args.policy_specs
+        if "chip_shrink" in dict(spec.params)
+    }
+    if used:
+        # The estimated terminal values the chip arms ran with (chip pre-registration §3:
+        # logged), by chip_split: the pooled table itself; a chip policy 2 file (with its
+        # leave-one-season-out tables, 20-70 kB) by repo-relative path and SHA-1
+        # (`_chip_table_log`).
+        config["chip_values"] = {str(split): _chip_table_log(split) for split in sorted(used)}
     if args.command == "compare":
         config |= {
             "per_decision": args.per_decision,
@@ -535,6 +631,39 @@ def _backtest_config(args: argparse.Namespace, out: Path) -> dict[str, Any]:
             "ci": CI_LEVEL,
         }
     return config
+
+
+def _chip_table_log(split: int) -> dict[str, Any]:
+    """The pooled table itself; a chip policy 2 table as its path (repo-relative POSIX, or
+    absolute outside the repo), `sha1` = the plain SHA-1 of the file's bytes (verifiable as
+    `git show <git_sha>:<file> | sha1sum`; not git's blob hash) and `committed`: whether the
+    file is tracked and unchanged against HEAD, i.e. whether the logged commit holds these
+    bytes (a warning, not a refusal, when it doesn't)."""
+    from fplopt.backtest.evaluate import git_file_committed
+
+    path = chip_table_file(split)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if split == 0:
+        return payload
+    try:
+        # REPO_ROOT, not CHIP_VALUES_FILE.parents[2]: the latter moves when tests patch it
+        shown = path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        shown = str(path)
+    committed = git_file_committed(path)
+    if not committed:
+        log.warning(
+            "chip table %s is not committed (untracked or changed since HEAD): the logged "
+            "git_sha does not hold the table this run uses",
+            shown,
+        )
+    entry: dict[str, Any] = {
+        "file": shown,
+        "sha1": hashlib.sha1(path.read_bytes()).hexdigest(),
+        "committed": committed,
+    }
+    keys = ("source", "seasons", "split", "lead", "horizon")
+    return entry | {k: payload[k] for k in keys if k in payload}
 
 
 def _jsonable(value: Any) -> Any:
@@ -1768,28 +1897,54 @@ def _live(c: Context, *, tick: bool) -> object:
 
 def _chips_values(c: Context) -> object:
     """`fplopt chips values`: the terminal value table (`fplopt.backtest.chip_values`) from a
-    chipgains run's GW rows, written as JSON with its source and seasons."""
+    chipgains run's GW rows, written as JSON with its source and seasons; `--split window|
+    double` keys it by window (and known double, `DOUBLE_LEAD` GWs ahead of a
+    `DOUBLE_TABLE_HORIZON`-GW plan, both written to the file; reads `data/`), `--loso` adds
+    the leave-one-season-out tables (format 2)."""
     import pandas as pd
 
-    from fplopt.backtest.chip_values import estimate_terminal_values
+    from fplopt.backtest import chip_values
 
     args = c.args
     gws = pd.read_parquet(args.gains / "gws.parquet")
-    table = estimate_terminal_values(gws)
     seasons = sorted(int(s) for s in gws["season"].unique())
-    payload = {
+    doubles = None
+    horizon = DOUBLE_TABLE_HORIZON
+    extra: dict[str, Any] = {}
+    if args.split == "double":
+        from fplopt.backtest.chip_doubles import DOUBLE_LEAD
+        from fplopt.seasons import DEVELOP_SEASONS
+
+        outside = [s for s in seasons if s not in DEVELOP_SEASONS]
+        if outside:  # before reading any schedule (the estimator refuses them too)
+            raise ValueError(f"chip values are estimated on develop seasons only, got {outside}")
+        store = open_data_store(c.settings.data_dir)
+        doubles = chip_values.known_doubles_by_gw(store, seasons, DOUBLE_LEAD)
+        extra = {"lead": DOUBLE_LEAD, "horizon": horizon}
+    table = chip_values.estimate_terminal_values(gws, args.split, doubles, horizon)
+    payload: dict[str, Any] = {
         "source": str(args.gains),
         "seasons": [season_label(s) for s in seasons],
         "note": "mean best ex-ante one-GW gain of each chip over the GWs left in its window "
         "(index = GWs left - 1); unshrunk (the policy spec's chip_shrink scales it)",
-        "values": {name: [round(v, 4) for v in values] for name, values in table.items()},
     }
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    if args.split != "pooled" or args.loso:
+        payload |= {"format": 2, "split": args.split} | extra
+    payload["values"] = {name: [round(v, 4) for v in values] for name, values in table.items()}
+    if args.loso:
+        loso = chip_values.estimate_loso(gws, args.split, doubles, horizon)
+        payload["loso"] = {
+            str(s): {name: [round(v, 4) for v in values] for name, values in t.items()}
+            for s, t in loso.items()
+        }
+    out = args.out or chip_table_file(CHIP_SPLITS.index(args.split))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # LF on Windows too: the tables are tracked files (Path.write_text's newline, 3.10+)
+    out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
     for name, values in table.items():
         shown = ", ".join(f"{v:.1f}" for v in values[:6])
         print(f"{name}: L=1..6 {shown} ... L={len(values)} {values[-1]:.1f}", flush=True)
-    print(f"Written to {args.out}", flush=True)
+    print(f"Written to {out}", flush=True)
     return table
 
 
@@ -1844,7 +1999,7 @@ JOBS: dict[str, Job] = {
         espn=EspnClient(c.http),
         espn_teams_csv=TEAMS_CSV,
     ),
-    "snapshot tick": lambda c: jobs.run_tick(c.store, c.fpl, c.odds),
+    "snapshot tick": lambda c: jobs.run_tick(c.store, c.fpl, c.odds, props=c.odds),
     "backfill element-summary": lambda c: jobs.backfill_element_summaries(c.store, c.fpl),
     "backfill football-data": lambda c: history.backfill_football_data(
         c.store, FootballDataClient(c.http), first_season=c.args.from_season
@@ -1948,8 +2103,20 @@ def _add_chips_parsers(groups: Any) -> None:
     values.add_argument(
         "--out",
         type=Path,
-        default=CHIP_VALUES_FILE,
-        help="where to write the table (default config/chips/terminal-values.json)",
+        default=None,
+        help="where to write the table (default: config/chips/terminal-values[-window|-double]"
+        ".json by --split)",
+    )
+    values.add_argument(
+        "--split",
+        choices=CHIP_SPLITS,
+        default="pooled",
+        help="table keys: chip (pooled), chip@window, chip@window+double (reads data/)",
+    )
+    values.add_argument(
+        "--loso",
+        action="store_true",
+        help="add leave-one-season-out tables (season s estimated without s)",
     )
     size = commands.add_parser(
         "size",
