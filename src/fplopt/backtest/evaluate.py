@@ -1043,11 +1043,13 @@ def season_t_test(diffs: pd.DataFrame, column: str = "diff") -> tuple[float, int
 
 @dataclass(frozen=True)
 class WindowTTest:
-    """`window_t_test`: the mean over cells, the one-sided p (H1: mean > 0), the cells."""
+    """`window_t_test`: the mean over cells, the one-sided p (H1: mean > 0), the cells and
+    the mean's standard error (NaN with fewer than 2 cells)."""
 
     mean: float
     p_one_sided: float
     n_cells: int
+    se: float = float("nan")
 
 
 def window_t_test(diffs: pd.DataFrame, column: str = "diff") -> WindowTTest:
@@ -1066,9 +1068,10 @@ def window_t_test(diffs: pd.DataFrame, column: str = "diff") -> WindowTTest:
     cells = values.groupby([valid["season"], valid["gw_index"]]).mean().to_numpy("float64")
     n, mean = len(cells), float(cells.mean())
     sd = float(np.std(cells, ddof=1)) if n >= 2 else 0.0
+    se = sd / math.sqrt(n) if n >= 2 else float("nan")
     if n < 2 or sd == 0:
-        return WindowTTest(mean, float("nan"), n)
-    return WindowTTest(mean, t_sf(mean / (sd / math.sqrt(n)), n - 1), n)
+        return WindowTTest(mean, float("nan"), n, se)
+    return WindowTTest(mean, t_sf(mean / se, n - 1), n, se)
 
 
 FULL_RUN_WINDOW = 8  # GWs per cell of `full_run_window_test` (chip pre-registration §4)
