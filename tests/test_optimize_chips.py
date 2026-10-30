@@ -456,3 +456,30 @@ def test_chip_value_left_is_validated() -> None:
     assert params.chip_value_left["bboost"] == (1.0, 2.0)
     with pytest.raises(TypeError):
         params.chip_value_left["bboost"] = (3.0,)
+
+
+def test_terminal_values_by_window() -> None:
+    from fplopt.optimize.chips import chip_value
+
+    table = {"wildcard@1": (1.0,), "wildcard@2": (5.0,), "freehit": (2.0,)}
+    params = replace(EXACT, chip_value={}, chip_value_left=table)
+    assert chip_value(params, "wildcard", 3, window=1) == 1.0
+    assert chip_value(params, "wildcard", 3, window=2) == 5.0
+    assert chip_value(params, "freehit", 3, window=2) == 2.0  # no window key: the name's
+    assert chip_value(params, "wildcard", 3) == 1.0  # default window 1
+    # GWs 5-7: WC1 1 + WC2 5 + FH 2 per window; BB/TC not in either table: 0.
+    assert terminal_value(problem_at(5, 3), params, NO_CHIP) == 1 + 5 + 2 * 2
+
+
+def test_terminal_values_with_a_known_double() -> None:
+    table = {"3xc@1+1": (9.0,), "3xc@1": (1.0,), "3xc@2": (2.0,)}
+    params = replace(EXACT, chip_value={}, chip_value_left=table)
+    problem = problem_at(5, 3)
+    assert problem.doubles == frozenset()
+    assert terminal_value(problem, params, NO_CHIP) == 1 + 2
+    # A double in GW12: after the horizon (5-7), inside set 1 (..19), before set 2 (20..).
+    doubled = replace(problem, doubles=frozenset({12}))
+    assert terminal_value(doubled, params, NO_CHIP) == 9 + 2
+    # A double inside the horizon doesn't count (the horizon plans it already).
+    inside = replace(problem, doubles=frozenset({6}))
+    assert terminal_value(inside, params, NO_CHIP) == 1 + 2

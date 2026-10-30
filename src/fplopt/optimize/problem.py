@@ -76,7 +76,9 @@ class PlanInput:
     tenths of £m and `free_transfers` the FTs for the first horizon GW (ignored when
     `gw1`, the unlimited pre-season GW). `state` is the refreshed squad state (chips used,
     for the chip scenarios). `bench_weights`: per horizon GW (GK slot, outfield slots) from
-    the minutes model, or None for the fixed `params.bench_weights` (`gw_bench_weights`)."""
+    the minutes model, or None for the fixed `params.bench_weights` (`gw_bench_weights`).
+    `doubles`: the `gw_index`s of double GWs known at the deadline (any club with >= 2
+    league fixtures), for double-aware terminal values; empty unless the policy fills it."""
 
     state: SquadState
     rules: Rules
@@ -87,6 +89,7 @@ class PlanInput:
     gw1: bool
     n_pool: int
     bench_weights: tuple[tuple[float, ...], ...] | None = None
+    doubles: frozenset[int] = frozenset()
 
     def gw_bench_weights(self, t: int, params: OptimizerParams) -> tuple[float, ...]:
         """Horizon GW t's bench weights without a chip: the minutes-based ones when set,
