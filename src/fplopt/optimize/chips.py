@@ -148,7 +148,7 @@ def terminal_value(problem: PlanInput, params: OptimizerParams, scenario: ChipSc
 def chip_value(
     params: OptimizerParams, name: str, left: int, *, window: int = 1, double: bool = False
 ) -> float:
-    """The value of holding chip `name` with `left` (>= 1) GWs of its window after the
+    """The value of holding chip `name` with `left` (≥ 1) GWs of its window after the
     horizon, from `params.chip_value_left` (its last entry for a longer window): the first
     key of `name@window+double` (0/1), `name@window`, `name` the table has; else the flat
     `params.chip_value[name]` (0 if missing)."""

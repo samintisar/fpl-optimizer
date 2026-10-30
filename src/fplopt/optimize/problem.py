@@ -77,7 +77,7 @@ class PlanInput:
     `gw1`, the unlimited pre-season GW). `state` is the refreshed squad state (chips used,
     for the chip scenarios). `bench_weights`: per horizon GW (GK slot, outfield slots) from
     the minutes model, or None for the fixed `params.bench_weights` (`gw_bench_weights`).
-    `doubles`: the `gw_index`s of double GWs known at the deadline (any club with >= 2
+    `doubles`: the `gw_index`s of double GWs known at the deadline (any club with ≥ 2
     league fixtures), for double-aware terminal values; empty unless the policy fills it."""
 
     state: SquadState
