@@ -32,7 +32,7 @@ other six develop seasons.
 | V3 | per-window, k = 1.0 | as V1, × 1.0 |
 | V4 | hybrid | best of V1–V3 for FH/BB/WC; TC by H's rule (`t_tc = 8.3`), never by the optimizer |
 | V5 | double-aware | best of V1–V3; the TC and BB tables split by whether a double GW is known (schedule as of the deadline) in the rest of the window after the horizon |
-| V6 | FH shrink | best of V1–V3; the Free Hit's in-horizon gain × 0.4 in the objective |
+| V6 | FH shrink | best of V1–V3; chip scenarios ranked with the Free Hit's gain over the no-chip plan × 0.4 |
 
 "Best of V1–V3" = the highest raw (undeflated) full-run window t-test mean vs H; V4–V6 run
 after V1–V3. Ties: the smaller k.
@@ -92,19 +92,21 @@ after V1–V3. Ties: the smaller k.
 
 ## Code
 
-1. **Per-window tables:** `chip_values` estimates and stores values per (chip, window)
-   (`terminal-values.json` format v2: `values[name][window_index]`); `OptimizerParams
-   .chip_value_left` keyed by `chip_id`; `chips.chip_value` looks up the held chip's window.
-   v1 files still load (one table for every window).
+1. **Per-window tables:** `chip_values` estimates values per (chip, window) into
+   `config/chips/terminal-values-window.json` (format 2, keys `name@k`, k the window's
+   ordinal); `chips.chip_value` looks up `name@k`, falling back to `name` (the pooled
+   `terminal-values.json` is unchanged and still loads).
 2. **Leave-one-season-out:** `fplopt chips values --loso` writes one table per held-out
-   season; the policy spec loads the table for the season being replayed
-   (`chip_table=loso`).
+   season; the policy spec loads the table for the season being replayed (`loso=1`).
 3. **Hybrid:** optimizer key `tc_rule=<threshold>`: TC excluded from the chip search and
    played by H's rule.
-4. **Double-aware:** tables split by `double_ahead` (0/1), the flag computed from the as-of
-   schedule at the deadline.
-5. **FH shrink:** optimizer key `fh_scale=<k>` multiplying the Free Hit GW's gain over the
-   held squad in the objective.
+4. **Double-aware:** `terminal-values-double.json`, keys `name@k+d` (d = a double known in
+   the as-of schedule at the deadline, lead 10); a `+d` cell with fewer than 30 observations
+   falls back to `name@k`. On the 7-start grid only 4 runs per season cover set 1 (28 per
+   cell, 24 leave-one-season-out), so set 1 always falls back: V5 is double-aware in set 2
+   only.
+5. **FH shrink:** optimizer key `fh_scale=<k>`: chip scenarios are ranked by total objective
+   − (1 − k) · max(0, the Free Hit GWs' objective over the no-chip plan's); MILPs unchanged.
 6. **Shadow logger:** in `fplopt.bot.live` after the recommendation; a table in
    `state/bot.sqlite`; a scoring command at season end.
 
