@@ -4,7 +4,10 @@ inputs. This test fails if Python's behaviour drifts from a golden file; regener
 `names.json.gz` comes from real data (`dev/name_golden.py --data data`); here it is only
 re-checked against the installed rapidfuzz and `normalise_name`. `bot/` is a scripted bot
 session on the synthetic league (`tests/bot_replay.py`): Python's replies and database rows,
-which `crates/fplopt-bot/tests/golden.rs` replays."""
+which `crates/fplopt-bot/tests/golden.rs` replays. `lgbm.json.gz`: LightGBM boosters the wheel
+trains through `fplopt.models.gbm` on synthetic rows (the model text and predictions
+`crates/fplopt-lgbm` must reproduce byte for byte, with the parameter strings `lightgbm.train`
+hands the C API)."""
 
 import gzip
 import json
@@ -78,6 +81,71 @@ def test_names_golden_is_current():
     assert all(fuzz.token_set_ratio(a, b) == score for a, b, score in golden["pairs"])
 
 
+LGBM_CASES = [
+    # (name, seed, rows, weights, GbmParams overrides)
+    ("weighted", 0, 600, "decay", {"num_boost_round": 30, "num_leaves": 7, "min_data_in_leaf": 20}),
+    ("unit_weight", 1, 500, "ones", {"num_boost_round": 25, "num_leaves": 5,
+                                     "min_data_in_leaf": 30}),
+    ("no_weight", 2, 400, None, {"num_boost_round": 20, "feature_fraction": 0.5, "lambda_l2": 0.3}),
+]  # fmt: skip
+
+
+def lgbm_golden() -> dict:
+    import numpy as np
+    import pandas as pd
+    from lightgbm.basic import _param_dict_to_str
+
+    from fplopt.models.gbm import GbmParams, train
+
+    cases = []
+    for name, seed, n, weights, overrides in LGBM_CASES:
+        rng = np.random.default_rng(seed)
+        frame = pd.DataFrame(
+            {
+                "a": rng.normal(size=n),
+                "b": rng.integers(0, 90, size=n).astype("float64"),
+                "c": np.where(rng.random(n) < 0.2, np.nan, rng.random(n)),
+                "d": rng.choice([1.0, 2.0, 3.0, 4.0], size=n),
+            }
+        )
+        logit = 0.8 * frame["a"] + frame["b"] / 45 - 1 + frame["c"].fillna(0.5) * frame["d"] / 2
+        frame["y"] = (rng.random(n) < 1 / (1 + np.exp(-logit))).astype("float64")
+        if weights == "decay":
+            frame["w"] = 0.85 ** rng.integers(0, 6, size=n)
+        elif weights == "ones":
+            frame["w"] = 1.0
+        params = GbmParams(**overrides)
+        weight = None if weights is None else "w"
+        gbm = train(frame, list("abcd"), "y", weight=weight, params=params)
+        text = gbm.booster.model_to_string()
+        text = text[: text.rindex("\npandas_categorical:")]  # the package's own suffix
+        lgb = params.lightgbm_params()
+        rounds = params.num_boost_round
+        x = frame[list("abcd")].to_numpy()
+        cases.append(
+            {
+                "name": name,
+                "features": list("abcd"),
+                "x": [[None if np.isnan(v) else v for v in row] for row in x],
+                "label": frame["y"].tolist(),
+                "weight": None if weights is None else frame["w"].tolist(),
+                "dataset_params": _param_dict_to_str(
+                    {"verbosity": -1, **lgb, "num_iterations": rounds}
+                ),
+                "booster_params": _param_dict_to_str({**lgb, "num_iterations": rounds}),
+                "rounds": rounds,
+                "model": text,
+                "predictions": gbm.predict(frame).tolist(),
+            }
+        )
+    return {"cases": cases}
+
+
+def test_lgbm_golden_is_current():
+    stored = json.loads(gzip.decompress((GOLDEN / "lgbm.json.gz").read_bytes()))
+    assert stored == json.loads(json.dumps(lgbm_golden()))
+
+
 def test_bot_golden_is_current(tmp_path):
     import shutil
 
@@ -99,3 +167,5 @@ if __name__ == "__main__":
     GOLDEN.mkdir(parents=True, exist_ok=True)
     text = json.dumps(seasons_golden(), indent=1, sort_keys=True) + "\n"
     (GOLDEN / "seasons.json").write_text(text, encoding="utf-8", newline="\n")
+    lgbm = json.dumps(lgbm_golden(), separators=(",", ":")).encode()
+    (GOLDEN / "lgbm.json.gz").write_bytes(gzip.compress(lgbm, mtime=0))

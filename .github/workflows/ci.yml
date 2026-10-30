@@ -23,7 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          submodules: true  # third_party/HiGHS, built by crates/fplopt-highs
+          # third_party/HiGHS and third_party/LightGBM (with its own external_libs), built by
+          # crates/fplopt-highs and crates/fplopt-lgbm
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

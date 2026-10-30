@@ -1124,6 +1124,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fplopt-lgbm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cmake",
+ "flate2",
+ "serde_json",
+]
+
+[[package]]
 name = "fplopt-optimize"
 version = "0.1.0"
 dependencies = [
