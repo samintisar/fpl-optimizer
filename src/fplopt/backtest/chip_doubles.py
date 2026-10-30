@@ -15,8 +15,6 @@ from typing import Any
 
 import pandas as pd
 
-from fplopt.backtest.simulator import FAR_FUTURE, season_schedule
-
 __all__ = ("DOUBLE_LEAD", "known_doubles", "known_doubles_by_gw")
 
 DOUBLE_LEAD = 10  # GWs after the decision GW (pre-registered in the spec)
@@ -46,6 +44,9 @@ def known_doubles_by_gw(
     """(season, gw_index) → `known_doubles` at that GW's deadline, for the estimator. Each
     deadline is the one `season_schedule` finds for the GW (visible at its own deadline), and
     the schedule is read through `store.as_of(deadline)` only."""
+    # imported here: the simulator imports the policies, which import `known_doubles`
+    from fplopt.backtest.simulator import FAR_FUTURE, season_schedule
+
     out = {}
     gameweeks = store.as_of(FAR_FUTURE).table("gameweek", columns=["season", "gw_index"])
     for season in seasons:

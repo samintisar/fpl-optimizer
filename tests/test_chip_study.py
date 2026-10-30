@@ -364,6 +364,14 @@ def test_chip_policies_survive_pickling_into_workers():
     params = replace(SMALL, chip_value_left=table)
     policies = [
         OptimizerPolicy("v1", params, chips=True),
+        OptimizerPolicy(
+            "v1",
+            replace(params, exclude_chips=("3xc",)),
+            chips=True,
+            season_tables={2022: table, 2023: {"wildcard": (2.0, 1.0)}},
+            double_lead=10,
+            tc_rule=8.5,
+        ),
         ChipRulePolicy("v1", params, t_tc=9.0, t_bb=11.0, k_fh=2, t_wc=7.0),
         ChipGainProbe("v1", params),
     ]
@@ -457,3 +465,100 @@ def test_free_hit_gain_with_an_expected_minutes_floor(league):
     plans = optimize(problem, SMALL, top_k=1, chips=False, roll=False)
     gains = chip_gains(context, problem, SMALL, plans.best)
     assert gains["gain_fh"] > 1.0  # a random squad: a Free Hit rebuilds it
+
+
+# --- chip policy 2 (docs/superpowers/plans/2026-10-30-chip-policy-2.md) ----------------------
+
+
+def test_optimizer_policy_uses_the_seasons_loso_table(league):
+    view, pool, xp = league[8]
+    rules = backtest_rules(2023)
+    state = random_state(view, rules, 3)
+    ctx = DecisionContext(view, state, rules, pool, xp)
+    params = replace(SMALL, chip_value={})
+    # A Wildcard held is worth 0 here: the optimizer plays it at GW8 ...
+    zero = {2023: {"wildcard": (0.0,)}}
+    free = OptimizerPolicy("rolling", params, chips=True, season_tables=zero)
+    assert free.decide(ctx).chip == "wildcard"
+    # ... but 500 in 2023's table: never played (2022's table, with 0, is not used).
+    tables = {2023: {"wildcard": (500.0,)}, 2022: {"wildcard": (0.0,)}}
+    policy = OptimizerPolicy("rolling", params, chips=True, season_tables=tables)
+    assert "loso#" in policy.name and policy.name != free.name
+    assert policy.decide(ctx).chip != "wildcard"
+    # The same decision as the optimizer with 2023's table as `chip_value_left`.
+    direct = OptimizerPolicy("rolling", replace(params, chip_value_left=tables[2023]), True)
+    assert policy.decide(ctx) == direct.decide(ctx)
+    missing = OptimizerPolicy("rolling", params, chips=True, season_tables={2022: {}})
+    with pytest.raises(ValueError, match="no leave-one-season-out table for season 2023"):
+        missing.decide(ctx)
+
+
+def test_optimizer_policy_loso_name_pins_every_table():
+    def name(tables):
+        return OptimizerPolicy("v1", SMALL, chips=True, season_tables=tables).name
+
+    a = name({2022: {"3xc": (1.0, 2.0, 3.0)}, 2023: {"3xc": (1.0,)}})
+    assert a == name({2023: {"3xc": (1,)}, 2022: {"3xc": [1, 2, 3]}})  # canonical
+    assert a != name({2022: {"3xc": (1.0, 2.5, 3.0)}, 2023: {"3xc": (1.0,)}})
+    assert a != name({2021: {"3xc": (1.0, 2.0, 3.0)}, 2023: {"3xc": (1.0,)}})
+    # a short hash, not the tables: 7 seasons x 24 keys would run to kilobytes
+    big = {s: {f"k{i}": tuple(range(38)) for i in range(24)} for s in range(2016, 2023)}
+    assert len(name(big)) == len(a) < 120
+    with pytest.raises(ValueError, match="finite values"):
+        name({2022: {"3xc": (-1.0,)}})
+
+
+def test_optimizer_policy_rule_triple_captain(league):
+    params = replace(SMALL, exclude_chips=("3xc",))
+    always = OptimizerPolicy("rolling", params, chips=True, tc_rule=0.0)
+    never = OptimizerPolicy("rolling", params, chips=True, tc_rule=1e9)
+    assert "tcr=0.0" in always.name and "tcr=1000000000.0" in never.name
+    plan_chips = [d.chip for _, d in contexts(league, never)]
+    assert "3xc" not in plan_chips and None in plan_chips
+    # TC at the first GW plan #1 plays no chip (TC playable all of set 1), never again.
+    first = plan_chips.index(None)
+    expected = plan_chips[:first] + ["3xc"] + plan_chips[first + 1 :]
+    played = []
+    for context, decision in contexts(league, always):
+        apply_decision(context.state, decision, context.pool, context.rules)  # valid
+        played.append(decision.chip)
+    assert played == expected
+    with pytest.raises(ValueError, match="tc_rule needs"):
+        OptimizerPolicy("rolling", SMALL, chips=True, tc_rule=8.3)  # 3xc not excluded
+    with pytest.raises(ValueError, match="tc_rule needs"):
+        OptimizerPolicy("rolling", params, chips=False, tc_rule=8.3)
+
+
+def test_optimizer_policy_rule_triple_captain_in_its_windows_last_gw():
+    """Below the threshold, TC is still played in the last GW of its window (19), not
+    before; the other set-1 chips are used, so plan #1 plays none."""
+    from fplopt.backtest.simulator import season_schedule
+
+    store = DataStore(tables=synthetic_tables(seasons=(2022, 2023)))
+    rules = backtest_rules(2023)
+    others = tuple((w.chip_id, 5) for w in rules.chips if w.stop == 19 and w.name != "3xc")
+    never = OptimizerPolicy("rolling", replace(SMALL, exclude_chips=("3xc",)), True, tc_rule=1e9)
+    for gw_index, chip in ((18, None), (19, "3xc")):
+        view = store.as_of(season_schedule(store, 2023, gw_index)["deadline_time"].iloc[0])
+        pool = player_pool(view)
+        state = replace(refresh(random_state(view, rules, 3), pool), chips_used=others)
+        context = DecisionContext(view, state, rules, pool, MODELS["rolling"](view))
+        decision = never.decide(context)
+        apply_decision(state, decision, pool, rules)  # valid
+        assert decision.chip == chip
+
+
+def test_optimizer_policy_fills_known_doubles(league, monkeypatch):
+    from fplopt.backtest import policies
+
+    seen = []
+    monkeypatch.setattr(
+        policies, "known_doubles", lambda view, season, gw, lead: seen.append(lead) or frozenset()
+    )
+    view, pool, xp = league[8]
+    rules = backtest_rules(2023)
+    ctx = DecisionContext(view, random_state(view, rules, 3), rules, pool, xp)
+    policy = OptimizerPolicy("rolling", SMALL, chips=True, double_lead=10)
+    assert "dl=10" in policy.name
+    policy.decide(ctx)
+    assert seen == [10]
