@@ -42,11 +42,11 @@ def test_known_doubles_within_the_lead():
 def test_known_doubles_by_gw_on_a_synthetic_store():
     from synthetic_season import synthetic_tables
 
-    from fplopt.backtest.chip_doubles import known_doubles_by_gw
+    from fplopt.backtest.chip_values import known_doubles_by_gw
     from fplopt.features.store import DataStore
 
     store = DataStore(tables=synthetic_tables(seasons=(2022, 2023)))
-    table = known_doubles_by_gw(store, [2023])
+    table = known_doubles_by_gw(store, [2023], DOUBLE_LEAD)
     assert table and all(season == 2023 for season, _ in table)
     assert sorted(gw for _, gw in table) == list(range(1, len(table) + 1))
     assert all(isinstance(v, frozenset) for v in table.values())
@@ -55,7 +55,7 @@ def test_known_doubles_by_gw_on_a_synthetic_store():
 def test_known_doubles_by_gw_sees_a_double_only_from_the_snapshot_that_announces_it():
     from synthetic_season import synthetic_tables
 
-    from fplopt.backtest.chip_doubles import known_doubles_by_gw
+    from fplopt.backtest.chip_values import known_doubles_by_gw
     from fplopt.features.store import DataStore
 
     tables = synthetic_tables(seasons=(2023,))

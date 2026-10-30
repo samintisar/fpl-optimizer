@@ -1912,9 +1912,14 @@ def _chips_values(c: Context) -> object:
     horizon = DOUBLE_TABLE_HORIZON
     extra: dict[str, Any] = {}
     if args.split == "double":
-        from fplopt.backtest.chip_doubles import DOUBLE_LEAD, known_doubles_by_gw
+        from fplopt.backtest.chip_doubles import DOUBLE_LEAD
+        from fplopt.seasons import DEVELOP_SEASONS
 
-        doubles = known_doubles_by_gw(open_data_store(c.settings.data_dir), seasons, DOUBLE_LEAD)
+        outside = [s for s in seasons if s not in DEVELOP_SEASONS]
+        if outside:  # before reading any schedule (the estimator refuses them too)
+            raise ValueError(f"chip values are estimated on develop seasons only, got {outside}")
+        store = open_data_store(c.settings.data_dir)
+        doubles = chip_values.known_doubles_by_gw(store, seasons, DOUBLE_LEAD)
         extra = {"lead": DOUBLE_LEAD, "horizon": horizon}
     table = chip_values.estimate_terminal_values(gws, args.split, doubles, horizon)
     payload: dict[str, Any] = {

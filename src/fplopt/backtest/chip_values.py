@@ -20,8 +20,9 @@ from __future__ import annotations
 import json
 import math
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -36,6 +37,7 @@ __all__ = (
     "WINDOW_VALUES_FILE",
     "estimate_loso",
     "estimate_terminal_values",
+    "known_doubles_by_gw",
     "load_loso_values",
     "load_terminal_values",
 )
@@ -94,7 +96,7 @@ def estimate_terminal_values(
     """Per table key, the values for L = 1 .. the longest window (module docstring).
     `split`: "pooled" keys by chip name (all windows together); "window" by `name@k`, k the
     window's ordinal; "double" by `name@k+d` as well as `name@k`, d = 1 when a double was
-    known (`doubles[(season, decision gw_index)]`, `chip_doubles.known_doubles_by_gw`) in the
+    known (`doubles[(season, decision gw_index)]`, `known_doubles_by_gw`) in the
     window's last L GWs at the decision GW max(1, stop - L - horizon + 1); a `+d` cell with
     fewer than `MIN_CELL` observations takes the `name@k` value."""
     from fplopt.backtest.rules import backtest_rules
@@ -102,7 +104,7 @@ def estimate_terminal_values(
     if split not in SPLITS:
         raise ValueError(f"split must be one of {SPLITS}, got {split!r}")
     if split == "double" and doubles is None:
-        raise ValueError("split='double' needs the known doubles (chip_doubles)")
+        raise ValueError("split='double' needs the known doubles (known_doubles_by_gw)")
     seasons = sorted(int(s) for s in gws["season"].unique())
     outside = [s for s in seasons if s not in DEVELOP_SEASONS]
     if outside:
@@ -186,3 +188,24 @@ def estimate_loso(
         s: estimate_terminal_values(gws[gws["season"] != s], split, doubles, horizon)
         for s in seasons
     }
+
+
+def known_doubles_by_gw(
+    store: Any, seasons: Iterable[int], lead: int
+) -> dict[tuple[int, int], frozenset[int]]:
+    """(season, gw_index) → `known_doubles` at that GW's deadline, for the estimator. Each
+    deadline is the one `season_schedule` finds for the GW (visible at its own deadline), and
+    the schedule is read through `store.as_of(deadline)` only."""
+    # imported here: the simulator imports the policies (and pandas-heavy modules)
+    from fplopt.backtest.chip_doubles import known_doubles
+    from fplopt.backtest.simulator import FAR_FUTURE, season_schedule
+
+    out = {}
+    gameweeks = store.as_of(FAR_FUTURE).table("gameweek", columns=["season", "gw_index"])
+    for season in seasons:
+        indices = gameweeks[gameweeks["season"] == season]["gw_index"].dropna().unique()
+        for gw_index in sorted(int(i) for i in indices):
+            deadline = season_schedule(store, season, gw_index)["deadline_time"].iloc[0]
+            view = store.as_of(deadline)
+            out[(int(season), gw_index)] = known_doubles(view, season, gw_index, lead)
+    return out

@@ -761,7 +761,7 @@ def test_cli_chips_values_loso(tmp_path):
 
 
 def test_cli_chips_values_double_writes_the_lead(tmp_path, monkeypatch):
-    from fplopt.backtest import chip_doubles
+    from fplopt.backtest import chip_values
 
     run = tmp_path / "s0"
     run.mkdir()
@@ -774,7 +774,7 @@ def test_cli_chips_values_double_writes_the_lead(tmp_path, monkeypatch):
         return {}
 
     monkeypatch.setattr(cli, "open_data_store", lambda data_dir: ("store", data_dir))
-    monkeypatch.setattr(chip_doubles, "known_doubles_by_gw", fake_doubles)
+    monkeypatch.setattr(chip_values, "known_doubles_by_gw", fake_doubles)
     out = tmp_path / "d.json"
     settings = cli.Settings(raw_dir=tmp_path, data_dir=tmp_path / "data", **SETTINGS)
     argv = ["chips", "values", "--gains", str(run), "--split", "double", "--loso"]
