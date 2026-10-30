@@ -5,6 +5,7 @@ size, and the CLI specs."""
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -509,14 +510,30 @@ def test_optimizer_policy_loso_name_pins_every_table():
 
 
 def test_optimizer_policy_rule_triple_captain(league):
+    from fplopt.backtest.policies import _target_xp_of
+    from fplopt.optimize import PlanInput, optimize
+
+    rules = backtest_rules(2023)
     params = replace(SMALL, exclude_chips=("3xc",))
     always = OptimizerPolicy("rolling", params, chips=True, tc_rule=0.0)
     never = OptimizerPolicy("rolling", params, chips=True, tc_rule=1e9)
     assert "tcr=0.0" in always.name and "tcr=1000000000.0" in never.name
-    plan_chips = [d.chip for _, d in contexts(league, never)]
+    run = list(contexts(league, never))
+    plan_chips = [d.chip for _, d in run]
     assert "3xc" not in plan_chips and None in plan_chips
     # TC at the first GW plan #1 plays no chip (TC playable all of set 1), never again.
     first = plan_chips.index(None)
+    # The threshold is inclusive: TC at exactly plan #1's captain's xP, not just above.
+    context = run[first][0]
+    assert context.state.gw_index < 19  # not TC's last GW
+    problem = PlanInput.from_context(context.state, context.pool, context.xp, rules, params)
+    plans = optimize(problem, params, top_k=1, chips=True, roll=False)
+    assert plans.decision().chip is None
+    value = _target_xp_of(context.xp, plans.best.first.captain)
+    at = OptimizerPolicy("rolling", params, chips=True, tc_rule=value)
+    above = OptimizerPolicy("rolling", params, chips=True, tc_rule=math.nextafter(value, math.inf))
+    assert at.decide(context).chip == "3xc"
+    assert above.decide(context).chip is None
     expected = plan_chips[:first] + ["3xc"] + plan_chips[first + 1 :]
     played = []
     for context, decision in contexts(league, always):
@@ -551,14 +568,25 @@ def test_optimizer_policy_rule_triple_captain_in_its_windows_last_gw():
 def test_optimizer_policy_fills_known_doubles(league, monkeypatch):
     from fplopt.backtest import policies
 
-    seen = []
-    monkeypatch.setattr(
-        policies, "known_doubles", lambda view, season, gw, lead: seen.append(lead) or frozenset()
-    )
     view, pool, xp = league[8]
     rules = backtest_rules(2023)
     ctx = DecisionContext(view, random_state(view, rules, 3), rules, pool, xp)
+    doubles = frozenset({ctx.state.gw_index + 8})
+    seen, planned = [], []
+
+    def fake_known_doubles(view, season, gw_index, lead):
+        seen.append((season, gw_index, lead))
+        return doubles
+
+    def recording_optimize(problem, *args, **kwargs):
+        planned.append(problem.doubles)
+        return real_optimize(problem, *args, **kwargs)
+
+    real_optimize = policies.optimize
+    monkeypatch.setattr(policies, "known_doubles", fake_known_doubles)
+    monkeypatch.setattr(policies, "optimize", recording_optimize)
     policy = OptimizerPolicy("rolling", SMALL, chips=True, double_lead=10)
     assert "dl=10" in policy.name
     policy.decide(ctx)
-    assert seen == [10]
+    assert seen == [(ctx.state.season, ctx.state.gw_index, 10)]
+    assert planned == [doubles]
