@@ -93,9 +93,8 @@ def make_scenario(problem: PlanInput, chips: Mapping[int, str]) -> ChipScenario:
 def scenarios(problem: PlanInput, params: OptimizerParams) -> tuple[ChipScenario, ...]:
     """Every scenario the rules allow, in a deterministic order: no chip; singles by
     (position, chip name); pairs by (first position, first name, second position, second
-    name). `params` is accepted for future scenario limits; unused."""
-    del params
-    names = sorted({c.name for c in problem.rules.chips})
+    name); chip names in `params.exclude_chips` are left out."""
+    names = sorted({c.name for c in problem.rules.chips} - set(params.exclude_chips))
     positions = range(len(problem.gws))
 
     def allowed(chips: Mapping[int, str]) -> ChipScenario | None:

@@ -497,3 +497,24 @@ def test_terminal_values_with_a_known_double() -> None:
     # A double inside the horizon doesn't count (the horizon plans it already).
     inside = replace(problem, doubles=frozenset({6}))
     assert terminal_value(inside, params, NO_CHIP) == 1 + 2
+
+
+def test_scenarios_without_excluded_chips() -> None:
+    problem = problem_at(5, 2)
+    params = replace(EXACT, exclude_chips=("3xc",))
+    assert params.exclude_chips == ("3xc",)
+    kept = labels(problem, params)
+    assert kept[0] == "none" and not any("3xc" in label for label in kept)
+    assert set(labels(problem)) - set(kept) == {s for s in labels(problem) if "3xc" in s}
+
+
+def test_exclude_chips_and_fh_scale_are_validated_and_pickle() -> None:
+    import pickle
+
+    with pytest.raises(ValueError, match="exclude_chips"):
+        OptimizerParams(exclude_chips=("bogus",))
+    with pytest.raises(ValueError, match="fh_scale"):
+        OptimizerParams(fh_scale=1.5)
+    params = OptimizerParams(exclude_chips=["3xc", "bboost"], fh_scale=0.4)
+    assert params.exclude_chips == ("3xc", "bboost")  # sorted
+    assert pickle.loads(pickle.dumps(params)) == params

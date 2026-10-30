@@ -386,6 +386,10 @@ def _optimizer_extras(params: OptimizerParams) -> list[str]:
         parts.append(f"bfm={int(params.bench_from_minutes)}")
     if params.min_minutes != default.min_minutes:
         parts.append(f"minm={float(params.min_minutes)!r}")
+    if params.exclude_chips != default.exclude_chips:
+        parts.append("nochip=" + "/".join(params.exclude_chips))
+    if params.fh_scale != default.fh_scale:
+        parts.append(f"fhs={params.fh_scale!r}")
     return parts
 
 
