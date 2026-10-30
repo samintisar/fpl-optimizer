@@ -44,10 +44,11 @@ after V1–V3. Ties: the smaller k.
   V6 `…,chip_shrink=k*,chip_split=1,loso=1,fh_scale=0.4`.
 - **V5's "known double"**: a GW (by `gw_index`) where some club has ≥ 2 league fixtures in the
   as-of schedule (`AsOfView.schedule`), at most `DOUBLE_LEAD = 10` GWs after the decision GW.
-  Before 2021/22 there are no fixture snapshots and the as-of schedule is the final one, so a
-  double counts as known up to 10 GWs ahead even if it was announced later. Hence V5 must
-  also, on 2021/22–2022/23 alone (snapshot schedules), have a positive full-run window mean
-  vs the best of V1–V3; otherwise V5 can't be the winner.
+  Fixture snapshots exist only for seasons archived live (2026/27 on), so in every develop
+  season the as-of schedule is the final one: a double counts as known up to 10 GWs ahead even
+  if it was announced later. **V5 is therefore information only** (amended 2026-10-30, user
+  decision): it is run and reported but can't be the winner, and the deflation counts the
+  other five variants (N = 5).
 - **V6's Free Hit shrink** ranks chip scenarios by total objective − (1 − 0.4) ·
   max(0, Σ over Free Hit GWs t of (plan GW t objective − no-chip plan GW t objective)); the
   MILPs are unchanged.
@@ -62,16 +63,16 @@ after V1–V3. Ties: the smaller k.
 - Arms: V1–V6, plus fresh H and P (pooled table, in-sample, k = 1.0) for reference.
 - On the server test checkout (`/mnt/ibrokeass/fpl-tests`, `nice -n 15`, ≤ 12 jobs), never in
   `~/fpl-optimizer`.
-- Logged to `results/experiments.csv`, family `chip-policy-2026-11` (N = 6 variants).
+- Logged to `results/experiments.csv`, family `chip-policy-2026-11` (N = 5 eligible variants).
 
 ## Statistic and bar
 
 - Each variant vs H: `backtest compare`'s full-run window t-test on 8-GW cells (realized
   points), with the xG-scored mean reported alongside.
-- **Pass:** the best variant's deflated mean (mean − SE·√(2 ln 6)) > 0 **and** one-sided
+- **Pass:** the best variant's deflated mean (mean − SE·√(2 ln 5)) > 0 **and** one-sided
   p < 0.10, with a positive xG-scored mean.
-- The family's runs include H and P (8 runs); the deflation counts the 6 variants
-  (N = 6), as pre-registered here.
+- The family's runs include H, P and V5 (9 runs); the deflation counts the 5 eligible
+  variants V1–V4, V6 (N = 5).
 - Known bias against the variants: H's thresholds were tuned in-sample on develop; the
   variants' tables are out of season.
 - No pass: nothing changes. `/chips` keeps its "information only" label.

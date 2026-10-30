@@ -67,10 +67,11 @@ In *Variants*, after the table, add:
   V6 `…,chip_shrink=k*,chip_split=1,loso=1,fh_scale=0.4`.
 - **V5's "known double"**: a GW (by `gw_index`) where some club has ≥ 2 league fixtures in the
   as-of schedule (`AsOfView.schedule`), at most `DOUBLE_LEAD = 10` GWs after the decision GW.
-  Before 2021/22 there are no fixture snapshots and the as-of schedule is the final one, so a
-  double counts as known up to 10 GWs ahead even if it was announced later. Hence V5 must
-  also, on 2021/22–2022/23 alone (snapshot schedules), have a positive full-run window mean
-  vs the best of V1–V3; otherwise V5 can't be the winner.
+  Fixture snapshots exist only for seasons archived live (2026/27 on), so in every develop
+  season the as-of schedule is the final one: a double counts as known up to 10 GWs ahead even
+  if it was announced later. **V5 is therefore information only** (amended 2026-10-30, user
+  decision): it is run and reported but can't be the winner, and the deflation counts the
+  other five variants (N = 5).
 - **V6's Free Hit shrink** ranks chip scenarios by total objective − (1 − 0.4) ·
   max(0, Σ over Free Hit GWs t of (plan GW t objective − no-chip plan GW t objective)); the
   MILPs are unchanged.
@@ -82,8 +83,8 @@ In *Variants*, after the table, add:
 In *Statistic and bar*, add a bullet:
 
 ```markdown
-- The family's runs include H and P (8 runs); the deflation counts the 6 variants
-  (N = 6), as pre-registered here.
+- The family's runs include H, P and V5 (9 runs); the deflation counts the 5 eligible
+  variants V1–V4, V6 (N = 5).
 ```
 
 - [ ] **Step 2: Commit**
@@ -461,8 +462,8 @@ docs/superpowers/specs/2026-10-30-chip-policy-2-design.md).
 
 A GW (`gw_index`) is a known double when some club has ≥ 2 league fixtures in it in the
 as-of schedule (`AsOfView.schedule`), within `lead` GWs after the decision GW. Before
-2021/22 there are no fixture snapshots and the as-of schedule is the final one: the lead
-caps how far ahead that hindsight reaches (the spec's V5 sanity condition covers the rest).
+2026/27 there are no fixture snapshots and the as-of schedule is the final one: the lead
+caps how far ahead that hindsight reaches (V5 is information only for this reason).
 """
 
 from __future__ import annotations
@@ -1295,8 +1296,9 @@ Expected: PASS.
 
 ```python
 """Chip policy 2 comparisons (spec docs/superpowers/specs/2026-10-30-chip-policy-2-design.md):
-each arm vs H by the full-run window t-test on 8-GW cells, deflated for N = 6 variants;
-the best of V1-V3; V5's sanity condition on 2021/22-2022/23.
+each arm vs H by the full-run window t-test on 8-GW cells, deflated for N = 5 eligible
+variants (V1-V4, V6; V5 is information only: its doubles are known in hindsight); the best
+of V1-V3.
 
     uv run python dev/chip_policy_2.py --h results/cp2-h \
         --arm P=results/cp2-p --arm V1=results/cp2-v1 ... [--out results/chip-policy-2]
@@ -1314,8 +1316,8 @@ import pandas as pd
 from fplopt.backtest import chip_diagnostics as cd
 from fplopt.backtest.evaluate import full_run_window_test
 
-N_VARIANTS = 6
-SNAPSHOT_SEASONS = (2021, 2022)  # develop seasons with fixture snapshots (V5 sanity check)
+N_VARIANTS = 5
+INFO_ONLY = ("V5",)  # reported, never the winner (hindsight doubles)
 
 
 def load(run: Path) -> pd.DataFrame:
@@ -1349,9 +1351,6 @@ def main() -> None:
         # Ties: the smaller shrink, i.e. the earlier of V1-V3.
         best = max(first, key=lambda v: (out["vs H"][v]["mean"], -first.index(v)))
         out["best_of_v1_v3"] = best
-        if "V5" in arms:
-            snap = [arms[x][arms[x]["season"].isin(SNAPSHOT_SEASONS)] for x in ("V5", best)]
-            out["v5_sanity_vs_best"] = compare(*snap)
     passing = {
         name: r
         for name, r in out["vs H"].items()
@@ -1360,8 +1359,6 @@ def main() -> None:
         and r["p_one_sided"] < 0.10
         and r["xg_mean"] > 0
     }
-    if "V5" in passing and out.get("v5_sanity_vs_best", {}).get("mean", 0) <= 0:
-        passing.pop("V5")
     out["passing"] = sorted(passing, key=lambda n: -passing[n]["deflated"])
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
@@ -1422,7 +1419,7 @@ Expected: `[2016, 2017, 2018, 2019, 2020, 2021, 2022] 10`.
 `docs/PLAN.md`, decision log, after the last 2026-10-30 row:
 
 ```markdown
-| 2026-10-30 | Chip policy 2 pre-registered (`docs/superpowers/specs/2026-10-30-chip-policy-2-design.md`): six variants vs H on develop (per-window terminal values at k 0.6/0.8/1.0 estimated leave-one-season-out; then a rule-TC hybrid, double-aware values, a Free Hit shrink), deflated for N = 6; the winner is frozen before GW20 and shadowed live over set 2. | The diagnostics (`docs/research/2026-10-chip-diagnostics.md`) found P ≈ H (+0.33/GW, p 0.26), set-1 holding overvalued and set-2 undervalued by one pooled table, and chips worth 1.5–2.5× in doubles. Validate is spent; the live shadow is the out-of-sample check. |
+| 2026-10-30 | Chip policy 2 pre-registered (`docs/superpowers/specs/2026-10-30-chip-policy-2-design.md`): six variants vs H on develop (per-window terminal values at k 0.6/0.8/1.0 estimated leave-one-season-out; then a rule-TC hybrid, double-aware values, a Free Hit shrink), deflated for N = 5 (V5, double-aware, information only: develop has no fixture history); the winner is frozen before GW20 and shadowed live over set 2. | The diagnostics (`docs/research/2026-10-chip-diagnostics.md`) found P ≈ H (+0.33/GW, p 0.26), set-1 holding overvalued and set-2 undervalued by one pooled table, and chips worth 1.5–2.5× in doubles. Validate is spent; the live shadow is the out-of-sample check. |
 ```
 
 - [ ] **Step 4: Full test run and lint**
@@ -1522,7 +1519,7 @@ Expected: `passing: [...]` or `passing: none`.
 
 - [ ] **Step 3: Bring the results back and record them**
 
-Copy `results/cp2-final/summary.json` and the run rows of the server's `results/experiments.csv` (family `chip-policy-2026-11`) to the worktree; append the rows to `results/experiments.csv`; write `docs/research/2026-11-chip-policy-2.md` (verdict, table of the six variants vs H, k*, V5 sanity, what gets frozen); add a PLAN decision row with the verdict. Commit to the PR branch:
+Copy `results/cp2-final/summary.json` and the run rows of the server's `results/experiments.csv` (family `chip-policy-2026-11`) to the worktree; append the rows to `results/experiments.csv`; write `docs/research/2026-11-chip-policy-2.md` (verdict, table of the six variants vs H, k*, V5 as information, what gets frozen); add a PLAN decision row with the verdict. Commit to the PR branch:
 
 ```bash
 git add results/experiments.csv docs/research/2026-11-chip-policy-2.md docs/PLAN.md
