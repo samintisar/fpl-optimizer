@@ -138,7 +138,7 @@ def search(
 ) -> SearchResult:
     """The best plan over `candidates` (no chip first). `how="all"` solves every scenario;
     `"bound"` skips those that provably can't win (module docstring). Ties in
-    `total_objective` go to the earlier candidate."""
+    score (`_score`) go to the earlier candidate."""
     if how not in SEARCHES:
         raise ValueError(f"scenario search must be one of {SEARCHES}, got {how!r}")
     candidates = list(candidates)

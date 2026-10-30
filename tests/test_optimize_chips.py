@@ -530,3 +530,39 @@ def test_fh_scale_shrinks_the_free_hit_gain(how) -> None:
     assert optimize(problem, params, top_k=1, scenario_search=how).best.scenario == "freehit@gw6"
     shrunk = replace(params, fh_scale=0.0)
     assert optimize(problem, shrunk, top_k=1, scenario_search=how).best.scenario == "none"
+
+
+def test_fh_scale_bound_search_uses_the_score_for_its_incumbent() -> None:
+    """With the Free Hit's gain unranked, 3xc@gw6 is the best plan; a bound search whose
+    incumbent used the raw total (the Free Hit plan) would stop before solving it."""
+    state, pool, xp, _ = team([1.0, 1.0, 1.0], other_xp=[0.0, 8.0, 0.0])
+    params = replace(chip_params(3, freehit=4.0, **{"3xc": 0.0}), fh_scale=0.0)
+    problem = state_problem(state, pool, xp, params)
+    found = {
+        how: optimize(problem, params, top_k=1, scenario_search=how).best
+        for how in ("bound", "all")
+    }
+    assert found["bound"].scenario == found["all"].scenario == "3xc@gw6"
+    assert found["bound"].total_objective == pytest.approx(found["all"].total_objective)
+
+
+def test_score_counts_only_positive_free_hit_gw_gains() -> None:
+    from types import SimpleNamespace as NS
+
+    from fplopt.optimize.search import _score
+
+    def plan(total, *gw_objectives):
+        return NS(total_objective=total, gws=[NS(objective=o) for o in gw_objectives])
+
+    params = OptimizerParams(fh_scale=0.25)
+    base = plan(10.0, 4.0, 3.0, 3.0)
+    # the Free Hit GW (1) gains 2; GW 0 differs by +5 and GW 2 by -1, which don't count
+    gain = plan(20.0, 9.0, 5.0, 2.0)
+    scenarios = [NS(chips=()), NS(chips=((1, "freehit"),))]
+    assert _score({0: base, 1: gain}, 1, scenarios, params) == pytest.approx(20.0 - 0.75 * 2.0)
+    # a negative Free Hit GW gain is clipped at 0: no bonus for a worse Free Hit GW
+    loss = plan(12.0, 9.0, 1.0, 2.0)
+    assert _score({0: base, 1: loss}, 1, scenarios, params) == pytest.approx(12.0)
+    assert _score({0: base, 1: loss}, 0, scenarios, params) == pytest.approx(10.0)
+    # fh_scale == 1 returns the total unchanged
+    assert _score({0: base, 1: gain}, 1, scenarios, OptimizerParams()) == 20.0
