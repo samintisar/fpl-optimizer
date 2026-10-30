@@ -203,10 +203,10 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
 - *Gate (2026-10-30):* on the local `data/` (built 2026-10-29).
   - Components (`dev/models_parity.py`, 18–26 deadlines each): the baselines 78/78 frames identical; team fits within 5.5e-8, frames 4.5e-9; minutes boosters byte-identical, frames exact; availability ~1e-14; shares fits 2.9e-14, frames 7.3e-10; components (saves fit) 1e-10.
   - Gates 1 and 2 (`--models v1 --seasons 2025,2026 --plans`, all 47 deadlines from 2025/26 GW1 to 2026/27 GW9): every fit within 1e-6 relative (worst 5.5e-8), xP within 1.4e-9 (limit 0.01).
-  - Gate 3, template: plan #1 the same at 46/47 deadlines. At 2026/27 GW8 plan #1's moves and captains are the same and only its printed gain vs roll differs (the roll plan differs); at 2026/27 GW3 plan #1 swaps Thiago and Gonzalo between GW4 and GW5 (objective 247.39 vs 247.53). Both solves stop at the planner's 0.5% MIP gap after one node, and the difference is the solver's, not the port's: Python's own frame with ±1e-9 noise gives Python's plan for one seed and Rust's for two. Under batch 4's rule (same frame, same plan) this is a miss; whether gap stops count as ties is open question 2.
+  - Gate 3, template: plan #1 the same at 46/47 deadlines. At 2026/27 GW8 plan #1's moves and captains are the same and only its printed gain vs roll differs (the roll plan differs); at 2026/27 GW3 plan #1 swaps Thiago and Gonzalo between GW4 and GW5 (objective 247.39 vs 247.53). Both solves stop at the planner's 0.5% MIP gap after one node, and the difference is the solver's, not the port's: Python's own frame with ±1e-9 noise gives Python's plan for one seed and Rust's for two. The user counted it as a tie (2026-10-30): a plan that differs only where the solve stopped at its MIP gap passes gate 3, so the gate passes and Rust v1 is v1 (no `v1rs`).
   - Gate 3, registered users (`dev/bot_parity.py --rust-contexts`, the server's `bot.sqlite` backup and GW9 context, plus 2026/27 GW4, GW8 and GW9 from `data/`): 4/4 sessions, 404 steps, 441 messages and every row identical (plan-log numbers within 1e-9, `/chips` scenario values within the 0.5% gap, 16 ties at GW8/GW9).
   - Contexts built by both at GW4 and GW8: pool, players, prices and gameweeks identical, xP within 1.4e-9; Python reads the Rust contexts. `check leakage` (Rust) passes with the models: 18 deadlines × 13 frames.
-- *Still open:* gate 3's GW3 gap stop (open question 2); the gates on the server before the switch (Linux builds, a fresh `bot.sqlite` backup); `live tick`'s end-to-end tests (Python's synthetic league) not ported, the Rust side covered by unit tests and the bot gate; merging main for the chip PR's optimizer settings (`exclude_chips`, `fh_scale`, `doubles`, the finer hold-value keys, Free Hit ranking) and later the set-2 shadow logger (its `live tick` step and `bot.sqlite` table).
+- *Still open:* the gates on the server before the switch (Linux builds, a fresh `bot.sqlite` backup); `live tick`'s end-to-end tests (Python's synthetic league) not ported, the Rust side covered by unit tests and the bot gate; merging main for the chip PR's optimizer settings (`exclude_chips`, `fh_scale`, `doubles`, the finer hold-value keys, Free Hit ranking) and later the set-2 shadow logger (its `live tick` step and `bot.sqlite` table).
 
 ### Batch 7 — Backtester and research tooling (~5–6 weeks)
 
@@ -242,7 +242,7 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
 ## Open questions for the user
 
 1. Approve the batch order, especially bot (5) **before** models (6)?
-2. Batch 6 fallback: is a `v1rs` variant that passes the comparisons acceptable live, or must Rust match Python v1 exactly?
+2. Batch 6 fallback: is a `v1rs` variant that passes the comparisons acceptable live, or must Rust match Python v1 exactly? *Not needed: the gate passed (2026-10-30); a plan #1 that differs only where both solves stopped at the 0.5% MIP gap counts as a tie.*
 3. Batch 7: freeze random start states as a fixture (recommended) or port numpy's RNG?
 4. Batch 8: keep notebooks as Python analysis over Parquet, or drop them?
 5. One PR per batch (as with the earlier phases)? *Changed 2026-10-29: one branch, one switch (see Status).*
