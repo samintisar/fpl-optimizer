@@ -37,9 +37,28 @@ other six develop seasons.
 "Best of V1–V3" = the highest raw (undeflated) full-run window t-test mean vs H; V4–V6 run
 after V1–V3. Ties: the smaller k.
 
+- **Spec strings** (`BASE = horizon=6,decay=0.75,max_hits=1,hit_margin=2`):
+  V1–V3 `optimizer:v1:BASE,chips=1,chip_shrink=k,chip_split=1,loso=1` (k = 0.6/0.8/1.0);
+  V4 `…,chip_shrink=k*,chip_split=1,loso=1,tc_rule=8.3`;
+  V5 `…,chip_shrink=k*,chip_split=2,loso=1`;
+  V6 `…,chip_shrink=k*,chip_split=1,loso=1,fh_scale=0.4`.
+- **V5's "known double"**: a GW (by `gw_index`) where some club has ≥ 2 league fixtures in the
+  as-of schedule (`AsOfView.schedule`), at most `DOUBLE_LEAD = 10` GWs after the decision GW.
+  Before 2021/22 there are no fixture snapshots and the as-of schedule is the final one, so a
+  double counts as known up to 10 GWs ahead even if it was announced later. Hence V5 must
+  also, on 2021/22–2022/23 alone (snapshot schedules), have a positive full-run window mean
+  vs the best of V1–V3; otherwise V5 can't be the winner.
+- **V6's Free Hit shrink** ranks chip scenarios by total objective − (1 − 0.4) ·
+  max(0, Σ over Free Hit GWs t of (plan GW t objective − no-chip plan GW t objective)); the
+  MILPs are unchanged.
+- **V4's rule**: the optimizer plans without Triple Captain scenarios; if plan #1 plays no
+  chip this GW and Triple Captain is available, it is played when the captain's xP ≥ 8.3 or
+  this is the last GW of its window (re-planned with TC fixed in this GW).
+
 ## Runs
 
-- Develop 2016/17–2022/23, starts `template@1,random:3@1` (4 runs per season), v1 xP.
+- Develop 2016/17–2022/23, starts `template@1,random:3@1,random:3@20` (7 runs per season, the
+  diagnostics' grid, so H and P are comparable with sub-project 1), v1 xP.
 - Arms: V1–V6, plus fresh H and P (pooled table, in-sample, k = 1.0) for reference.
 - On the server test checkout (`/mnt/ibrokeass/fpl-tests`, `nice -n 15`, ≤ 12 jobs), never in
   `~/fpl-optimizer`.
@@ -51,6 +70,8 @@ after V1–V3. Ties: the smaller k.
   points), with the xG-scored mean reported alongside.
 - **Pass:** the best variant's deflated mean (mean − SE·√(2 ln 6)) > 0 **and** one-sided
   p < 0.10, with a positive xG-scored mean.
+- The family's runs include H and P (8 runs); the deflation counts the 6 variants
+  (N = 6), as pre-registered here.
 - Known bias against the variants: H's thresholds were tuned in-sample on develop; the
   variants' tables are out of season.
 - No pass: nothing changes. `/chips` keeps its "information only" label.
