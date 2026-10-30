@@ -2,9 +2,10 @@
 docs/superpowers/specs/2026-10-30-chip-policy-2-design.md).
 
 A GW (`gw_index`) is a known double when some club has ≥ 2 league fixtures in it in the
-as-of schedule (`AsOfView.schedule`), within `lead` GWs after the decision GW. Before
-2021/22 there are no fixture snapshots and the as-of schedule is the final one: the lead
-caps how far ahead that hindsight reaches (the spec's V5 sanity condition covers the rest).
+as-of schedule (`AsOfView.schedule`), within `lead` GWs after the decision GW.
+`fixture_snapshot` only covers seasons archived live (2026/27 on), so every develop
+season's as-of schedule is the final one: it includes rescheduling announced after the
+deadline. The lead caps how far ahead that hindsight reaches.
 """
 
 from __future__ import annotations
@@ -46,12 +47,11 @@ def known_doubles_by_gw(
     deadline is the one `season_schedule` finds for the GW (visible at its own deadline), and
     the schedule is read through `store.as_of(deadline)` only."""
     out = {}
+    gameweeks = store.as_of(FAR_FUTURE).table("gameweek", columns=["season", "gw_index"])
     for season in seasons:
-        indices = store.as_of(FAR_FUTURE).table("gameweek", columns=["season", "gw_index"])
-        indices = indices[indices["season"] == season]["gw_index"].dropna().unique()
+        indices = gameweeks[gameweeks["season"] == season]["gw_index"].dropna().unique()
         for gw_index in sorted(int(i) for i in indices):
-            gameweeks = season_schedule(store, season, gw_index)
-            deadline = gameweeks["deadline_time"].iloc[0]
+            deadline = season_schedule(store, season, gw_index)["deadline_time"].iloc[0]
             view = store.as_of(deadline)
             out[(int(season), gw_index)] = known_doubles(view, season, gw_index, lead)
     return out
