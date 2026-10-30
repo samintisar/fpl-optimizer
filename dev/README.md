@@ -574,3 +574,31 @@ uv run python dev/shadow_compare.py --since 2026-10-31T00:00
 ```
 
 Both log a row to `results/experiments.csv` (family `rust parity`) and exit 1 on any difference.
+
+## `build_parity.py` and `name_golden.py`: Rust migration batch 2 gate
+
+`build_parity.py` runs `fplopt build all` and `fplopt-rs build all` from the same `raw/` (as
+subprocesses from the repo root, alerts and heartbeat off, each into its own data directory)
+and compares every table in `fplopt.build.tables.TABLES` with `fplopt-rs check parity table`
+on the table's key. The two builds must also write the same set of files. On 2026-10-29 (local
+copy of the server's raw/): 22/22 tables identical, Python 354 s, Rust 140 s.
+
+```sh
+cargo build --release -p fplopt-cli
+uv run python dev/build_parity.py [--raw raw] [--python-data DIR] [--keep DIR]
+```
+
+`name_golden.py` writes `tests/fixtures/rust_golden/names.json.gz` from a full build's
+`data/`: every name the Understat and ESPN maps normalise and the (source, FPL) name pairs
+they score with rapidfuzz's `token_set_ratio`. It keeps every pair scoring >= 50, plus a fixed
+sample of 20,000 below 50. Only those scores can change a map, and all 1.8M pairs would be
+15 MB. The Rust test (`crates/fplopt-build/src/fuzz.rs`) checks the file. Set
+`FPLOPT_NAMES_GOLDEN` to point it at an untrimmed set instead (all 1,844,337 pairs matched on
+2026-10-29). `tests/test_rust_golden.py` re-checks the file against the installed rapidfuzz.
+
+```sh
+uv run python dev/name_golden.py --data data
+```
+
+`build_parity.py` logs a row to `results/experiments.csv` (family `rust parity`) and exits 1
+on any difference.

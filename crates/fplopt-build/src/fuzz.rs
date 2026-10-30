@@ -144,6 +144,36 @@ mod tests {
         assert_eq!(token_set_ratio("", "x"), 0.0);
     }
 
+    /// Python's results on every name the maps normalise and the pairs they score on real
+    /// data (`dev/name_golden.py`): normalisation identical, scores within 1e-9.
+    #[test]
+    fn golden_names_and_pairs() {
+        use std::io::Read;
+        // FPLOPT_NAMES_GOLDEN: check another file (e.g. the untrimmed set, 1.8M pairs).
+        let path = std::env::var_os("FPLOPT_NAMES_GOLDEN")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/rust_golden/names.json.gz")
+            });
+        let mut text = String::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap())
+            .read_to_string(&mut text)
+            .unwrap();
+        let golden: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for (name, expected) in golden["names"].as_object().unwrap() {
+            assert_eq!(normalise_name(name), expected.as_str().unwrap(), "{name:?}");
+        }
+        let pairs = golden["pairs"].as_array().unwrap();
+        assert!(pairs.len() > 40_000);
+        for pair in pairs {
+            let (a, b) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
+            let expected = pair[2].as_f64().unwrap();
+            let got = token_set_ratio(a, b);
+            assert!((got - expected).abs() <= 1e-9, "{a:?} {b:?}: {got} vs {expected}");
+        }
+    }
+
     #[test]
     fn names_normalise() {
         assert_eq!(normalise_name("Martin Ødegaard"), "martin odegaard");

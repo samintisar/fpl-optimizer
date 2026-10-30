@@ -450,10 +450,12 @@ pub fn parse_iso(text: &str) -> Result<Micros> {
             return Ok(ts.and_utc().timestamp_micros());
         }
     }
-    if let Some(stripped) = text.strip_suffix('Z')
-        && let Ok(ts) = NaiveDateTime::parse_from_str(stripped, "%Y-%m-%dT%H:%M:%S%.f")
-    {
-        return Ok(ts.and_utc().timestamp_micros());
+    if let Some(stripped) = text.strip_suffix('Z') {
+        for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M"] {
+            if let Ok(ts) = NaiveDateTime::parse_from_str(stripped, format) {
+                return Ok(ts.and_utc().timestamp_micros());
+            }
+        }
     }
     if let Ok(day) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
         return Ok(day.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_micros());
@@ -543,5 +545,6 @@ mod tests {
     #[test]
     fn iso_fractions_truncate_to_micros() {
         assert_eq!(parse_iso("1970-01-01T00:00:01.0000019Z").unwrap(), 1_000_001);
+        assert_eq!(parse_iso("1970-01-01T00:01Z").unwrap(), 60_000_000);
     }
 }

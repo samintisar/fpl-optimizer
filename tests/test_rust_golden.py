@@ -1,7 +1,10 @@
 """Golden files the Rust port (crates/) is tested against: Python's outputs on a fixed set of
 inputs. This test fails if Python's behaviour drifts from a golden file; regenerate with
-`uv run python tests/test_rust_golden.py` (and the Rust tests then check the new values)."""
+`uv run python tests/test_rust_golden.py` (and the Rust tests then check the new values).
+`names.json.gz` comes from real data (`dev/name_golden.py --data data`); here it is only
+re-checked against the installed rapidfuzz and `normalise_name`."""
 
+import gzip
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -61,6 +64,16 @@ def seasons_golden() -> dict:
 def test_seasons_golden_is_current():
     stored = json.loads((GOLDEN / "seasons.json").read_text(encoding="utf-8"))
     assert stored == json.loads(json.dumps(seasons_golden()))
+
+
+def test_names_golden_is_current():
+    from rapidfuzz import fuzz
+
+    from fplopt.build.understat import normalise_name
+
+    golden = json.loads(gzip.decompress((GOLDEN / "names.json.gz").read_bytes()))
+    assert {n: normalise_name(n) for n in golden["names"]} == golden["names"]
+    assert all(fuzz.token_set_ratio(a, b) == score for a, b, score in golden["pairs"])
 
 
 if __name__ == "__main__":

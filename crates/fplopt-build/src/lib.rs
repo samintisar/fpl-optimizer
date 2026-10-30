@@ -10,8 +10,11 @@
 #![allow(clippy::type_complexity)]
 
 pub mod common;
+pub mod elo;
+pub mod espn;
 pub mod fixtures;
 pub mod fuzz;
+pub mod odds;
 pub mod players;
 pub mod rules;
 pub mod scoring;
@@ -93,7 +96,13 @@ fn run_builder(name: &str, ctx: &mut BuildContext) -> Result<Built> {
         "team_match" => {
             Built::Table(understat::build_team_match(ctx)?, understat::TEAM_MATCH_SORT_BY)
         }
-        other => bail!("builder {other:?} is not ported yet"),
+        "team_rating" => Built::Table(elo::build_team_rating(ctx)?, elo::SORT_BY),
+        "odds_snapshot" => Built::Table(odds::build_odds_snapshot(ctx)?, odds::SORT_BY),
+        "espn" => {
+            let (rows, seasons) = espn::build_espn(ctx)?;
+            Built::Written { rows, seasons }
+        }
+        other => bail!("unknown builder {other:?}"),
     })
 }
 

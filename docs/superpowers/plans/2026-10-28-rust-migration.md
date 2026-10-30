@@ -114,6 +114,21 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
 - Port `token_set_ratio` exactly; golden test on every name pair the build compares on real data.
 - **Gate:** `build all` from the same `raw/`: every table in `data/` identical under §3. Run on the server copy of `raw/` (about 1.5 min Python).
 - Cutover: `live prepare`'s `build all` subprocess calls `fplopt-rs build all`.
+- *As built:* `crates/fplopt-build`, with builders that follow the Python modules one to one:
+  - The modules: `teams`, `fixtures`, `snapshots`, `players`, `understat`, `odds`, `elo`, `espn` and `rules`, plus `scoring` (the `backtest/rules` loader and the per-match scorer, for `rescored_points`) and `fuzz` (`token_set_ratio`, `normalise_name`).
+  - How rows are built: as plain Rust structs, not dataframes. Polars is used only to read and write Parquet, with the same dtypes pandas writes (nullable Int64/Float64, str, bool, `datetime64[us, UTC]`, date32).
+  - Raw CSVs are read with pandas' NA strings and boolean spellings. JSON floats are parsed correctly rounded, as Python does.
+  - `player_snapshot` is parsed in parallel and written one row group per chunk.
+- *Gate (2026-10-29):* `dev/build_parity.py` passes on a frozen copy of the local `raw/` (synced from the server that day, ESPN included).
+  - All 22 tables are identical, including `player_snapshot` (5.7M rows) and the Understat and ESPN maps.
+  - `build all` takes 140 s in Rust against 354 s in Python.
+  - `rules export` is byte-identical for 2025-26 and 2026-27.
+  - `token_set_ratio` matches rapidfuzz on all 1,844,337 name pairs the maps score. The committed golden keeps the 49k pairs that can change a map.
+  - The schema checks are ported as explicit checks per builder, and they raise as pandera did. Their failure texts differ from pandera's.
+- *Still open:*
+  - The Python build tests are covered by the real-data gate rather than translated one by one. The Rust unit tests cover the helpers (lockdown and clock changes, CSV NA handling, the float repr, defcon scoring, rapidfuzz).
+  - The xz decoder (`lzma-rs`) dominates `player_snapshot` (~75 s).
+  - The gate re-runs on the server before the switch.
 
 ### Batch 3 — As-of store and features (~2 weeks)
 

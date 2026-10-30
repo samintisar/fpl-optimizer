@@ -1032,6 +1032,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "csv",
+ "flate2",
  "fplopt-archive",
  "fplopt-core",
  "log",

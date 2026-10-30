@@ -25,4 +25,5 @@ unicode-normalization = "0.1.26"
 workspace = true
 
 [dev-dependencies]
+flate2 = "1"
 tempfile = "3.27.0"
