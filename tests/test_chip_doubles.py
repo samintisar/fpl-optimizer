@@ -24,8 +24,8 @@ def test_known_doubles_within_the_lead():
         (2020, 30, 4, 5),
         (2020, 30, 6, 4),  # club 4 twice in GW30: beyond the lead from GW5
         (2020, None, 7, 8),  # unscheduled
-        (2020, 12, 0, 9),
-        (2020, 12, 0, 8),  # placeholder side (team_key 0) twice: not a double
+        (2020, 8, 0, 9),
+        (2020, 8, 0, 8),  # placeholder side (team_key 0) twice: not a double
         (2021, 13, 1, 2),
         (2021, 13, 1, 3),  # another season
     ]
