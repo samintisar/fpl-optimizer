@@ -184,6 +184,67 @@ def test_estimate_terminal_values_refuses_validate_seasons_and_missing_gains():
         estimate_terminal_values(empty)
 
 
+def test_estimate_terminal_values_by_window():
+    table = estimate_terminal_values(gains_frame(), split="window")
+    assert set(table) == {
+        f"{c}@{k}" for c in ("3xc", "bboost", "freehit", "wildcard") for k in (1, 2)
+    }
+    # TC gain = gw_index: set 1's best of its last L GWs is 19, set 2's is 38.
+    assert table["3xc@1"] == (19.0,) * 19
+    assert table["3xc@2"] == (38.0,) * 19
+    assert len(table["freehit@1"]) == 18 and len(table["freehit@2"]) == 19
+    # The pooled table is unchanged by default.
+    assert estimate_terminal_values(gains_frame())["3xc"][0] == pytest.approx((19 + 38) / 2)
+
+
+def test_estimate_terminal_values_split_by_known_doubles():
+    # A double known (at every deadline of 2020) in GW15 only.
+    doubles = {(2020, gw): frozenset({15}) for gw in range(1, 39)}
+    frames = pd.concat([gains_frame(start_id=str(i)) for i in range(40)])  # n >= MIN_CELL
+    table = estimate_terminal_values(frames, split="double", doubles=doubles, horizon=6)
+    # Set 1, L GWs left = GWs 20-L..19: GW15 is among them for L >= 5.
+    assert table["3xc@1+1"][4] == 19.0 and table["3xc@1+0"][3] == 19.0
+    # Sparse cells fall back to the window value: set 2 never has a double ahead.
+    assert table["3xc@2+1"] == table["3xc@2"]
+    with pytest.raises(ValueError, match="doubles"):
+        estimate_terminal_values(frames, split="double")
+
+
+def test_estimate_loso_leaves_each_season_out():
+    from fplopt.backtest.chip_values import estimate_loso
+
+    two = pd.concat([gains_frame(season=2019), gains_frame(season=2020, values=lambda gw: 0.0)])
+    tables = estimate_loso(two, split="window")
+    assert set(tables) == {2019, 2020}
+    assert tables[2019]["3xc@1"][0] == 0.0  # estimated on 2020 only
+    assert tables[2020]["3xc@1"][0] == 19.0  # on 2019 only
+    with pytest.raises(ValueError, match="two seasons"):
+        estimate_loso(gains_frame(), split="window")
+
+
+def test_load_loso_values(tmp_path):
+    from fplopt.backtest.chip_values import load_loso_values, load_terminal_values
+
+    path = tmp_path / "t.json"
+    path.write_text(
+        json.dumps(
+            {
+                "format": 2,
+                "split": "window",
+                "values": {"3xc@1": [2.0]},
+                "loso": {"2019": {"3xc@1": [1.0]}, "2020": {"3xc@1": [3.0]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_loso_values(0.5, path) == {2019: {"3xc@1": (0.5,)}, 2020: {"3xc@1": (1.5,)}}
+    assert load_terminal_values(1.0, path) == {"3xc@1": (2.0,)}
+    plain = tmp_path / "p.json"
+    plain.write_text(json.dumps({"values": {"3xc": [1.0]}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="no leave-one-season-out"):
+        load_loso_values(1.0, plain)
+
+
 # --- the full-run window t-test ---------------------------------------------------------------
 
 
