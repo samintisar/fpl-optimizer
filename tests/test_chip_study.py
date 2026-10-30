@@ -4,6 +4,8 @@ size, and the CLI specs."""
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import math
 from dataclasses import replace
@@ -444,7 +446,7 @@ def test_backtest_config_logs_the_estimated_table(tmp_path, monkeypatch):
         seasons=(2020,), starts="template@1", policy_specs=specs, jobs=1, family="f", command="run"
     )
     config = cli._backtest_config(args, tmp_path / "out")
-    assert config["chip_values"] == {"source": "run", "values": {"bboost": [2.0]}}
+    assert config["chip_values"] == {"0": {"source": "run", "values": {"bboost": [2.0]}}}
     args.policy_specs = specs[1:]
     assert "chip_values" not in cli._backtest_config(args, tmp_path / "out")
 
@@ -590,3 +592,200 @@ def test_optimizer_policy_fills_known_doubles(league, monkeypatch):
     policy.decide(ctx)
     assert seen == [(ctx.state.season, ctx.state.gw_index, 10)]
     assert planned == [doubles]
+
+
+# --- chip policy 2: CLI (docs/superpowers/specs/2026-10-30-chip-policy-2-design.md) ---------
+
+V_BASE = "horizon=6,decay=0.75,max_hits=1,hit_margin=2,chips=1"
+SETTINGS = {"odds_api_key": None, "telegram_bot_token": None, "telegram_admin_chat_id": None}
+
+
+def _v2_table(path, split, **extra):
+    """A format-2 table file: values 4.0, season 2019's leave-one-out table 2.0."""
+    keys = ("3xc@1", "3xc@1+0", "3xc@1+1") if split == "double" else ("3xc@1",)
+    payload = {
+        "source": "s0",
+        "seasons": ["2019-20", "2020-21"],
+        "format": 2,
+        "split": split,
+        **extra,
+        "values": {k: [4.0] for k in keys},
+        "loso": {"2019": {k: [2.0] for k in keys}},
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def v2_tables(tmp_path, monkeypatch):
+    window = _v2_table(tmp_path / "w.json", "window")
+    double = _v2_table(tmp_path / "d.json", "double", lead=10, horizon=6)
+    monkeypatch.setitem(cli.CHIP_TABLE_FILES, 1, window)
+    monkeypatch.setitem(cli.CHIP_TABLE_FILES, 2, double)
+    return window, double
+
+
+def test_cli_chip_splits_match_the_estimator():
+    from fplopt.backtest.chip_values import DOUBLE_VALUES_FILE, SPLITS, WINDOW_VALUES_FILE
+
+    assert cli.CHIP_SPLITS == SPLITS
+    assert cli.CHIP_TABLE_FILES == {1: WINDOW_VALUES_FILE, 2: DOUBLE_VALUES_FILE}
+
+
+def test_cli_chip_policy_2_variant_specs_build(v2_tables):
+    """The spec's Variants V1-V6, verbatim (k* = 0.8 for V4-V6)."""
+    for k in (0.6, 0.8, 1.0):  # V1-V3
+        spec = f"optimizer:v1:{V_BASE},chip_shrink={k},chip_split=1,loso=1"
+        policy = cli.parse_policy_spec(spec).build()
+        assert policy.season_tables == {2019: {"3xc@1": (2.0 * k,)}}
+        assert policy.double_lead is None and policy.tc_rule is None
+        assert policy.params.exclude_chips == () and policy.params.fh_scale == 1.0
+    star = f"optimizer:v1:{V_BASE},chip_shrink=0.8"
+    v4 = cli.parse_policy_spec(f"{star},chip_split=1,loso=1,tc_rule=8.3").build()
+    v5 = cli.parse_policy_spec(f"{star},chip_split=2,loso=1").build()
+    v6 = cli.parse_policy_spec(f"{star},chip_split=1,loso=1,fh_scale=0.4").build()
+    assert all(p.season_tables is not None for p in (v4, v5, v6))
+    assert (v4.tc_rule, v4.params.exclude_chips, v4.double_lead) == (8.3, ("3xc",), None)
+    assert v5.double_lead == 10 and v5.tc_rule is None and v5.params.exclude_chips == ()
+    assert v5.season_tables[2019]["3xc@1+1"] == pytest.approx((1.6,))
+    assert v6.params.fh_scale == 0.4 and v6.double_lead is None and v6.tc_rule is None
+    assert len({p.name for p in (v4, v5, v6)}) == 3
+
+
+def test_cli_chip_split_without_loso_uses_the_files_full_table(v2_tables):
+    policy = cli.parse_policy_spec(f"optimizer:v1:{V_BASE},chip_shrink=0.5,chip_split=1").build()
+    assert policy.season_tables is None
+    assert policy.params.chip_value_left == {"3xc@1": (2.0,)}
+
+
+def test_cli_chip_policy_2_bad_specs(v2_tables):
+    for bad in (
+        "chip_split=1",
+        "loso=1",
+        "chip_split=3,chip_shrink=1",
+        "chip_split=-1,chip_shrink=1",
+    ):
+        with pytest.raises(argparse.ArgumentTypeError):
+            cli.parse_policy_spec(f"optimizer:v1:chips=1,{bad}")
+    with pytest.raises(argparse.ArgumentTypeError, match="tc_rule needs chips"):
+        cli.parse_policy_spec("optimizer:v1:tc_rule=8.3")
+    with pytest.raises(argparse.ArgumentTypeError, match="fh_scale"):
+        cli.parse_policy_spec(f"optimizer:v1:{V_BASE},fh_scale=2")
+    for name in ("chiprules", "chipgains"):  # the chip keys are the optimizer's only
+        for key in ("chip_split=1", "loso=1", "tc_rule=8.3", "fh_scale=0.4"):
+            with pytest.raises(argparse.ArgumentTypeError, match="has no parameter"):
+                cli.parse_policy_spec(f"{name}:v1:{key}")
+
+
+def test_cli_double_split_table_must_match_the_policys_lead(v2_tables, tmp_path, monkeypatch):
+    spec = f"optimizer:v1:{V_BASE},chip_shrink=0.8,chip_split=2,loso=1"
+    for name, extra in (("lead8", {"lead": 8, "horizon": 6}), ("nolead", {"horizon": 6})):
+        table = _v2_table(tmp_path / f"{name}.json", "double", **extra)
+        monkeypatch.setitem(cli.CHIP_TABLE_FILES, 2, table)
+        with pytest.raises(argparse.ArgumentTypeError, match="known-double lead"):
+            cli.parse_policy_spec(spec)
+    table = _v2_table(tmp_path / "h4.json", "double", lead=10, horizon=4)
+    monkeypatch.setitem(cli.CHIP_TABLE_FILES, 2, table)
+    with pytest.raises(argparse.ArgumentTypeError, match="horizon"):
+        cli.parse_policy_spec(spec)
+    monkeypatch.setitem(cli.CHIP_TABLE_FILES, 2, v2_tables[0])  # a window table
+    with pytest.raises(argparse.ArgumentTypeError, match="not a double-split table"):
+        cli.parse_policy_spec(spec)
+
+
+def test_cli_pooled_chip_shrink_is_unchanged(tmp_path, monkeypatch, v2_tables):
+    """`chip_shrink=k` alone: the pooled table, the same policy (and name) as before."""
+    from fplopt.backtest.chip_values import load_terminal_values
+
+    table = tmp_path / "terminal-values.json"
+    table.write_text(json.dumps({"values": {"bboost": [2.0, 4.0]}}), encoding="utf-8")
+    monkeypatch.setattr(cli, "CHIP_VALUES_FILE", table)
+    params = "horizon=6,decay=0.75,max_hits=1,hit_margin=2,chips=1,chip_shrink=0.5"
+    built = cli.parse_policy_spec(f"optimizer:v1:{params}").build()
+    explicit = cli.parse_policy_spec(f"optimizer:v1:{params},chip_split=0,loso=0").build()
+    chip_value_left = load_terminal_values(0.5, table)
+    expected = OptimizerPolicy(
+        "v1",
+        OptimizerParams(
+            horizon=6, decay=0.75, max_hits=1, hit_margin=2.0, chip_value_left=chip_value_left
+        ),
+        chips=True,
+    )
+    assert built == expected and built.name == expected.name
+    assert built.season_tables is None and built.double_lead is None and built.tc_rule is None
+    assert explicit == expected
+
+
+def test_cli_chips_values_loso(tmp_path):
+    run = tmp_path / "s0"
+    run.mkdir()
+    gws = pd.concat([gains_frame(season=2019), gains_frame(season=2020)])
+    gws.to_parquet(run / "gws.parquet", index=False)
+    out = tmp_path / "t.json"
+    settings = cli.Settings(raw_dir=tmp_path, **SETTINGS)
+    argv = ["chips", "values", "--gains", str(run), "--split", "window", "--loso"]
+    assert cli.main([*argv, "--out", str(out)], settings=settings) == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["format"] == 2 and payload["split"] == "window"
+    assert "lead" not in payload and "horizon" not in payload
+    assert set(payload["loso"]) == {"2019", "2020"} and "3xc@1" in payload["values"]
+    assert set(payload["values"]) == set(payload["loso"]["2019"])
+    # the default (--split pooled, no --loso) writes the old format
+    pooled = tmp_path / "p.json"
+    argv = ["chips", "values", "--gains", str(run), "--out", str(pooled)]
+    assert cli.main(argv, settings=settings) == 0
+    payload = json.loads(pooled.read_text(encoding="utf-8"))
+    assert "format" not in payload and "loso" not in payload and "3xc" in payload["values"]
+
+
+def test_cli_chips_values_double_writes_the_lead(tmp_path, monkeypatch):
+    from fplopt.backtest import chip_doubles
+
+    run = tmp_path / "s0"
+    run.mkdir()
+    gws = pd.concat([gains_frame(season=2019), gains_frame(season=2020)])
+    gws.to_parquet(run / "gws.parquet", index=False)
+    calls = []
+
+    def fake_doubles(store, seasons, lead):
+        calls.append((store, list(seasons), lead))
+        return {}
+
+    monkeypatch.setattr(cli, "open_data_store", lambda data_dir: ("store", data_dir))
+    monkeypatch.setattr(chip_doubles, "known_doubles_by_gw", fake_doubles)
+    out = tmp_path / "d.json"
+    settings = cli.Settings(raw_dir=tmp_path, data_dir=tmp_path / "data", **SETTINGS)
+    argv = ["chips", "values", "--gains", str(run), "--split", "double", "--loso"]
+    assert cli.main([*argv, "--out", str(out)], settings=settings) == 0
+    assert calls == [(("store", tmp_path / "data"), [2019, 2020], 10)]
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert (payload["split"], payload["lead"], payload["horizon"]) == ("double", 10, 6)
+    assert "3xc@1+1" in payload["values"] and "3xc@1+0" in payload["loso"]["2020"]
+    # the file it wrote builds V5
+    monkeypatch.setitem(cli.CHIP_TABLE_FILES, 2, out)
+    spec = f"optimizer:v1:{V_BASE},chip_shrink=0.8,chip_split=2,loso=1"
+    assert cli.parse_policy_spec(spec).build().double_lead == 10
+
+
+def test_backtest_config_logs_chip_policy_2_tables_by_hash(tmp_path, monkeypatch, v2_tables):
+    pooled = tmp_path / "terminal-values.json"
+    pooled.write_text(json.dumps({"source": "run", "values": {"bboost": [2.0]}}), encoding="utf-8")
+    monkeypatch.setattr(cli, "CHIP_VALUES_FILE", pooled)
+    star = f"optimizer:v1:{V_BASE},chip_shrink=0.8"
+    specs = [
+        cli.parse_policy_spec(f"{star},chip_split=1,loso=1"),
+        cli.parse_policy_spec(f"{star},chip_split=2,loso=1"),
+        cli.parse_policy_spec(star),
+        cli.parse_policy_spec("chiprules:v1:t_tc=8.3"),
+    ]
+    args = argparse.Namespace(
+        seasons=(2019,), starts="template@1", policy_specs=specs, jobs=1, family="f", command="run"
+    )
+    logged = cli._backtest_config(args, tmp_path / "out")["chip_values"]
+    assert set(logged) == {"0", "1", "2"}
+    assert logged["0"] == {"source": "run", "values": {"bboost": [2.0]}}
+    window, _ = v2_tables
+    assert logged["1"]["sha1"] == hashlib.sha1(window.read_bytes()).hexdigest()
+    assert logged["1"]["file"] == str(window) and logged["1"]["split"] == "window"
+    assert (logged["2"]["lead"], logged["2"]["horizon"]) == (10, 6)
+    assert "values" not in logged["1"] and "loso" not in logged["2"]
