@@ -5,6 +5,7 @@ pub mod experiments;
 pub mod heartbeat;
 pub mod http;
 pub mod nprng;
+pub mod numpy;
 pub mod pyjson;
 pub mod redact;
 pub mod seasons;

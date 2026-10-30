@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 fplopt-build = { version = "0.1.0", path = "../fplopt-build" }
+fplopt-core = { version = "0.1.0", path = "../fplopt-core" }
 fplopt-features = { version = "0.1.0", path = "../fplopt-features" }
 fplopt-highs = { version = "0.1.0", path = "../fplopt-highs" }
 fplopt-store = { version = "0.1.0", path = "../fplopt-store" }

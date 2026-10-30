@@ -51,7 +51,7 @@ pub struct PlanArgs {
     /// The GW to plan from (FPL GW number).
     #[arg(long)]
     pub gw: i64,
-    /// template (most-owned squad; default). random:SEED comes with the backtester (batch 7).
+    /// template (most-owned squad; default) or random:SEED (a seeded random squad).
     #[arg(long)]
     pub start: Option<String>,
     #[command(flatten)]

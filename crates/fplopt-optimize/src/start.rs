@@ -1,7 +1,7 @@
 //! Start states and deadline lookups for `optimize plan` (Python
 //! `fplopt.backtest.start_states.template_state` and what it needs; `cli.plan_gw_index`;
-//! `backtest.simulator.season_schedule`'s start deadline). `random_state` needs numpy's RNG
-//! and moves with the backtester (batch 7).
+//! `backtest.simulator.season_schedule`'s start deadline), and `random_state` (numpy's RNG,
+//! `fplopt_core::nprng`).
 //!
 //! `template_state`: the most-owned valid squad. Ownership = the newest player snapshot's
 //! `selected_by_percent` of the season, else each player's newest visible
@@ -10,12 +10,19 @@
 //! money left can still fill the remaining slots with the cheapest eligible players. The
 //! state: purchase price = price, bank = budget − cost, 1 free transfer (0 at gw_index 1), no
 //! chips used.
+//!
+//! `random_state`: a seeded random valid squad. Slots are visited in random order and each is
+//! filled with a feasible player drawn with probability ∝ price, feasible meaning also that
+//! the dearest fill of the remaining slots leaves at most `max_bank` (£2m). A dead end is
+//! redrawn, up to `ATTEMPTS` times. `np.random.default_rng(seed)`, draw for draw.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use anyhow::{Result, bail};
 use fplopt_build::scoring::Rules;
+use fplopt_core::nprng::Generator;
+use fplopt_core::numpy::np_sum;
 use fplopt_features::baseline::{player_pool, pool_coverage};
 use fplopt_store::{AsOfView, DataStore, Micros, Table};
 
@@ -372,6 +379,58 @@ pub fn template_state(view: &AsOfView, rules: &Rules) -> Result<SquadState> {
     }
     let (season, _, gw_index) = target_gameweek(view)?;
     builder.state(season, gw_index)
+}
+
+/// random_state redraws after a dead end.
+pub const ATTEMPTS: usize = 20;
+/// random_state: at most £2m left in the bank.
+pub const MAX_BANK: i64 = 20;
+
+/// A seeded random valid squad at the view's deadline, players drawn ∝ price, leaving at
+/// most `max_bank` in the bank (module docs).
+pub fn random_state(
+    view: &AsOfView,
+    rules: &Rules,
+    seed: u64,
+    max_bank: Option<i64>,
+) -> Result<SquadState> {
+    check_coverage(view)?;
+    let players = pool_players(&player_pool(view)?)?;
+    let mut rng = Generator::new(u128::from(seed));
+    let mut builder = Builder::new(players.clone(), rules);
+    for _ in 0..ATTEMPTS {
+        builder = Builder::new(players.clone(), rules);
+        let slots: Vec<i64> = builder
+            .slots
+            .iter()
+            .flat_map(|(&et, &n)| std::iter::repeat_n(et, n as usize))
+            .collect();
+        for k in rng.permutation(slots.len()) {
+            let et = slots[k];
+            let candidates: Vec<usize> = (0..builder.players.len())
+                .filter(|&i| builder.players[i].element_type == et && builder.feasible(i, max_bank))
+                .collect();
+            if candidates.is_empty() {
+                break;
+            }
+            let mut weights: Vec<f64> = candidates
+                .iter()
+                .map(|&i| builder.players[i].price as f64)
+                .map(|w| if w > 0.0 { w } else { 0.0 })
+                .collect();
+            if np_sum(&weights) <= 0.0 {
+                weights = vec![1.0; candidates.len()];
+            }
+            let total = np_sum(&weights);
+            let p: Vec<f64> = weights.iter().map(|w| w / total).collect();
+            builder.add(candidates[rng.choice_weighted(&p)]);
+        }
+        if builder.full() {
+            let (season, _, gw_index) = target_gameweek(view)?;
+            return builder.state(season, gw_index);
+        }
+    }
+    Err(builder.no_squad(view.deadline()))
 }
 
 /// The gw_index of GW `gw` of `season` (the first visible row), or None if the data has no

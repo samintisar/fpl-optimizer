@@ -1,7 +1,7 @@
 //! `optimize plan` and `optimize squad` (Python `cli._optimize_plan`, `_optimize_squad`,
 //! `_real_squad`, `plan_text`, `lineup_text`; the checks of `main`). By design the xP frame
-//! comes from `--xp-file` (the models are ported in batch 6) and `--xp` only labels it;
-//! `--start random:SEED` comes with the backtester (batch 7). Usage errors (bad flags, a bad
+//! comes from `--xp-file` (the models are ported in batch 6) and `--xp` only labels it.
+//! Usage errors (bad flags, a bad
 //! team ID, squad file or squad: `EntryError`) print `error: ...` and exit 2; other failures
 //! exit 1. The printed text matches Python's.
 
@@ -26,7 +26,8 @@ use fplopt_optimize::entry::{
 };
 use fplopt_optimize::plans::{GwPlan, PlanSet};
 use fplopt_optimize::start::{
-    plan_gw_index, pool_players, season_gw_index, start_deadline, template_state,
+    MAX_BANK, plan_gw_index, pool_players, random_state, season_gw_index, start_deadline,
+    template_state,
 };
 use fplopt_optimize::state::SquadState;
 use fplopt_optimize::{OptimizerParams, PlanInput, Search, XpFrame, optimize};
@@ -233,17 +234,17 @@ fn open_store(season: i64, gw: i64) -> Result<(DataStore, i64)> {
 
 fn run_plan(args: &PlanArgs) -> Result<()> {
     let season = parse_season(&args.season)?;
+    let mut seed: Option<u64> = None;
     if let Some(start) = &args.start {
         let random = start
             .strip_prefix("random:")
-            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
-        if random {
-            return usage(format!(
-                "--start {start}: random starts come with the backtester port (migration batch \
-                 7); use template, --entry or --squad-file"
-            ));
-        }
-        if start != "template" {
+            .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+        if let Some(digits) = random {
+            match digits.parse() {
+                Ok(s) => seed = Some(s),
+                Err(_) => return usage(format!("--start {start}: seed out of range")),
+            }
+        } else if start != "template" {
             return usage(format!(
                 "argument --start: --start: expected template or random:SEED, got '{start}'"
             ));
@@ -281,6 +282,9 @@ fn run_plan(args: &PlanArgs) -> Result<()> {
             None => "squad-file".to_owned(),
         };
         (real.state, start, real.spec.notes)
+    } else if let Some(seed) = seed {
+        let state = random_state(&view, &rules, seed, Some(MAX_BANK))?;
+        (state, args.start.clone().unwrap_or_default(), Vec::new())
     } else {
         (template_state(&view, &rules)?, "template".to_owned(), Vec::new())
     };

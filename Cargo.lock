@@ -1031,6 +1031,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fplopt-backtest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fplopt-build",
+ "fplopt-core",
+ "fplopt-features",
+ "fplopt-models",
+ "fplopt-optimize",
+ "fplopt-store",
+ "log",
+ "serde_json",
+ "sha1",
+]
+
+[[package]]
 name = "fplopt-bot"
 version = "0.1.0"
 dependencies = [
@@ -1162,6 +1178,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fplopt-build",
+ "fplopt-core",
  "fplopt-features",
  "fplopt-highs",
  "fplopt-store",
