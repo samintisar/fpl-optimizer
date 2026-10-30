@@ -15,7 +15,9 @@ env_logger = "0.11.11"
 fplopt-archive = { version = "0.1.0", path = "../fplopt-archive" }
 fplopt-build = { version = "0.1.0", path = "../fplopt-build" }
 fplopt-core = { version = "0.1.0", path = "../fplopt-core" }
+fplopt-features = { version = "0.1.0", path = "../fplopt-features" }
 fplopt-parity = { version = "0.1.0", path = "../fplopt-parity" }
+fplopt-store = { version = "0.1.0", path = "../fplopt-store" }
 gethostname = "1"
 log = "0.4.34"
 serde_json = "1.0.154"

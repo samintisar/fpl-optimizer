@@ -1,7 +1,8 @@
 //! `fplopt-rs`: the Rust port's CLI. Subcommands and flags match the Python `fplopt` CLI
 //! so a migrated job only swaps the binary name (migration plan §2). Each batch adds the
 //! commands it ports: batch 0 the parity check, batch 1 the archiver (`snapshot`,
-//! `backfill`, `check freshness`), batch 2 the build (`build`, `rules export`).
+//! `backfill`, `check freshness`), batch 2 the build (`build`, `rules export`), batch 3 the
+//! as-of store and features (`check leakage`, and `features dump` for the parity gate).
 //!
 //! Archiver jobs run like Python's: a failure is logged and alerted to Telegram (exit 1);
 //! SIGTERM stops a long run cleanly, after its manifest is written (exit 143, no alert); a
@@ -73,6 +74,24 @@ enum Command {
         #[command(subcommand)]
         check: Check,
     },
+    /// Feature frames at given deadlines (the batch 3 parity gate; not in the Python CLI).
+    Features {
+        #[command(subcommand)]
+        command: FeaturesJob,
+    },
+}
+
+#[derive(Subcommand)]
+enum FeaturesJob {
+    /// Write every feature frame and the history frames at each deadline to
+    /// <out>/<NN>/<frame>.parquet (NN: the deadline's line number in the file, from 00).
+    Dump {
+        /// A file with one ISO 8601 deadline per line.
+        #[arg(long)]
+        deadlines: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -103,6 +122,15 @@ enum Check {
         /// Fail if the newest bootstrap snapshot is older than this.
         #[arg(long, default_value_t = health::DEFAULT_MAX_AGE_HOURS, value_name = "H")]
         max_age_hours: f64,
+    },
+    /// Corrupt-the-future check of every feature and the history frames on data/ (the
+    /// feature part of Python's `check leakage`; models and probes are ported later).
+    Leakage {
+        /// Sampled deadlines on top of the edge list.
+        #[arg(long, default_value_t = fplopt_features::leakcheck::DEFAULT_DEADLINES)]
+        deadlines: usize,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
     },
     /// Compare Python and Rust outputs (the migration's parity gate).
     Parity {
@@ -193,6 +221,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 health::check_freshness(&ctx.store, Utc::now(), max_age).map(drop)
             }))
         }
+        Command::Check { check: Check::Leakage { deadlines, seed } } => {
+            Ok(run_job("check leakage", |ctx| {
+                check_leakage(&ctx.settings.data_dir, deadlines, seed)
+            }))
+        }
+        Command::Features { command: FeaturesJob::Dump { deadlines, out } } => {
+            Ok(run_job("features dump", |ctx| {
+                features_dump(&ctx.settings.data_dir, &deadlines, &out)
+            }))
+        }
         Command::Check { check: Check::Parity { area } } => match area {
             Parity::Table { python, rust, keys, rtol, atol, out, experiments } => {
                 parity_table(&python, &rust, &keys, Tolerance { rtol, atol }, out, &experiments)
@@ -200,6 +238,94 @@ fn run(cli: Cli) -> Result<ExitCode> {
         },
     }
 }
+
+/// An ISO 8601 instant with an offset as µs since the epoch (UTC).
+fn parse_deadline(text: &str) -> Result<i64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(text.trim())
+        .map_err(|e| anyhow::anyhow!("bad deadline {text:?}: {e}"))?;
+    Ok(parsed.timestamp_micros())
+}
+
+fn features_dump(data_dir: &Path, deadlines: &Path, out: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(deadlines)?;
+    let deadlines: Vec<i64> =
+        text.lines().filter(|l| !l.trim().is_empty()).map(parse_deadline).collect::<Result<_>>()?;
+    let store = fplopt_store::DataStore::open(data_dir)?;
+    for (i, &deadline) in deadlines.iter().enumerate() {
+        let dir = out.join(format!("{i:02}"));
+        std::fs::create_dir_all(&dir)?;
+        let view = store.as_of(deadline);
+        for (name, builder) in fplopt_features::FRAMES {
+            let started = std::time::Instant::now();
+            let frame = builder(&view)
+                .map_err(|e| e.context(format!("{name} at {}", fmt_micros(deadline))))?;
+            fplopt_build::table::write_parquet(&frame, &dir.join(format!("{name}.parquet")))?;
+            log::debug!(
+                "{name}: {} rows, {:.2} s",
+                frame.height(),
+                started.elapsed().as_secs_f64()
+            );
+        }
+        log::info!("features at {}: written", fmt_micros(deadline));
+    }
+    Ok(())
+}
+
+/// `check leakage`: every feature and the history frames at the edge deadlines plus
+/// `n_deadlines` sampled ones; fails listing the leaks.
+fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
+    use fplopt_features::leakcheck::{FEATURE_TABLES, check_leakage, sample_deadlines};
+    let started = std::time::Instant::now();
+    let tables = fplopt_store::load_tables(data_dir, FEATURE_TABLES)?;
+    let holdout: Vec<i64> =
+        fplopt_core::seasons::HOLDOUT_SEASONS.iter().map(|&s| i64::from(s)).collect();
+    let deadlines = sample_deadlines(&tables, n_deadlines, seed, &holdout)?;
+    let (Some(&first), Some(&last)) = (deadlines.first(), deadlines.last()) else {
+        // Checking nothing must not read as a pass.
+        anyhow::bail!("no eligible deadlines: the leakage check was not performed");
+    };
+    let builders = fplopt_features::FRAMES;
+    log::info!(
+        "leakage check: {} deadline(s) from {} to {}, {} frame(s), seed {seed}",
+        deadlines.len(),
+        fmt_micros(first),
+        fmt_micros(last),
+        builders.len()
+    );
+    let leaks = check_leakage(tables, &deadlines, seed, builders)?;
+    if let Some(leak) = leaks.first() {
+        for leak in &leaks {
+            log::error!(
+                "leak: {} @ {} ({}): {}",
+                leak.feature,
+                fmt_micros(leak.deadline),
+                leak.variant,
+                leak.detail
+            );
+        }
+        let features: std::collections::BTreeSet<_> = leaks.iter().map(|l| &l.feature).collect();
+        let at: std::collections::BTreeSet<_> = leaks.iter().map(|l| l.deadline).collect();
+        anyhow::bail!(
+            "{} leak(s) in {} builder(s) at {} deadline(s); first: {} @ {} ({}): {}",
+            leaks.len(),
+            features.len(),
+            at.len(),
+            leak.feature,
+            fmt_micros(leak.deadline),
+            leak.variant,
+            leak.detail
+        );
+    }
+    log::info!(
+        "leakage check passed: {} deadline(s) x {} frame(s) x 2 variants in {:.0} s",
+        deadlines.len(),
+        builders.len(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+use fplopt_features::leakcheck::fmt_micros;
 
 fn value_name(value: impl ValueEnum) -> String {
     value.to_possible_value().map(|v| v.get_name().to_owned()).unwrap_or_default()

@@ -135,6 +135,17 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
 `features/store` (`DataStore::as_of`, the `available_at < deadline` filter), `features/baseline`, `features/history`, the feature part of `features/leakcheck`.
 
 - **Gate:** every feature frame identical at the leakcheck edge list plus 10 fixed random deadlines; `check leakage` (features only) passes in Rust.
+- *As built:* two crates.
+  - `crates/fplopt-store`: `DataStore` (Parquet or in-memory tables, loaded lazily column by column and kept in `available_at` order) and `AsOfView` (`table`, `latest`, `lookup`, `schedule`, `gameweek_for_deadline`, `earlier`), `files_blocked`, `load_tables`. The `TABLES` registry is ported into `fplopt-build` (`tables.rs`), next to the `Table` type both crates use.
+  - `crates/fplopt-features`, which depends on `fplopt-store` only: the seven `FEATURES`, the minutes model's `history.training_frame` / `prediction_frame` and `bans`, and the leakage check.
+  - Python's row orders are kept wherever an order decides a value (first or last of duplicates, ties, `merge_asof` picks). Grouped float sums use pandas' Kahan summation, and day fractions use its nanosecond timedeltas.
+  - `check leakage` covers the features and the history frames; models and probes join it in batches 4–7. Its corruption uses this port's own RNG (a seeded xoshiro256**), not numpy's: the edge deadlines are Python's, the sampled ones differ.
+  - `fplopt-rs features dump` (not in the Python CLI) writes the frames for the gate.
+- *Gate (2026-10-30):* `dev/features_parity.py` on the local `data/` (built 2026-10-29).
+  - All 234 frames are identical: 9 frames (7 features, 2 history frames) at 26 deadlines, the 16 edge deadlines plus 10 sampled ones from 2016/17 GW1 to 2026/27 GW10. Each frame was diffed on its key, and its row order was checked too.
+  - Python takes 80 s and Rust 33 s for all of them.
+  - `fplopt-rs check leakage` passes: 28 deadlines (16 edge, 12 sampled) × 9 frames × 2 variants, no leaks, 17 min (about 35 s per deadline: two corrupted copies of 13 tables in memory).
+- *Still open:* the Python feature tests are covered by the real-data gate rather than translated one by one. The Rust unit tests cover the store's visibility rules, the ban rules and the leakage harness (it must catch a stateful and a failing builder).
 
 ### Batch 4 — Optimizer (~3 weeks)
 

@@ -1057,7 +1057,9 @@ dependencies = [
  "fplopt-archive",
  "fplopt-build",
  "fplopt-core",
+ "fplopt-features",
  "fplopt-parity",
+ "fplopt-store",
  "gethostname",
  "log",
  "serde_json",
@@ -1080,6 +1082,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fplopt-features"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fplopt-store",
+ "log",
+]
+
+[[package]]
 name = "fplopt-parity"
 version = "0.1.0"
 dependencies = [
@@ -1088,6 +1099,15 @@ dependencies = [
  "polars",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "fplopt-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fplopt-build",
  "tempfile",
 ]
 

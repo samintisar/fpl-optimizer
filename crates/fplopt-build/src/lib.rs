@@ -20,6 +20,7 @@ pub mod rules;
 pub mod scoring;
 pub mod snapshots;
 pub mod table;
+pub mod tables;
 pub mod teams;
 pub mod understat;
 

@@ -602,3 +602,22 @@ uv run python dev/name_golden.py --data data
 
 `build_parity.py` logs a row to `results/experiments.csv` (family `rust parity`) and exits 1
 on any difference.
+
+## `features_parity.py`: Rust migration batch 3 gate
+
+`features_parity.py` computes every registered feature (`fplopt.features.FEATURES`) and the
+minutes model's history frames (`history.training_frame`, `history.prediction_frame`) with
+Python's `DataStore`, at the leakage check's edge deadlines plus 10 sampled ones
+(`sample_deadlines`, seed 0). It then runs `fplopt-rs features dump` on the same deadlines and
+compares each pair of frames with `fplopt-rs check parity table` on the frame's key, plus the
+row order. On 2026-10-30 (local `data/`): 234/234 frames identical at 26 deadlines, Python
+80 s, Rust 33 s.
+
+```sh
+cargo build --release -p fplopt-cli
+uv run python dev/features_parity.py [--data data] [--n-random 10] [--keep DIR]
+```
+
+The second half of the gate is `fplopt-rs check leakage`, the corrupt-the-future check of the
+same frames in Rust (2026-10-30: 28 deadlines, no leaks, 17 min). `features_parity.py` logs a row to `results/experiments.csv` (family
+`rust parity`) and exits 1 on any difference.

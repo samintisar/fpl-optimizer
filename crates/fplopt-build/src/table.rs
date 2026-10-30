@@ -49,6 +49,31 @@ impl Column {
         self.len() == 0
     }
 
+    /// The nullable variant's values as the non-null variant when no value is null, so code
+    /// reading a slice sees the same type whether the whole column holds nulls or not.
+    pub fn normalized(self) -> Column {
+        fn all<T>(v: Vec<Option<T>>) -> Result<Vec<T>, Vec<Option<T>>> {
+            if v.iter().all(Option::is_some) {
+                Ok(v.into_iter().map(Option::unwrap).collect())
+            } else {
+                Err(v)
+            }
+        }
+        match self {
+            Column::OptI64(v) => all(v).map_or_else(Column::OptI64, Column::I64),
+            Column::OptF64(v) => all(v).map_or_else(Column::OptF64, Column::F64),
+            Column::OptStr(v) => all(v).map_or_else(Column::OptStr, Column::Str),
+            Column::OptBool(v) => all(v).map_or_else(Column::OptBool, Column::Bool),
+            Column::OptTs(v) => all(v).map_or_else(Column::OptTs, Column::Ts),
+            other => other,
+        }
+    }
+
+    /// The pandas dtype name of the variant (error messages).
+    pub fn kind(&self) -> &'static str {
+        kind(self)
+    }
+
     fn to_series(&self, name: &str) -> Series {
         let name: PlSmallStr = name.into();
         match self {
@@ -73,7 +98,7 @@ impl Column {
     }
 
     /// The rows at `order`, in that order.
-    fn take(&self, order: &[usize]) -> Column {
+    pub fn take(&self, order: &[usize]) -> Column {
         fn pick<T: Clone>(v: &[T], order: &[usize]) -> Vec<T> {
             order.iter().map(|&i| v[i].clone()).collect()
         }
@@ -432,4 +457,17 @@ pub fn read_parquet(path: &Path, columns: Option<&[&str]>) -> Result<Table> {
     }
     let df = anyhow::Context::with_context(reader.finish(), || format!("read {}", path.display()))?;
     Table::from_dataframe(&df)
+}
+
+/// The column names of a Parquet file, without pandas' index columns.
+pub fn parquet_columns(path: &Path) -> Result<Vec<String>> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let schema = anyhow::Context::with_context(ParquetReader::new(file).schema(), || {
+        format!("read the schema of {}", path.display())
+    })?;
+    Ok(schema
+        .iter_names()
+        .map(|name| name.to_string())
+        .filter(|name| !name.starts_with("__index_level_"))
+        .collect())
 }
