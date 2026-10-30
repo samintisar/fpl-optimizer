@@ -9,6 +9,7 @@
 //! SIGTERM stops a long run cleanly, after its manifest is written (exit 143, no alert); a
 //! successful `snapshot daily|tick` pings HEALTHCHECK_PING_URL if set.
 
+mod backtest;
 mod bot;
 mod live;
 mod models;
@@ -90,6 +91,11 @@ enum Command {
     Models {
         #[command(subcommand)]
         command: models::ModelsJob,
+    },
+    /// Season replays and paired policy comparisons.
+    Backtest {
+        #[command(subcommand)]
+        command: backtest::BacktestJob,
     },
     /// The MILP planner.
     Optimize {
@@ -267,6 +273,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 models::dump(&ctx.settings.data_dir, &models, &deadlines, &out)
             }))
         }
+        Command::Backtest { command } => backtest::run(&command),
         Command::Optimize { command } => match command {
             optimize::OptimizeJob::Solve { case, out } => {
                 optimize::solve(&case, &out)?;

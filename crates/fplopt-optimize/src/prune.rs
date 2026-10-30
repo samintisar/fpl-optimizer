@@ -10,18 +10,38 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use anyhow::{Result, bail};
 use fplopt_build::scoring::Rules;
 
-/// Σ_t decay**horizons[t] · xp[t] per row (summed in horizon order).
+/// Σ_t decay**horizons[t] · xp[t] per row, as Python's `xp @ weights` rounds it.
 pub fn horizon_xp(xp: &[Vec<f64>], horizons: &[i64], decay: f64) -> Vec<f64> {
     let weights: Vec<f64> = horizons.iter().map(|&h| decay.powf(h as f64)).collect();
-    xp.iter()
-        .map(|row| {
-            let mut total = 0.0;
-            for (x, w) in row.iter().zip(&weights) {
-                total += x * w;
+    xp.iter().map(|row| blas_dot(row, &weights)).collect()
+}
+
+/// A row of numpy's matrix-vector product as OpenBLAS's x86_64 `dgemv_t` kernel computes it
+/// (numpy's wheels; Haswell and later): 4-lane FMA accumulators over the first `m & !3` terms
+/// reduced as (l0 + l2) + (l1 + l3), then the 1-3 remaining terms (FMA-contracted C). Last
+/// bits matter: candidates are cut at top-N on these values and exact ties (flat ep_next
+/// projections) break by them. Matches numpy on every horizon length 1-6.
+pub fn blas_dot(row: &[f64], w: &[f64]) -> f64 {
+    let m = row.len().min(w.len());
+    let m1 = m & !3;
+    let mut sum = 0.0;
+    if m1 > 0 {
+        let mut lanes = [0.0f64; 4];
+        for i in (0..m1).step_by(4) {
+            for (k, lane) in lanes.iter_mut().enumerate() {
+                *lane = row[i + k].mul_add(w[i + k], *lane);
             }
-            total
-        })
-        .collect()
+        }
+        sum = (lanes[0] + lanes[2]) + (lanes[1] + lanes[3]);
+    }
+    let p = |k: usize| row[m1 + k] * w[m1 + k];
+    let a = |k: usize| (row[m1 + k], w[m1 + k]);
+    match m - m1 {
+        0 => sum,
+        1 => a(0).0.mul_add(a(0).1, sum),
+        2 => sum + a(0).0.mul_add(a(0).1, p(1)),
+        _ => sum + a(2).0.mul_add(a(2).1, a(0).0.mul_add(a(0).1, p(1))),
+    }
 }
 
 /// The n entries of `idx` with the highest score (ties: smaller key first).

@@ -14,6 +14,7 @@ fplopt-features = { version = "0.1.0", path = "../fplopt-features" }
 fplopt-models = { version = "0.1.0", path = "../fplopt-models" }
 fplopt-optimize = { version = "0.1.0", path = "../fplopt-optimize" }
 fplopt-store = { version = "0.1.0", path = "../fplopt-store" }
+libm = "0.2.16"
 log = "0.4.34"
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 sha1 = "0.10.7"

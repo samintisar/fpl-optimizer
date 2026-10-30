@@ -23,7 +23,7 @@ pub const OUTCOME_DELAY: Micros = 1;
 /// N = 0..POISSON_CAP in the Poisson sums (the tail is below 1e-15 for any match xG).
 pub const POISSON_CAP: usize = 40;
 
-pub const MATCH_COLUMNS: [&str; 25] = [
+pub const MATCH_COLUMNS: [&str; 26] = [
     "player_key",
     "season",
     "gw",
@@ -49,6 +49,7 @@ pub const MATCH_COLUMNS: [&str; 25] = [
     "us_xa",
     "fpl_xg",
     "fpl_xa",
+    "starts",
 ];
 const TEAM_COLUMNS: [&str; 6] = ["fixture_key", "team_key", "season", "us_xg", "fpl_xg", "fd_xg"];
 
@@ -76,6 +77,8 @@ pub struct MatchRow {
     pub line: StatLine,
     pub us: (Option<f64>, Option<f64>),
     pub fpl: (Option<f64>, Option<f64>),
+    /// Null where the source has no starts (before 2022/23 GW16).
+    pub starts: Option<i64>,
 }
 
 /// The `player_match` rows of (season, gw) visible in `view` with the player's
@@ -126,6 +129,7 @@ pub fn gw_matches(view: &AsOfView, season: i64, gw: i64) -> Result<Vec<MatchRow>
         stat("tackles")?,
         stat("recoveries")?,
     );
+    let starts = stat("starts")?;
     let (us_xg, us_xa, fpl_xg, fpl_xa) =
         (floats("us_xg")?, floats("us_xa")?, floats("fpl_xg")?, floats("fpl_xa")?);
     let mut out = Vec::with_capacity(rows.len());
@@ -168,6 +172,7 @@ pub fn gw_matches(view: &AsOfView, season: i64, gw: i64) -> Result<Vec<MatchRow>
             line,
             us: (us_xg[i], us_xa[i]),
             fpl: (fpl_xg[i], fpl_xa[i]),
+            starts: starts[i],
         });
     }
     if unknown > 0 {

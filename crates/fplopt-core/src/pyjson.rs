@@ -150,6 +150,70 @@ impl<'de> Deserialize<'de> for Ordered {
     }
 }
 
+/// `json.dumps(value, indent=indent)` of an `Ordered` value (non-finite floats as null,
+/// as the callers' `allow_nan=False` payloads hold none).
+pub fn dumps_indent(value: &Ordered, indent: usize) -> Result<String> {
+    fn write(v: &Ordered, indent: usize, depth: usize, out: &mut String) -> Result<()> {
+        let pad = |d: usize| " ".repeat(indent * d);
+        match v {
+            Ordered::Array(items) if !items.is_empty() => {
+                out.push_str("[\n");
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(",\n");
+                    }
+                    out.push_str(&pad(depth + 1));
+                    write(item, indent, depth + 1, out)?;
+                }
+                out.push('\n');
+                out.push_str(&pad(depth));
+                out.push(']');
+            }
+            Ordered::Object(pairs) if !pairs.is_empty() => {
+                out.push_str("{\n");
+                for (i, (k, item)) in pairs.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(",\n");
+                    }
+                    out.push_str(&pad(depth + 1));
+                    out.push_str(&dumps(k)?);
+                    out.push_str(": ");
+                    write(item, indent, depth + 1, out)?;
+                }
+                out.push('\n');
+                out.push_str(&pad(depth));
+                out.push('}');
+            }
+            Ordered::Float(f) if !f.is_finite() => out.push_str("null"),
+            other => out.push_str(&dumps(other)?),
+        }
+        Ok(())
+    }
+    let mut out = String::new();
+    write(value, indent, 0, &mut out)?;
+    Ok(out)
+}
+
+impl Ordered {
+    /// As a `serde_json::Value` (objects then sort their keys).
+    pub fn to_value(&self) -> serde_json::Value {
+        use serde_json::Value;
+        match self {
+            Ordered::Null => Value::Null,
+            Ordered::Bool(b) => Value::Bool(*b),
+            Ordered::Int(i) => serde_json::json!(*i as i64),
+            Ordered::Float(f) => {
+                serde_json::Number::from_f64(*f).map_or(Value::Null, Value::Number)
+            }
+            Ordered::Str(s) => Value::String(s.clone()),
+            Ordered::Array(items) => Value::Array(items.iter().map(Ordered::to_value).collect()),
+            Ordered::Object(pairs) => {
+                Value::Object(pairs.iter().map(|(k, v)| (k.clone(), v.to_value())).collect())
+            }
+        }
+    }
+}
+
 struct PythonFormatter;
 
 impl Formatter for PythonFormatter {

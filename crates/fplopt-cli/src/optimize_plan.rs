@@ -43,7 +43,7 @@ const EP_NEXT_MODELS: [&str; 2] = ["ep_next", "ep_next_fade"];
 
 /// A usage error (Python's `parser.error`): exit 2.
 #[derive(Debug)]
-struct Usage(String);
+pub(crate) struct Usage(pub String);
 
 impl fmt::Display for Usage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -53,12 +53,12 @@ impl fmt::Display for Usage {
 
 impl std::error::Error for Usage {}
 
-fn usage<T>(message: impl Into<String>) -> Result<T> {
+pub(crate) fn usage<T>(message: impl Into<String>) -> Result<T> {
     Err(Usage(message.into()).into())
 }
 
 /// Usage and squad errors -> exit 2 (no alert), anything else -> exit 1.
-fn exit_code(result: Result<()>) -> ExitCode {
+pub(crate) fn exit_code(result: Result<()>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -86,13 +86,14 @@ pub fn squad(args: &SquadArgs) -> Result<ExitCode> {
 
 // --- arguments ------------------------------------------------------------------------------
 
-/// Python's `parse_seasons` (YYYY, YYYY-YYYY, YYYY-YY or a comma list), then one season only.
-fn parse_season(text: &str) -> Result<i64> {
+/// Python's `parse_seasons` (YYYY, YYYY-YYYY, YYYY-YY or a comma list): sorted start years;
+/// usage errors name `arg`.
+pub fn parse_seasons(text: &str, arg: &str) -> Result<Vec<i64>> {
     let mut seasons = BTreeSet::new();
     for item in text.split(',').map(str::trim) {
         let bad = || {
             usage(format!(
-                "argument --season: bad season '{item}': expected YYYY, YYYY-YYYY (a range) or \
+                "argument {arg}: bad season '{item}': expected YYYY, YYYY-YYYY (a range) or \
                  YYYY-YY (a label)"
             ))
         };
@@ -112,7 +113,7 @@ fn parse_season(text: &str) -> Result<i64> {
             Some(t) if digits(t, 2) => {
                 if (first + 1) % 100 != t.parse::<i64>()? {
                     return usage(format!(
-                        "argument --season: not a season label like 2026-27: '{item}'"
+                        "argument {arg}: not a season label like 2026-27: '{item}'"
                     ));
                 }
                 seasons.insert(first);
@@ -121,7 +122,7 @@ fn parse_season(text: &str) -> Result<i64> {
                 let last: i64 = t.parse()?;
                 if last < first {
                     return usage(format!(
-                        "argument --season: bad season range '{item}': end before start"
+                        "argument {arg}: bad season range '{item}': end before start"
                     ));
                 }
                 seasons.extend(first..=last);
@@ -134,7 +135,7 @@ fn parse_season(text: &str) -> Result<i64> {
         seasons.iter().filter(|s| !BACKTEST_SEASONS.contains(s)).map(label).collect();
     if !outside.is_empty() {
         return usage(format!(
-            "argument --season: no backtest data for {} (seasons {} to {})",
+            "argument {arg}: no backtest data for {} (seasons {} to {})",
             outside.join(", "),
             label(BACKTEST_SEASONS.start()),
             label(BACKTEST_SEASONS.end())
@@ -147,15 +148,21 @@ fn parse_season(text: &str) -> Result<i64> {
         .collect();
     if !holdout.is_empty() {
         return usage(format!(
-            "argument --season: {} is the holdout season: backtests refuse it until Phase 6 \
+            "argument {arg}: {} is the holdout season: backtests refuse it until Phase 6 \
              (e.g. use 2016-2024,2026)",
             holdout.join(", ")
         ));
     }
+    Ok(seasons.into_iter().collect())
+}
+
+/// `parse_seasons`, then one season only.
+fn parse_season(text: &str) -> Result<i64> {
+    let seasons = parse_seasons(text, "--season")?;
     if seasons.len() != 1 {
         return usage("--season: give one season");
     }
-    Ok(*seasons.first().unwrap())
+    Ok(seasons[0])
 }
 
 /// `max_hits`: an int >= 0, or `none`/`inf` for unlimited (Python `parse_max_hits`).

@@ -208,11 +208,19 @@ pub struct Step {
     pub decision: Decision,
 }
 
+/// Who decides a GW: a policy, or a decision already made for it (a per-decision arm's
+/// first GW, decided from the same state at the same deadline).
+#[derive(Clone, Copy)]
+pub enum Decider<'a> {
+    Policy(&'a Policy),
+    Decided(&'a Decision),
+}
+
 /// Decide one GW: only the deadline view is read.
 pub fn decide_step(
     store: &DataStore,
     rules: &Rules,
-    policy: &Policy,
+    decider: Decider,
     state: &SquadState,
     deadline: Micros,
     caches: &Caches,
@@ -220,6 +228,12 @@ pub fn decide_step(
     let view = store.as_of(deadline);
     let pool = caches.pool(&view)?;
     let state = refresh(state, &pool);
+    let policy = match decider {
+        Decider::Decided(decision) => {
+            return Ok(Step { state, pool, decision: decision.clone() });
+        }
+        Decider::Policy(policy) => policy,
+    };
     let xp = caches.xp(policy.xp_model(), &view)?;
     let ctx = DecisionContext {
         view: &view,
@@ -413,7 +427,7 @@ pub type Played = (Vec<GwRow>, Vec<Decision>, Vec<SquadState>, SquadState, Optio
 pub fn run_gameweeks<'p>(
     store: &DataStore,
     rules: &Rules,
-    policy_for: impl Fn(usize) -> &'p Policy,
+    policy_for: impl Fn(usize) -> Decider<'p>,
     start: &SquadState,
     schedule: &[Gameweek],
     caches: &Caches,
@@ -473,7 +487,7 @@ pub fn simulate(
         schedule.retain(|g| g.gw_index <= end);
     }
     let (mut rows, decisions, states, final_state, pending) =
-        run_gameweeks(store, rules, |_| policy, start, &schedule, caches)?;
+        run_gameweeks(store, rules, |_| Decider::Policy(policy), start, &schedule, caches)?;
     let gains = transfer_gains(
         store,
         rules,
