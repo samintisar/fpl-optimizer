@@ -134,8 +134,16 @@ def test_a_wildcard_is_attributed_its_gw_and_the_next_five():
     run = gws(chips={2: "wildcard", 4: "3xc"})
     got = list(cd.attribute_chips(run))
     assert got == [
-        "none", "wildcard", "wildcard", "3xc", "wildcard", "wildcard", "wildcard",
-        "none", "none", "none",
+        "none",
+        "wildcard",
+        "wildcard",
+        "3xc",
+        "wildcard",
+        "wildcard",
+        "wildcard",
+        "none",
+        "none",
+        "none",
     ]
 
 
@@ -248,8 +256,12 @@ def gap_by_chip(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
     total = len(m)
     table = (
         m.groupby(["chip_a", "chip_b"])
-        .agg(n=("diff", "size"), mean_diff=("diff", "mean"), mean_diff_xg=("diff_xg", "mean"),
-             sum_diff=("diff", "sum"))
+        .agg(
+            n=("diff", "size"),
+            mean_diff=("diff", "mean"),
+            mean_diff_xg=("diff_xg", "mean"),
+            sum_diff=("diff", "sum"),
+        )
         .reset_index()
     )
     table["contribution_per_gw"] = table["sum_diff"] / total
@@ -304,15 +316,18 @@ def schedule_rows(rows):
 
 def test_gw_kind_counts_the_captains_fixtures_and_the_gws_doubles_and_blanks():
     # clubs 1-4; GW1 normal, GW2 club 1 twice, clubs 3-4 blank
-    schedule = schedule_rows(
-        [(2018, 1, 1, 2), (2018, 1, 3, 4), (2018, 2, 1, 2), (2018, 2, 1, 2)]
-    )
+    schedule = schedule_rows([(2018, 1, 1, 2), (2018, 1, 3, 4), (2018, 2, 1, 2), (2018, 2, 1, 2)])
     player_gw = pd.DataFrame(
         {"player_key": [7, 7, 8], "season": 2018, "gw": [1, 2, 2], "team_key": [1, 1, 3]}
     )
     rows = pd.DataFrame(
-        {"season": 2018, "start_id": "t", "gw": [1, 2, 2], "gw_index": [1, 2, 2],
-         "captain": [7, 7, 8]}
+        {
+            "season": 2018,
+            "start_id": "t",
+            "gw": [1, 2, 2],
+            "gw_index": [1, 2, 2],
+            "captain": [7, 7, 8],
+        }
     )
     got = cd.gw_kind(schedule, player_gw, rows)
     assert list(got["captain_fixtures"]) == [1, 2, 0]
@@ -324,9 +339,13 @@ def test_gw_kind_counts_the_captains_fixtures_and_the_gws_doubles_and_blanks():
 
 def test_gain_distribution_quantiles_per_chip_and_group():
     rows = pd.DataFrame(
-        {"start_id": ["template@1"] * 4 + ["random0@1"] * 4,
-         "gain_tc": [1.0, 2.0, 3.0, 4.0, 10.0, 10.0, 10.0, 10.0],
-         "gain_bb": np.nan, "gain_fh": np.nan, "gain_wc": np.nan}
+        {
+            "start_id": ["template@1"] * 4 + ["random0@1"] * 4,
+            "gain_tc": [1.0, 2.0, 3.0, 4.0, 10.0, 10.0, 10.0, 10.0],
+            "gain_bb": np.nan,
+            "gain_fh": np.nan,
+            "gain_wc": np.nan,
+        }
     )
     rows["start_type"] = cd.start_type(rows["start_id"])
     table = cd.gain_distribution(rows, ["start_type"])
@@ -348,7 +367,7 @@ from fplopt.backtest.chip_values import GAIN_COLUMNS
 
 
 def start_type(start_id: pd.Series) -> pd.Series:
-    """"template" or "random" from a start id (template@1, random0@20, ...)."""
+    """ "template" or "random" from a start id (template@1, random0@20, ...)."""
     return start_id.str.extract(r"^(template|random)", expand=False)
 
 
@@ -364,8 +383,12 @@ def gw_kind(schedule: pd.DataFrame, player_gw: pd.DataFrame, rows: pd.DataFrame)
     `gw_type` (normal, double, blank or double+blank)."""
     sides = pd.concat(
         [
-            schedule[["season", "gw", "home_team_key"]].rename(columns={"home_team_key": "team_key"}),
-            schedule[["season", "gw", "away_team_key"]].rename(columns={"away_team_key": "team_key"}),
+            schedule[["season", "gw", "home_team_key"]].rename(
+                columns={"home_team_key": "team_key"}
+            ),
+            schedule[["season", "gw", "away_team_key"]].rename(
+                columns={"away_team_key": "team_key"}
+            ),
         ]
     )
     sides = sides[sides["team_key"] > 0]
@@ -378,14 +401,18 @@ def gw_kind(schedule: pd.DataFrame, player_gw: pd.DataFrame, rows: pd.DataFrame)
         n_double_clubs=("n", lambda s: int((s >= 2).sum())),
         n_blank_clubs=("n", lambda s: int((s == 0).sum())),
     )
-    club = player_gw[["player_key", "season", "gw", "team_key"]].rename(columns={"player_key": "captain"})
+    club = player_gw[["player_key", "season", "gw", "team_key"]].rename(
+        columns={"player_key": "captain"}
+    )
     out = rows[["season", "gw", "captain"]].reset_index(drop=True)
     out = out.merge(club, on=["season", "gw", "captain"], how="left")
     out = out.merge(counts, on=["season", "gw", "team_key"], how="left")
     out["captain_fixtures"] = out["n"].fillna(0).astype("int64")
     out["captain_kind"] = out["captain_fixtures"].map(_kind)
     out = out.join(per_gw, on=["season", "gw"])
-    out[["n_double_clubs", "n_blank_clubs"]] = out[["n_double_clubs", "n_blank_clubs"]].fillna(0).astype("int64")
+    out[["n_double_clubs", "n_blank_clubs"]] = (
+        out[["n_double_clubs", "n_blank_clubs"]].fillna(0).astype("int64")
+    )
     double, blank = out["n_double_clubs"] > 0, out["n_blank_clubs"] > 0
     out["gw_type"] = np.select(
         [double & blank, double, blank], ["double+blank", "double", "blank"], "normal"
@@ -404,8 +431,13 @@ def gain_distribution(rows: pd.DataFrame, by: list[str]) -> pd.DataFrame:
             continue
         g = part.groupby(by)["gain"]
         table = pd.DataFrame(
-            {"n": g.size(), "mean": g.mean(), "median": g.median(),
-             "p75": g.quantile(0.75), "p90": g.quantile(0.9)}
+            {
+                "n": g.size(),
+                "mean": g.mean(),
+                "median": g.median(),
+                "p75": g.quantile(0.75),
+                "p90": g.quantile(0.9),
+            }
         ).reset_index()
         parts.append(table.assign(chip=chip))
     return pd.concat(parts, ignore_index=True)[["chip", *by, "n", "mean", "median", "p75", "p90"]]
@@ -509,11 +541,16 @@ def season_rows(seed, start="template@1", season=2018):
     n = 38
     return pd.DataFrame(
         {
-            "season": season, "start_id": start, "policy": "s0",
+            "season": season,
+            "start_id": start,
+            "policy": "s0",
             "gw_index": np.arange(1, n + 1),
-            "gain_tc": rng.uniform(3, 12, n), "gain_bb": rng.uniform(0, 8, n),
-            "gain_fh": rng.uniform(-2, 10, n), "gain_wc": rng.uniform(-5, 20, n),
-            "captain_points": rng.integers(0, 20, n), "bench_points": rng.integers(0, 15, n),
+            "gain_tc": rng.uniform(3, 12, n),
+            "gain_bb": rng.uniform(0, 8, n),
+            "gain_fh": rng.uniform(-2, 10, n),
+            "gain_wc": rng.uniform(-5, 20, n),
+            "captain_points": rng.integers(0, 20, n),
+            "bench_points": rng.integers(0, 15, n),
         }
     )
 
@@ -525,7 +562,8 @@ def test_holding_value_ex_ante_matches_the_terminal_value_estimate():
     got = cd.holding_value(rows, {"3xc": "captain_points", "bboost": "bench_points"}, table)
     pooled = (
         got.assign(w=got["ex_ante"] * got["n"])
-        .groupby(["chip", "left"])[["w", "n"]].sum()
+        .groupby(["chip", "left"])[["w", "n"]]
+        .sum()
         .pipe(lambda t: t["w"] / t["n"])
     )
     for chip, values in estimate_terminal_values(rows).items():
@@ -600,8 +638,13 @@ def holding_value(
                 tab = float(values[left - 1]) if left <= len(values) else math.nan
                 out.append(
                     {
-                        "chip": chip, "window_start": window.start, "left": left, "n": n,
-                        "ex_ante": ex_ante, "realized": real, "table": tab,
+                        "chip": chip,
+                        "window_start": window.start,
+                        "left": left,
+                        "n": n,
+                        "ex_ante": ex_ante,
+                        "realized": real,
+                        "table": tab,
                         "exante_ratio": ex_ante / tab if tab else math.nan,
                         "realized_ratio": real / tab if tab else math.nan,
                     }
@@ -633,8 +676,13 @@ git commit -m "feat(backtest): chip diagnostics, the value of holding a chip (ex
 ```python
 def test_captain_congestion_flags_a_european_week_or_short_rest():
     features = pd.DataFrame(
-        {"player_key": [7, 7, 7, 8], "season": 2018, "gw": [1, 2, 2, 2],
-         "europe_week": [0.0, 0.0, 1.0, 0.0], "rest_days_all": [7.0, 6.0, 3.0, 2.5]}
+        {
+            "player_key": [7, 7, 7, 8],
+            "season": 2018,
+            "gw": [1, 2, 2, 2],
+            "europe_week": [0.0, 0.0, 1.0, 0.0],
+            "rest_days_all": [7.0, 6.0, 3.0, 2.5],
+        }
     )
     rows = pd.DataFrame({"season": 2018, "gw": [1, 2, 2, 3], "captain": [7, 7, 8, 7]})
     got = cd.captain_congestion(rows, features)
@@ -643,8 +691,11 @@ def test_captain_congestion_flags_a_european_week_or_short_rest():
 
 def test_ratio_split_and_weighted_share():
     rows = pd.DataFrame(
-        {"flag": [True, True, False, False], "xp": [5.0, 5.0, 5.0, 5.0],
-         "real": [2.0, 4.0, 6.0, 6.0]}
+        {
+            "flag": [True, True, False, False],
+            "xp": [5.0, 5.0, 5.0, 5.0],
+            "real": [2.0, 4.0, 6.0, 6.0],
+        }
     )
     got = cd.ratio_split(rows, "flag", "xp", "real").set_index("flag")
     assert got.loc[True, "ratio"] == pytest.approx(0.6) and got.loc[False, "ratio"] == 1.2
@@ -671,7 +722,8 @@ def captain_congestion(rows: pd.DataFrame, features: pd.DataFrame) -> pd.Series:
     flag = (features["europe_week"] == 1) | (features["rest_days_all"] <= CONGESTED_REST)
     per = (
         features.assign(flag=flag)
-        .groupby(["player_key", "season", "gw"])["flag"].any()
+        .groupby(["player_key", "season", "gw"])["flag"]
+        .any()
         .rename_axis(["captain", "season", "gw"])
     )
     keys = pd.MultiIndex.from_frame(rows[["captain", "season", "gw"]])
@@ -768,17 +820,27 @@ def main() -> None:
         m = cd.paired(gws[a], gws[b])
         real, xg = full_run_window_test(m, "diff"), full_run_window_test(m, "diff_xg")
         comparisons[f"{a} vs {b}"] = {
-            "mean_per_gw": real.mean, "p_one_sided": real.p_one_sided, "n_cells": real.n_cells,
+            "mean_per_gw": real.mean,
+            "p_one_sided": real.p_one_sided,
+            "n_cells": real.n_cells,
             "xg_mean_per_gw": xg.mean,
-            "season_totals": m.groupby(["season", "start_id"])["diff"].sum()
-            .groupby("season").mean().to_dict(),
+            "season_totals": m.groupby(["season", "start_id"])["diff"]
+            .sum()
+            .groupby("season")
+            .mean()
+            .to_dict(),
         }
         cd.gap_by_chip(gws[a], gws[b]).to_csv(out / f"q1-gap-chip-{a}-{b}.csv", index=False)
         cd.gap_by_cell(gws[a], gws[b]).to_csv(out / f"q1-gap-cell-{a}-{b}.csv", index=False)
         print(f"{a} vs {b}: {real.mean:+.3f}/GW, p {real.p_one_sided:.4f}, xG {xg.mean:+.3f}/GW")
-    (out / "comparisons.json").write_text(json.dumps(comparisons, indent=2, default=str), encoding="utf-8")
+    (out / "comparisons.json").write_text(
+        json.dumps(comparisons, indent=2, default=str), encoding="utf-8"
+    )
     timing = pd.concat(
-        [g.dropna(subset=["chip"]).assign(arm=arm)[["arm", "chip", "gw_index"]] for arm, g in gws.items()]
+        [
+            g.dropna(subset=["chip"]).assign(arm=arm)[["arm", "chip", "gw_index"]]
+            for arm, g in gws.items()
+        ]
     )
     timing.groupby(["arm", "chip", "gw_index"]).size().rename("n").reset_index().to_csv(
         out / "q1-timing.csv", index=False
@@ -791,7 +853,9 @@ def main() -> None:
     s0 = s0.join(cd.gw_kind(schedule, player_gw, s0))
     s0["start_type"] = cd.start_type(s0["start_id"])
     s0["ft"] = s0["free_transfers"].clip(upper=3)
-    s0["bank_band"] = pd.cut(s0["bank"], [-1, 5, 20, 50, 10_000], labels=["<=0.5", "0.6-2.0", "2.1-5.0", ">5.0"])
+    s0["bank_band"] = pd.cut(
+        s0["bank"], [-1, 5, 20, 50, 10_000], labels=["<=0.5", "0.6-2.0", "2.1-5.0", ">5.0"]
+    )
     for by in (["gw_index"], ["captain_kind"], ["gw_type"], ["start_type"], ["ft"], ["bank_band"]):
         cd.gain_distribution(s0, by).to_csv(out / f"q2-gain-{by[0]}.csv", index=False)
 
@@ -800,21 +864,21 @@ def main() -> None:
         "3xc (S0, all rows)": cd.forecast_slope(s0["gain_tc"], s0["captain_points"]),
         "bboost (S0, all rows)": cd.forecast_slope(s0["gain_bb"], s0["bench_points"]),
     }
-    for chip, gain, real in (("3xc", "gain_tc", "captain_points"), ("bboost", "gain_bb", "bench_points")):
+    for chip, gain, real in (
+        ("3xc", "gain_tc", "captain_points"),
+        ("bboost", "gain_bb", "bench_points"),
+    ):
         top = s0[s0[gain] >= s0[gain].quantile(0.9)]
         slopes[f"{chip} (S0, top decile)"] = cd.forecast_slope(top[gain], top[real])
     for arm in ("H", "P"):
-        m = cd.paired(gws[arm], gws["S0"]).merge(
-            s0[cd.KEYS + ["gain_fh", "gain_wc"]], on=cd.KEYS
-        )
+        m = cd.paired(gws[arm], gws["S0"]).merge(s0[cd.KEYS + ["gain_fh", "gain_wc"]], on=cd.KEYS)
         played = gws[arm].set_index(cd.KEYS)["chip"]
         m["played"] = played.reindex(pd.MultiIndex.from_frame(m[cd.KEYS])).to_numpy()
         fh = m[m["played"] == "freehit"]
         slopes[f"freehit ({arm} vs S0, that GW)"] = cd.forecast_slope(fh["gain_fh"], fh["diff"])
         m = m.sort_values(cd.KEYS)
-        m["diff_6"] = (
-            m.groupby(["season", "start_id"])["diff"]
-            .transform(lambda s: s[::-1].rolling(cd.WC_SPAN, min_periods=1).sum()[::-1])
+        m["diff_6"] = m.groupby(["season", "start_id"])["diff"].transform(
+            lambda s: s[::-1].rolling(cd.WC_SPAN, min_periods=1).sum()[::-1]
         )
         wc = m[m["played"] == "wildcard"]
         slopes[f"wildcard ({arm} vs S0, 6 GWs)"] = cd.forecast_slope(wc["gain_wc"], wc["diff_6"])
@@ -827,7 +891,9 @@ def main() -> None:
 
     # Q5: captain congestion (training_frame as of the first deadline after develop)
     gameweek = pd.read_parquet(data_dir / "gameweek.parquet")
-    after = gameweek.loc[(gameweek["season"] == 2023) & (gameweek["gw"] == 1), "deadline_time"].iloc[0]
+    after = gameweek.loc[
+        (gameweek["season"] == 2023) & (gameweek["gw"] == 1), "deadline_time"
+    ].iloc[0]
     features = training_frame(DataStore(data_dir).as_of(after))
     features = features[["player_key", "season", "gw", "europe_week", "rest_days_all"]]
     s0["congested"] = cd.captain_congestion(s0, features)
@@ -845,7 +911,10 @@ def main() -> None:
         season, span = args.upcoming.split(":")
         lo, hi = (int(x) for x in span.split("-"))
         store = DataStore(data_dir)
-        future = gameweek[(gameweek["season"] == int(season)) & (gameweek["deadline_time"] > pd.Timestamp.now(tz="UTC"))]
+        future = gameweek[
+            (gameweek["season"] == int(season))
+            & (gameweek["deadline_time"] > pd.Timestamp.now(tz="UTC"))
+        ]
         view = store.as_of(future["deadline_time"].min())
         sched = view.table("schedule")
         sched = sched[(sched["season"] == int(season)) & sched["gw"].between(lo, hi)]
