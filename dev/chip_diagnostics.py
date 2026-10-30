@@ -19,10 +19,13 @@ from fplopt.backtest.chip_values import load_terminal_values
 from fplopt.backtest.evaluate import full_run_window_test
 from fplopt.features.history import training_frame
 from fplopt.features.store import DataStore
+from fplopt.seasons import DEVELOP_SEASONS
 from fplopt.settings import Settings
 
 ARMS = ("S0", "H", "P")
 COMPARISONS = (("P", "H"), ("P", "S0"), ("H", "S0"))
+SET_2 = 20  # gw_index where the second chip window starts
+GW_BANDS = [0, 8, 16, 19, 27, 35, 38]  # gw_index bands for q2-gain-gw_band.csv
 
 
 def load(run: Path) -> pd.DataFrame:
@@ -77,18 +80,35 @@ def main() -> None:
     timing.groupby(["arm", "chip", "gw_index"]).size().rename("n").reset_index().to_csv(
         out / "q1-timing.csv", index=False
     )
+    # Per play: the arm's points minus S0's in the GW it played each chip, by window
+    per_play = []
+    for arm in ("H", "P"):
+        m = cd.paired(gws[arm], gws["S0"])
+        played = gws[arm].set_index(cd.KEYS)["chip"]
+        m["played"] = played.reindex(pd.MultiIndex.from_frame(m[cd.KEYS])).to_numpy()
+        m["set"] = (m["gw_index"] >= SET_2).map({False: 1, True: 2})
+        g = m.dropna(subset=["played"]).groupby(["played", "set"])["diff"]
+        per_play.append(
+            pd.DataFrame({"n": g.size(), "mean_diff": g.mean()}).reset_index().assign(arm=arm)
+        )
+    pd.concat(per_play)[["arm", "played", "set", "n", "mean_diff"]].to_csv(
+        out / "q1-gain-per-play.csv", index=False
+    )
 
     # Q2: gain distributions (S0)
     s0 = gws["S0"].copy()
     schedule = pd.read_parquet(data_dir / "schedule.parquet")
     player_gw = pd.read_parquet(data_dir / "player_gw.parquet")
+    player_gw = player_gw[player_gw["season"].isin(DEVELOP_SEASONS)]
     s0 = s0.join(cd.gw_kind(schedule, player_gw, s0))
+    s0["gw_band"] = pd.cut(s0["gw_index"], GW_BANDS).astype("string")
     s0["start_type"] = cd.start_type(s0["start_id"])
     s0["ft"] = s0["free_transfers"].clip(upper=3)
     s0["bank_band"] = pd.cut(
         s0["bank"], [-1, 5, 20, 50, 10_000], labels=["<=0.5", "0.6-2.0", "2.1-5.0", ">5.0"]
     )
-    for by in (["gw_index"], ["captain_kind"], ["gw_type"], ["start_type"], ["ft"], ["bank_band"]):
+    groupings = ("gw_index", "gw_band", "captain_kind", "gw_type", "start_type", "ft", "bank_band")
+    for by in ([g] for g in groupings):
         cd.gain_distribution(s0, by).to_csv(out / f"q2-gain-{by[0]}.csv", index=False)
 
     # Q3: forecast vs outcome
@@ -102,6 +122,9 @@ def main() -> None:
     ):
         top = s0[s0[gain] >= s0[gain].quantile(0.9)]
         slopes[f"{chip} (S0, top decile)"] = cd.forecast_slope(top[gain], top[real])
+        for kind in ("single", "double"):
+            rows = s0[s0["captain_kind"] == kind]
+            slopes[f"{chip} (S0, captain {kind})"] = cd.forecast_slope(rows[gain], rows[real])
     for arm in ("H", "P"):
         m = cd.paired(gws[arm], gws["S0"]).merge(s0[cd.KEYS + ["gain_fh", "gain_wc"]], on=cd.KEYS)
         played = gws[arm].set_index(cd.KEYS)["chip"]
@@ -114,6 +137,12 @@ def main() -> None:
         )
         wc = m[m["played"] == "wildcard"]
         slopes[f"wildcard ({arm} vs S0, 6 GWs)"] = cd.forecast_slope(wc["gain_wc"], wc["diff_6"])
+        # only Wildcards with a full 6-GW span inside the season
+        last = m.groupby(["season", "start_id"])["gw_index"].transform("max")
+        full = wc[wc["gw_index"] <= last.loc[wc.index] - (cd.WC_SPAN - 1)]
+        slopes[f"wildcard ({arm} vs S0, 6 GWs, full span)"] = cd.forecast_slope(
+            full["gain_wc"], full["diff_6"]
+        )
     pd.DataFrame(slopes).T.to_csv(out / "q3-forecast-slopes.csv")
 
     # Q4: holding value
@@ -147,6 +176,8 @@ def main() -> None:
             (gameweek["season"] == int(season))
             & (gameweek["deadline_time"] > pd.Timestamp.now(tz="UTC"))
         ]
+        if future.empty:
+            raise SystemExit(f"--upcoming: season {season} has no deadline left")
         view = store.as_of(future["deadline_time"].min())
         sched = view.table("schedule")
         sched = sched[(sched["season"] == int(season)) & sched["gw"].between(lo, hi)]
