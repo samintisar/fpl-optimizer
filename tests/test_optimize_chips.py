@@ -476,6 +476,8 @@ def test_terminal_values_by_window() -> None:
     )
     rules = replace(RULES, chips=swapped)
     assert terminal_value(problem_at(5, 3, rules=rules), params, NO_CHIP) == 1 + 5 + 2 * 2
+    # Only set 2 open (GWs 21-23): its wildcard is @2 whatever its chip id.
+    assert terminal_value(problem_at(21, 3, rules=rules), params, NO_CHIP) == 5 + 2
 
 
 def test_terminal_values_with_a_known_double() -> None:
