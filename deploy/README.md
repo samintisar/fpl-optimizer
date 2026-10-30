@@ -230,14 +230,16 @@ Rust lives in the `fplopt` user's home (`~/.cargo`, installed with rustup, no su
 is built in its own checkout of the branch, `~/fpl-optimizer-rs`; the live `~/fpl-optimizer`
 stays on `main` (the shadow units run there only for `.env` and `config/`):
 
+From batch 4 on the build also compiles HiGHS (the pinned submodule `third_party/HiGHS`, v1.15.1 like highspy), which needs CMake ≥ 3.15 and a C++ compiler (`cmake --version`, `g++ --version`; without sudo, `uv tool install cmake` puts CMake in `~/.local/bin`):
+
 ```bash
-git clone -b rust-migration https://github.com/samintisar/fpl-optimizer.git ~/fpl-optimizer-rs
+git clone -b rust-migration --recurse-submodules --shallow-submodules https://github.com/samintisar/fpl-optimizer.git ~/fpl-optimizer-rs
 cd ~/fpl-optimizer-rs && nice -n 15 ~/.cargo/bin/cargo build --release --locked -j 8
 cp deploy/systemd-shadow/* ~/.config/systemd/user/ && systemctl --user daemon-reload
 systemctl --user enable --now fplopt-rs-shadow-tick.timer fplopt-rs-shadow-daily.timer
 ```
 
-After a `git pull` in `~/fpl-optimizer-rs` during the week, rebuild there (the units run its `target/release/fplopt-rs`). Logs:
+After a `git pull` (and `git submodule update --init`) in `~/fpl-optimizer-rs` during the week, rebuild there (the units run its `target/release/fplopt-rs`). Logs:
 `journalctl --user -u 'fplopt-rs-shadow-*' --since today`. After a week, compare (`--since`
 skips the first shadow daily, which backfills what `raw/` already had):
 

@@ -1,5 +1,5 @@
 //! Fantasy Premier League public API. Port of `fplopt.adapters.fpl` (the archiver's
-//! endpoints; the entry endpoints move with `fplopt.entry` in batch 4).
+//! endpoints, and a manager's team for `fplopt_optimize::entry`).
 
 use anyhow::Result;
 
@@ -20,6 +20,20 @@ impl<'a> FplClient<'a> {
 
     fn get(&self, path: &str) -> Result<Vec<u8>> {
         Ok(self.http.get_json(&format!("{}/{path}", self.base), &[], DEFAULT_ATTEMPTS)?.body)
+    }
+
+    // A manager's team (public, no login). Errors carry the `FetchError` (a 404: no such
+    // team; `FetchError::status`).
+    pub fn entry_history(&self, entry_id: i64) -> Result<Vec<u8>> {
+        self.get(&format!("entry/{entry_id}/history/"))
+    }
+
+    pub fn entry_picks(&self, entry_id: i64, gw: i64) -> Result<Vec<u8>> {
+        self.get(&format!("entry/{entry_id}/event/{gw}/picks/"))
+    }
+
+    pub fn entry_transfers(&self, entry_id: i64) -> Result<Vec<u8>> {
+        self.get(&format!("entry/{entry_id}/transfers/"))
     }
 }
 
@@ -56,5 +70,18 @@ mod tests {
         assert_eq!(fpl.fixtures().unwrap(), br#"{"p": "/api/fixtures/"}"#);
         assert_eq!(fpl.element_summary(7).unwrap(), br#"{"p": "/api/element-summary/7/"}"#);
         assert_eq!(fpl.event_live(3).unwrap(), br#"{"p": "/api/event/3/live/"}"#);
+        assert_eq!(fpl.entry_history(9).unwrap(), br#"{"p": "/api/entry/9/history/"}"#);
+        assert_eq!(fpl.entry_picks(9, 4).unwrap(), br#"{"p": "/api/entry/9/event/4/picks/"}"#);
+        assert_eq!(fpl.entry_transfers(9).unwrap(), br#"{"p": "/api/entry/9/transfers/"}"#);
+    }
+
+    #[test]
+    fn a_missing_team_is_a_404_status() {
+        let server = serve(|_, _| (404, vec![], b"{\"detail\": \"Not found.\"}".to_vec()));
+        let http = no_wait();
+        let fpl = FplClient::new(&http, &format!("{}/api", server.base));
+        let err = fpl.entry_history(1).unwrap_err();
+        let fetch = err.downcast_ref::<crate::fetch::FetchError>().unwrap();
+        assert_eq!(fetch.status(), Some(404));
     }
 }

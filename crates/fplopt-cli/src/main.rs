@@ -2,11 +2,15 @@
 //! so a migrated job only swaps the binary name (migration plan §2). Each batch adds the
 //! commands it ports: batch 0 the parity check, batch 1 the archiver (`snapshot`,
 //! `backfill`, `check freshness`), batch 2 the build (`build`, `rules export`), batch 3 the
-//! as-of store and features (`check leakage`, and `features dump` for the parity gate).
+//! as-of store and features (`check leakage`, and `features dump` for the parity gate),
+//! batch 4 the optimizer (`optimize plan|squad`, and `optimize solve` for the parity gate).
 //!
 //! Archiver jobs run like Python's: a failure is logged and alerted to Telegram (exit 1);
 //! SIGTERM stops a long run cleanly, after its manifest is written (exit 143, no alert); a
 //! successful `snapshot daily|tick` pings HEALTHCHECK_PING_URL if set.
+
+mod optimize;
+mod optimize_plan;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -78,6 +82,11 @@ enum Command {
     Features {
         #[command(subcommand)]
         command: FeaturesJob,
+    },
+    /// The MILP planner.
+    Optimize {
+        #[command(subcommand)]
+        command: optimize::OptimizeJob,
     },
 }
 
@@ -231,6 +240,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 features_dump(&ctx.settings.data_dir, &deadlines, &out)
             }))
         }
+        Command::Optimize { command } => match command {
+            optimize::OptimizeJob::Solve { case, out } => {
+                optimize::solve(&case, &out)?;
+                Ok(ExitCode::SUCCESS)
+            }
+            optimize::OptimizeJob::Plan(args) => optimize_plan::plan(&args),
+            optimize::OptimizeJob::Squad(args) => optimize_plan::squad(&args),
+        },
         Command::Check { check: Check::Parity { area } } => match area {
             Parity::Table { python, rust, keys, rtol, atol, out, experiments } => {
                 parity_table(&python, &rust, &keys, Tolerance { rtol, atol }, out, &experiments)

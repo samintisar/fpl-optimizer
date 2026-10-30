@@ -16,6 +16,7 @@ fplopt-archive = { version = "0.1.0", path = "../fplopt-archive" }
 fplopt-build = { version = "0.1.0", path = "../fplopt-build" }
 fplopt-core = { version = "0.1.0", path = "../fplopt-core" }
 fplopt-features = { version = "0.1.0", path = "../fplopt-features" }
+fplopt-optimize = { version = "0.1.0", path = "../fplopt-optimize" }
 fplopt-parity = { version = "0.1.0", path = "../fplopt-parity" }
 fplopt-store = { version = "0.1.0", path = "../fplopt-store" }
 gethostname = "1"

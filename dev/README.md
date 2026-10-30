@@ -621,3 +621,27 @@ uv run python dev/features_parity.py [--data data] [--n-random 10] [--keep DIR]
 The second half of the gate is `fplopt-rs check leakage`, the corrupt-the-future check of the
 same frames in Rust (2026-10-30: 28 deadlines, no leaks, 17 min). `features_parity.py` logs a row to `results/experiments.csv` (family
 `rust parity`) and exits 1 on any difference.
+
+## `optimize_parity.py`: Rust migration batch 4 gate
+
+`optimize_parity.py` builds a corpus of planner cases at seeded real deadlines (2021/22 to
+2026/27, every pick's GW1/GW2 kind included): template, `random:1`, `random:2` and two
+"carried" squads (an earlier GW's template held to the deadline: stale prices, departed
+players, clubs over the cap, more FTs, a sell-on fee, chips used), `ep_next` frames everywhere
+and `v1` at `--v1` deadlines, default settings plus hit variants, with and without chips.
+Each case is solved from the same files by Python (`PlanInput.from_context` + `optimize`) and
+`fplopt-rs optimize solve`; it checks the candidates, horizon and bench weights, every plan
+(#1..3 and the roll plan: objective within 1e-6, the same plan unless Python's ties its
+runner-up within 1e-6) and replays every Rust plan through Python's `apply_decision` /
+`next_state` (hits, bank and FTs must equal the replay's).
+
+On 2026-10-30 (local `data/`): seed 0 (12 deadlines) 120/120 cases and seed 1 (20 deadlines)
+173/173: all 1,172 plans identical (no ties needed), HiGHS node counts equal in every case,
+bench weights identical; Python and Rust take about the same time (Rust ~10% faster).
+
+```sh
+cargo build --release -p fplopt-cli
+uv run python dev/optimize_parity.py [--data data] [--deadlines 12] [--v1 4] [--seed 0] [--keep DIR]
+```
+
+It logs a row to `results/experiments.csv` (family `rust parity`) and exits 1 on any failure.
