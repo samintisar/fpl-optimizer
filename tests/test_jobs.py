@@ -767,3 +767,90 @@ def test_a_teams_csv_problem_fails_only_the_espn_step(tmp_path, monkeypatch):
             sleep=lambda s: None,
         )
     assert len(store.times("fpl", "bootstrap-static")) == 1 and lockdown == [True]
+
+
+class FakeProps:
+    """Events at the given kickoffs (ids e0, e1, ...); `fail` ids raise on their props."""
+
+    def __init__(self, kickoffs, fail=()):
+        self.kickoffs = kickoffs
+        self.fail = set(fail)
+        self.calls = []
+
+    def epl_events(self):
+        return json.dumps(
+            [
+                {"id": f"e{i}", "commence_time": k.strftime("%Y-%m-%dT%H:%M:%SZ")}
+                for i, k in enumerate(self.kickoffs)
+            ]
+        ).encode()
+
+    def event_props(self, event_id):
+        self.calls.append(event_id)
+        if event_id in self.fail:
+            raise RuntimeError("props down")
+        return json.dumps({"id": event_id, "bookmakers": []}).encode()
+
+
+def props_tick_store(tmp_path, n_events=2):
+    store = RawStore(tmp_path)
+    fpl = FakeFpl(n_events=n_events)
+    run_daily(store, fpl, None, Clock(DEADLINE - timedelta(hours=8)))
+    return store, fpl
+
+
+def test_tick_archives_props_of_this_gws_events_once_per_window(tmp_path):
+    store, fpl = props_tick_store(tmp_path)
+    # e0 already started, e1/e2 in this GW, e3 after the next deadline (a week later)
+    props = FakeProps(
+        [
+            DEADLINE - timedelta(hours=3),
+            DEADLINE + timedelta(hours=2),
+            DEADLINE + timedelta(days=6, hours=23),
+            DEADLINE + timedelta(days=8),
+        ]
+    )
+    assert run_tick(store, fpl, None, Clock(DEADLINE - timedelta(hours=3)), props=props) is False
+    assert props.calls == []
+    assert run_tick(store, fpl, None, Clock(DEADLINE - timedelta(minutes=110)), props=props)
+    assert props.calls == ["e1", "e2"]
+    path = store.latest("odds", "soccer_epl_player_props")
+    assert [r["id"] for r in store.read_json(path)] == ["e1", "e2"]
+    assert run_tick(store, fpl, None, Clock(DEADLINE - timedelta(minutes=95)), props=props) is False
+    assert props.calls == ["e1", "e2"]
+
+
+def test_props_after_the_last_deadline_cover_a_week(tmp_path):
+    store, fpl = props_tick_store(tmp_path, n_events=1)
+    props = FakeProps([DEADLINE + timedelta(days=6), DEADLINE + timedelta(days=8)])
+    run_tick(store, fpl, None, Clock(DEADLINE - timedelta(minutes=110)), props=props)
+    assert props.calls == ["e0"]
+
+
+def test_props_partial_failure_archives_the_rest_and_alerts_without_retry(tmp_path):
+    store, fpl = props_tick_store(tmp_path)
+    kickoffs = [DEADLINE + timedelta(hours=2), DEADLINE + timedelta(hours=4)]
+    props = FakeProps(kickoffs, fail={"e0"})
+    with pytest.raises(SnapshotError, match="player props failed for e0"):
+        run_tick(store, fpl, None, Clock(DEADLINE - timedelta(minutes=110)), props=props)
+    path = store.latest("odds", "soccer_epl_player_props")
+    assert [r["id"] for r in store.read_json(path)] == ["e1"]
+    assert run_tick(store, fpl, None, Clock(DEADLINE - timedelta(minutes=95)), props=props) is False
+
+
+def test_props_total_failure_writes_nothing_and_retries(tmp_path):
+    store, fpl = props_tick_store(tmp_path)
+    props = FakeProps([DEADLINE + timedelta(hours=2)], fail={"e0"})
+    with pytest.raises(SnapshotError, match="every event failed"):
+        run_tick(store, fpl, None, Clock(DEADLINE - timedelta(minutes=110)), props=props)
+    assert store.times("odds", "soccer_epl_player_props") == []
+    props.fail.clear()
+    assert run_tick(store, fpl, None, Clock(DEADLINE - timedelta(minutes=95)), props=props)
+    assert len(store.times("odds", "soccer_epl_player_props")) == 1
+
+
+def test_props_window_with_no_events_is_still_marked_done(tmp_path):
+    store, fpl = props_tick_store(tmp_path)
+    props = FakeProps([])
+    assert run_tick(store, fpl, None, Clock(DEADLINE - timedelta(minutes=110)), props=props)
+    assert store.read_json(store.latest("odds", "soccer_epl_player_props")) == []

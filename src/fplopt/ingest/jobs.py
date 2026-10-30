@@ -46,6 +46,12 @@ class OddsSource(Protocol):
     def epl_odds(self) -> bytes: ...
 
 
+class PropsSource(Protocol):
+    def epl_events(self) -> bytes: ...
+
+    def event_props(self, event_id: str) -> bytes: ...
+
+
 class FootballDataSource(Protocol):
     def epl_season(self, start_year: int) -> bytes: ...
 
@@ -66,6 +72,37 @@ def snapshot_odds(store: RawStore, odds: OddsSource | None, now: Clock = utc_now
         return None
     content = odds.epl_odds()
     return store.write("odds", "soccer_epl", content, now())
+
+
+PROPS_ENDPOINT = "soccer_epl_player_props"
+PROPS_FALLBACK_SPAN = timedelta(days=7)  # GW span after the season's last deadline
+
+
+def snapshot_player_props(
+    store: RawStore, props: PropsSource, until: datetime, now: Clock = utc_now
+) -> Path:
+    """Player props of every EPL event kicking off after now and up to `until` (the next
+    GW's deadline), archived as one JSON list of the per-event responses. Events whose
+    request fails are left out and named in a SnapshotError raised after the write, so the
+    window isn't fetched again (credits) and the failure still alerts."""
+    current = now()
+    events = json.loads(props.epl_events())
+    responses, errors = [], []
+    for event in events:
+        kickoff = datetime.fromisoformat(event["commence_time"].replace("Z", "+00:00"))
+        if not current < kickoff <= until:
+            continue
+        try:
+            responses.append(json.loads(props.event_props(event["id"])))
+        except Exception as exc:
+            log.exception("player props for event %s failed", event["id"])
+            errors.append(f"{event['id']}: {type(exc).__name__}")
+    if errors and not responses:
+        raise SnapshotError("player props: every event failed: " + ", ".join(errors))
+    path = store.write("odds", PROPS_ENDPOINT, json.dumps(responses).encode(), now())
+    if errors:
+        raise SnapshotError("player props failed for " + ", ".join(errors))
+    return path
 
 
 class SnapshotError(RuntimeError):
@@ -164,10 +201,13 @@ def run_tick(
     odds: OddsSource | None,
     now: Clock = utc_now,
     *,
+    props: PropsSource | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
-    """Run every ~15 min. Inside each pre-deadline window, snapshot FPL and odds once each;
-    a source that fails is retried on the next tick. Returns True if anything ran.
+    """Run every ~15 min. Inside each pre-deadline window, snapshot FPL and odds once each,
+    and (with a `props` source) the player props of the GW's matches; a source that fails is
+    retried on the next tick (props: only if no event succeeded). Returns True if anything
+    ran.
 
     The tick that takes a window's FPL snapshot then runs the post-lockdown step on it, so a
     GW finalised after the 02:30 daily run (e.g. Tuesday morning) is archived before the next
@@ -195,6 +235,11 @@ def run_tick(
         odds is not None
         and pre_deadline_due(current, deadlines, store.times("odds", "soccer_epl")) is not None
     )
+    props_deadline = (
+        None
+        if props is None
+        else pre_deadline_due(current, deadlines, store.times("odds", PROPS_ENDPOINT))
+    )
     steps: list[tuple[str, Callable[[], object]]] = []
     if fpl_deadline is not None:
         log.info("pre-deadline FPL snapshot for deadline %s", fpl_deadline.isoformat())
@@ -202,13 +247,18 @@ def run_tick(
     if odds_due:
         log.info("pre-deadline odds snapshot")
         steps.append(("odds", lambda: snapshot_odds(store, odds, now)))
+    if props is not None and props_deadline is not None:
+        later = [d for d in deadlines if d > props_deadline]
+        until = min(later) if later else props_deadline + PROPS_FALLBACK_SPAN
+        log.info("pre-deadline player props snapshot up to %s", until.isoformat())
+        steps.append(("player-props", lambda: snapshot_player_props(store, props, until, now)))
     if fpl_deadline is not None:
         # Last, so it reads the bootstrap the FPL step just archived.
         steps.append(
             ("post-lockdown", lambda: snapshot_post_lockdown(store, fpl, now, sleep=sleep))
         )
     run_independently(steps)
-    return fpl_deadline is not None or odds_due
+    return fpl_deadline is not None or odds_due or props_deadline is not None
 
 
 def backfill_element_summaries(
