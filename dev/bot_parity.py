@@ -17,7 +17,9 @@ live prices) are recorded once into `--fpl` and served to both from the files, s
 the same bytes. Checks per session:
 
 - every step's replies and alert texts identical, byte for byte;
-- the databases identical (every table and row; write times aside), the plan logs included;
+- the databases identical (every table and row; write times aside), the plan logs included
+  (their `mip_gap`, HiGHS's bookkeeping, within 1e-9 relative: highspy's and our HiGHS
+  build round its dual bound differently on Linux);
 - where a plan differs: the batch 4 rule (plan #1's objective within 1e-6, the same plan #1
   unless it ties plan #2 within 1e-6) decides whether it is a tie broken differently.
 
@@ -32,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shlex
 import shutil
@@ -51,6 +54,32 @@ sys.path.insert(0, str(REPO / "tests"))
 FAMILY = "rust parity"
 QUIET = {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_ADMIN_CHAT_ID": "", "HEALTHCHECK_PING_URL": ""}
 OBJECTIVE_TOL = 1e-6
+MIP_GAP_RTOL = 1e-9
+
+
+def same_log(a: Any, b: Any) -> bool:
+    """Two parsed plan logs equal, `mip_gap` within MIP_GAP_RTOL."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        if a.keys() != b.keys():
+            return False
+        return all(
+            math.isclose(a[k], b[k], rel_tol=MIP_GAP_RTOL)
+            if k == "mip_gap" and isinstance(a[k], float) and isinstance(b[k], float)
+            else same_log(a[k], b[k])
+            for k in a
+        )
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(same_log(x, y) for x, y in zip(a, b, strict=True))
+    return a == b
+
+
+def same_plans(a: str | None, b: str | None) -> bool:
+    """Two plan log texts the same (`same_log`)."""
+    if a is None or b is None:
+        return a == b
+    return same_log(json.loads(a), json.loads(b))
+
+
 ADMIN = 1  # a chat id no real user has
 FIRST_CHAT = 900_001  # the public teams' chats
 # Public FPL teams of all kinds: long-standing, new, inactive this season, unknown.
@@ -273,9 +302,11 @@ def check(session: dict) -> dict:
     py_recs = session["python_db"].get("recommendations", [])
     rs_recs = session["rust_db"].get("recommendations", [])
     for a, b in zip(py_recs, rs_recs, strict=False):
-        if a == b:
-            continue
         rest = {k for k in a if a.get(k) != b.get(k)}
+        if rest == {"plans"} and same_plans(a["plans"], b["plans"]):
+            rest = set()
+        if not rest:
+            continue
         if rest <= {"plans", "decision", "message"}:
             reason = tie_explains(a.get("plans"), b.get("plans"))
             if reason is None:

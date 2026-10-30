@@ -67,6 +67,39 @@ fn dump_db(path: &Path) -> Value {
     Value::Object(out)
 }
 
+/// Two parsed plan logs equal, `mip_gap` within 1e-9 relative: HiGHS's bookkeeping, which
+/// highspy's and our HiGHS build round differently on Linux (dev/bot_parity.py's rule).
+fn same_log(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter().all(|(k, v)| match (k.as_str(), y.get(k)) {
+                    ("mip_gap", Some(w)) if v.is_f64() && w.is_f64() => {
+                        let (v, w) = (v.as_f64().unwrap(), w.as_f64().unwrap());
+                        (v - w).abs() <= 1e-9 * v.abs().max(w.abs())
+                    }
+                    (_, Some(w)) => same_log(v, w),
+                    (_, None) => false,
+                })
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(v, w)| same_log(v, w))
+        }
+        _ => a == b,
+    }
+}
+
+/// Two plan log texts (JSON strings) the same (`same_log`).
+fn same_plans(a: &Value, b: &Value) -> bool {
+    match (a.as_str(), b.as_str()) {
+        (Some(a), Some(b)) => match (serde_json::from_str(a), serde_json::from_str(b)) {
+            (Ok(a), Ok(b)) => same_log(&a, &b),
+            _ => false,
+        },
+        _ => a == b,
+    }
+}
+
 /// Where two values differ: around the first differing character for strings (CI cuts long
 /// log lines), else both values.
 fn difference(rust: &Value, python: &Value) -> String {
@@ -129,13 +162,15 @@ fn bot_session_matches_python() {
                 .as_object()
                 .unwrap()
                 .iter()
-                .filter(|(column, value)| g.get(column.as_str()) != Some(value))
+                .filter(|(column, value)| {
+                    let got = &g[column.as_str()];
+                    got != *value && !(column.as_str() == "plans" && same_plans(got, value))
+                })
                 .map(|(column, value)| format!("{column}: {}", difference(&g[column], value)))
                 .collect();
             assert!(differing.is_empty(), "{table} row {i}:\n{}", differing.join("\n"));
         }
     }
-    assert_eq!(db, want);
     let _ = std::fs::remove_dir_all(&state);
 }
 
