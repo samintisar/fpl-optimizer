@@ -74,6 +74,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+from fplopt.backtest.rules import CHIP_NAMES
+
 
 def _frozen(mapping: Mapping) -> Mapping:
     return MappingProxyType(dict(sorted(mapping.items())))
@@ -189,7 +191,7 @@ class OptimizerParams:
                     )
             object.__setattr__(self, "chip_value_left", _frozen(table))
         chips = tuple(sorted({str(c) for c in self.exclude_chips}))
-        unknown = [c for c in chips if c not in ("3xc", "bboost", "freehit", "wildcard")]
+        unknown = [c for c in chips if c not in CHIP_NAMES]
         if unknown:
             raise ValueError(f"exclude_chips: unknown chip names {unknown}")
         object.__setattr__(self, "exclude_chips", chips)
