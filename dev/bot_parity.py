@@ -25,9 +25,11 @@ the same bytes. Checks per session:
 
 `--rust-contexts` (batch 6): at the local deadlines the Rust bot plans on a context built by
 the Rust v1 model (`fplopt-rs models context`), the Python bot on Python's, so the whole live
-stack is compared. Then the contexts' ids differ and their xP agrees to ~1e-8, so plan logs
-compare with every number within OBJECTIVE_TOL (the decisions still exactly) and the
-recommendations' context_id is not compared; replies and alert texts stay byte for byte.
+stack is compared. The Rust context takes the Python one's id and build time (both show in
+messages and rows), so replies, alert texts and rows stay byte for byte except numbers: the
+xP agrees to ~1e-8, so plan logs compare with every number within OBJECTIVE_TOL (the
+decisions still exactly) and the `/chips` scenario values, solved to the planner's MIP gap,
+within that gap (`CHIP_RTOL`).
 
     cargo build --release -p fplopt-cli
     uv run python dev/bot_parity.py --server DIR [--data data] [--deadlines 2026:4,2026:8]
@@ -64,6 +66,24 @@ MIP_GAP_RTOL = 1e-9
 
 
 FLOAT_TOL: float | None = None  # --rust-contexts: plan-log numbers within OBJECTIVE_TOL
+CHIP_RTOL = 0.005  # --rust-contexts: /chips scenario values (OptimizerParams.mip_gap)
+
+
+def same_chip_checks(a: list, b: list) -> bool:
+    """Two chip_checks tables equal, their scenario values within CHIP_RTOL."""
+    if len(a) != len(b):
+        return False
+    for x, y in zip(a, b, strict=True):
+        if {k: v for k, v in x.items() if k != "scenarios"} != {
+            k: v for k, v in y.items() if k != "scenarios"
+        }:
+            return False
+        xs, ys = json.loads(x["scenarios"] or "{}"), json.loads(y["scenarios"] or "{}")
+        if xs.keys() != ys.keys() or not all(
+            math.isclose(xs[k], ys[k], rel_tol=CHIP_RTOL) for k in xs
+        ):
+            return False
+    return True
 
 
 def same_log(a: Any, b: Any) -> bool:
@@ -219,13 +239,15 @@ def local_context(data: Path, season: int, gw: int, root: Path) -> Path:
     return root
 
 
-def rust_context(binary: Path, data: Path, deadline, root: Path) -> Path:
-    """The Rust-built v1 context for the deadline `local_context` planned (`fplopt-rs models
-    context` two days before it), written under `root` (reused)."""
+def rust_context(binary: Path, data: Path, python, root: Path) -> Path:
+    """The Rust-built v1 context for the deadline of `python` (the context `local_context`
+    built; `fplopt-rs models context` two days before it), written under `root` (reused), with
+    the Python context's id and build time (they show in messages and rows)."""
     from fplopt.bot.context import ContextStore
 
     if ContextStore(root / "context").ids():
         return root
+    deadline = python.deadline
     now = (deadline - timedelta(days=2)).isoformat()
     env = {**os.environ, **QUIET, "FPLOPT_DATA_DIR": str(data), "RUST_LOG": "warn"}
     command = [str(binary), "models", "context", "--now", now, "--out", str(root / "context")]
@@ -233,6 +255,12 @@ def rust_context(binary: Path, data: Path, deadline, root: Path) -> Path:
     if done.returncode != 0 or not ContextStore(root / "context").ids():
         tail = (done.stdout + done.stderr)[-800:]
         raise SystemExit(f"fplopt-rs models context failed: {tail}")
+    built = root / "context" / ContextStore(root / "context").ids()[0]
+    meta = json.loads((built / "meta.json").read_text(encoding="utf-8"))
+    meta["context_id"] = python.context_id
+    meta["created_at"] = python.created_at.isoformat()
+    (built / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    built.rename(root / "context" / python.context_id)
     return root
 
 
@@ -341,8 +369,6 @@ def check(session: dict) -> dict:
     rs_recs = session["rust_db"].get("recommendations", [])
     for a, b in zip(py_recs, rs_recs, strict=False):
         rest = {k for k in a if a.get(k) != b.get(k)}
-        if FLOAT_TOL is not None:
-            rest.discard("context_id")  # each side's own context
         if rest == {"plans"} and same_plans(a["plans"], b["plans"]):
             rest = set()
         if not rest:
@@ -360,6 +386,8 @@ def check(session: dict) -> dict:
         if table == "recommendations":
             if len(a) != len(b):
                 problems.append(f"recommendations: {len(a)} vs {len(b)} rows")
+            continue
+        if table == "chip_checks" and FLOAT_TOL is not None and same_chip_checks(a, b):
             continue
         if table == "user_state" and ties:
             continue  # the squad saved after a tie-broken plan is the same import; checked below
@@ -476,7 +504,7 @@ def main() -> int:
         if args.rust_contexts:
             started = time.monotonic()
             rust_base = rust_context(
-                binary, args.data.resolve(), context.deadline, work / f"base-rust-{season}-{gw}"
+                binary, args.data.resolve(), context, work / f"base-rust-{season}-{gw}"
             )
             rust_id = ContextStore(rust_base / "context").latest().context_id
             took = time.monotonic() - started

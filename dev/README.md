@@ -671,3 +671,29 @@ uv run python dev/bot_parity.py --server DIR [--data data] [--deadlines 2026:4,2
 ```
 
 It logs a row to `results/experiments.csv` (family `rust parity`) and exits 1 on any failure.
+
+## `models_parity.py`: Rust migration batch 6 gate
+
+`models_parity.py` computes each `--models` frame in Python and with `fplopt-rs models dump`
+at the same deadlines from the same `data/`, and compares them with `fplopt-rs check parity
+table` on (player_key, horizon) plus the row order. The baselines must match within rtol
+1e-9; `v1` follows the plan's gate: its fit at the refit cutoff (every component's fitted
+values: the team ratings, the LightGBM boosters as model text, the availability mapping, the
+shares' and components' parameters) within 1e-6 relative, its xP within an absolute 0.01.
+The components (`team`, `minutes`, `availability`, `shares`, `components`) can be checked on
+their own, fitted at the deadline itself. Deadlines: the leakage check's edge list plus
+`--n-random` sampled ones, or `--seasons 2025,2026` (every deadline of those seasons so far:
+the plan's gate 2; the holdout season is run, never scored). `--plans` plans the template
+squad with the Rust planner on Python's and on Rust's v1 frame (no chips, the bot's setting)
+and wants plan #1 the same: gate 3, the xP's effect alone, since batch 4 showed the planners
+agree on the same frame. `bot_parity.py --rust-contexts` covers the registered users: the
+Rust bot on Rust-built contexts against the Python bot on Python's.
+
+```sh
+cargo build --release -p fplopt-cli
+uv run python dev/models_parity.py [--data data] [--models v1] [--n-random 10 | --seasons 2025,2026] [--plans] [--keep DIR]
+uv run python dev/bot_parity.py --server DIR --deadlines 2026:8,2026:9 --rust-contexts
+```
+
+It logs a row to `results/experiments.csv` (family `rust parity`) and exits 1 on any
+difference.
