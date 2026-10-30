@@ -172,6 +172,49 @@ def test_lgbm_golden_is_current():
     assert stored == json.loads(json.dumps(lgbm_golden()))
 
 
+NPRNG_SEEDS = [0, 1, 7, 12345, 2**33 + 5, 2**70 + 3]
+NPRNG_OPS = [
+    ["raw", 3], ["integers", 0, 10, 7], ["integers", 0, 1, 2], ["random", 3],
+    ["integers", 0, 2**32, 3], ["integers", 0, 2**40, 3], ["integers", -3, 3, 5],
+    ["permutation", 15], ["permutation", 1], ["permutation", 2], ["choice", 9, 20],
+    ["choice_p", [0.1, 0.0, 0.5, 0.4]], ["integers", 5, 6000, 4], ["choice_p", [1.0]],
+    ["choice_p", [0.25, 0.25, 0.25, 0.25]], ["permutation", 40], ["integers", 0, 3, 9],
+    ["choice_p", [3.0, 1.0, 1e-9]], ["integers", 0, 2**63 - 1, 2], ["random", 1],
+]  # fmt: skip
+
+
+def nprng_golden() -> dict:
+    """Draws of `np.random.default_rng(seed)` running NPRNG_OPS in order (fplopt_core::nprng)."""
+    import numpy as np
+
+    cases = []
+    for seed in NPRNG_SEEDS:
+        rng = np.random.default_rng(seed)
+        out = []
+        for op in NPRNG_OPS:
+            match op:
+                case ["raw", n]:
+                    out.append([str(v) for v in rng.bit_generator.random_raw(n).tolist()])
+                case ["integers", low, high, n]:
+                    out.append(rng.integers(low, high, size=n).tolist())
+                case ["random", n]:
+                    out.append(rng.random(n).tolist())
+                case ["permutation", n]:
+                    out.append(rng.permutation(n).tolist())
+                case ["choice", n, k]:
+                    out.append(rng.choice(np.arange(n) * 10, size=k, replace=True).tolist())
+                case ["choice_p", p]:
+                    weights = np.asarray(p, dtype="float64")
+                    out.append(int(rng.choice(len(p), p=weights / weights.sum())))
+        cases.append({"seed": str(seed), "draws": out})
+    return {"ops": NPRNG_OPS, "cases": cases}
+
+
+def test_nprng_golden_is_current():
+    stored = json.loads(gzip.decompress((GOLDEN / "nprng.json.gz").read_bytes()))
+    assert stored == json.loads(json.dumps(nprng_golden()))
+
+
 def test_bot_golden_is_current(tmp_path):
     import shutil
 
@@ -197,3 +240,5 @@ if __name__ == "__main__":
     CALIBRATION_FILE.write_text(text, encoding="utf-8", newline="\n")
     lgbm = json.dumps(lgbm_golden(), separators=(",", ":")).encode()
     (GOLDEN / "lgbm.json.gz").write_bytes(gzip.compress(lgbm, mtime=0))
+    nprng = json.dumps(nprng_golden(), separators=(",", ":")).encode()
+    (GOLDEN / "nprng.json.gz").write_bytes(gzip.compress(nprng, mtime=0))

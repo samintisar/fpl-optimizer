@@ -16,6 +16,8 @@ pub const DEFAULT_PRUNE_N: [(i64, i64); 4] = [(1, 20), (2, 60), (3, 60), (4, 30)
 pub const DEFAULT_NODE_LIMIT: i64 = 20_000;
 pub const DEFAULT_TIE_EPSILON: f64 = 1e-4;
 pub const DEFAULT_MIN_MINUTES: f64 = 180.0;
+/// FPL's chip names (Python `backtest.rules.CHIP_NAMES`).
+pub const CHIP_NAMES: [&str; 4] = ["wildcard", "freehit", "bboost", "3xc"];
 
 /// Planner settings (Python `OptimizerParams`). Maps are key-sorted. `prune_n` None
 /// disables top-N pruning; `max_hits`, `time_limit`, `node_limit` None mean no limit.
@@ -40,6 +42,11 @@ pub struct OptimizerParams {
     pub min_minutes: f64,
     /// Per chip name, the terminal value by GWs left in its window after the horizon.
     pub chip_value_left: Option<BTreeMap<String, Vec<f64>>>,
+    /// Chip names left out of the chip scenario search (sorted).
+    pub exclude_chips: Vec<String>,
+    /// The share of a Free Hit's gain over the no-chip plan that counts when chip scenarios
+    /// are ranked (`search::score`). 1 = all.
+    pub fh_scale: f64,
 }
 
 impl Default for OptimizerParams {
@@ -63,6 +70,8 @@ impl Default for OptimizerParams {
             bench_from_minutes: true,
             min_minutes: DEFAULT_MIN_MINUTES,
             chip_value_left: None,
+            exclude_chips: Vec::new(),
+            fh_scale: 1.0,
         }
     }
 }
@@ -103,6 +112,14 @@ impl OptimizerParams {
                     bail!("chip_value_left['{name}'] needs finite values >= 0, got {values:?}");
                 }
             }
+        }
+        let unknown: Vec<&String> =
+            self.exclude_chips.iter().filter(|c| !CHIP_NAMES.contains(&c.as_str())).collect();
+        if !unknown.is_empty() {
+            bail!("exclude_chips: unknown chip names {unknown:?}");
+        }
+        if !self.fh_scale.is_finite() || !(0.0..=1.0).contains(&self.fh_scale) {
+            bail!("fh_scale must be in [0, 1], got {}", self.fh_scale);
         }
         if let Some(prune_n) = &self.prune_n
             && prune_n.values().any(|v| *v < 0)

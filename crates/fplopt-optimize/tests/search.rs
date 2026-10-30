@@ -79,7 +79,7 @@ fn lp_and_dual_bounds_bound_every_scenario() {
         let (state, pool, xp) = instance(seed, 2, 5, 1, seed == 1);
         let params = OptimizerParams { horizon: 2, chip_value: cheap_chips(), ..exact() };
         let problem = problem_for(&state, &pool, &xp, &params);
-        for s in scenarios(&problem) {
+        for s in scenarios(&problem, &OptimizerParams::default()) {
             let plan = solve_plan(&problem, &params, None, &[], &s).unwrap();
             let lp = relaxation_bound(&problem, &params, &s).unwrap();
             assert!(plan.total_objective() <= plan.bound + 1e-6, "{}", s.label);
@@ -99,7 +99,7 @@ fn chip_extras_bound_tc_and_bb() {
         let problem = problem_for(&state, &pool, &xp, &params);
         let mut totals: HashMap<String, f64> = HashMap::new();
         let mut checked = 0;
-        for s in scenarios(&problem) {
+        for s in scenarios(&problem, &OptimizerParams::default()) {
             let extras: Vec<&(usize, String)> =
                 s.chips.iter().filter(|(_, n)| !TRANSFER_CHIPS.contains(&n.as_str())).collect();
             if extras.is_empty() {
@@ -191,7 +191,7 @@ fn bound_search_matches_all(case: Case) {
         params.chip_value = values;
     }
     let problem = problem_for(&state, &pool, &xp, &params);
-    let candidates = scenarios(&problem);
+    let candidates = scenarios(&problem, &OptimizerParams::default());
     let full = search(&problem, &params, &candidates, Search::All).unwrap();
     let fast = search(&problem, &params, &candidates, Search::Bound).unwrap();
     assert_eq!(fast.scenario, full.scenario, "seed {seed}");
@@ -254,7 +254,8 @@ fn bound_search_solves_only_no_chip_when_chips_cannot_pay() {
         result.scenario_objectives,
         vec![("none".to_string(), result.best().total_objective())]
     );
-    let labels: Vec<String> = scenarios(&problem).into_iter().map(|s| s.label).collect();
+    let labels: Vec<String> =
+        scenarios(&problem, &OptimizerParams::default()).into_iter().map(|s| s.label).collect();
     assert_eq!(result.scenario_bounds.iter().map(|(l, _)| l.clone()).collect::<Vec<_>>(), labels);
 }
 
@@ -263,7 +264,7 @@ fn search_validation() {
     let (state, pool, xp) = instance(9, 1, 5, 1, false);
     let params = OptimizerParams { horizon: 1, ..Default::default() };
     let problem = problem_for(&state, &pool, &xp, &params);
-    let candidates = scenarios(&problem);
+    let candidates = scenarios(&problem, &OptimizerParams::default());
     assert_eq!((Search::Bound.name(), Search::All.name()), ("bound", "all"));
     let err = search(&problem, &params, &candidates[1..], Search::Bound).err().expect("an error");
     assert!(err.to_string().contains("no-chip"), "{err}");

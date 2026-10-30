@@ -24,6 +24,11 @@ pub trait OddsSource {
     fn epl_odds(&self) -> Result<Vec<u8>>;
 }
 
+pub trait PropsSource {
+    fn epl_events(&self) -> Result<Vec<u8>>;
+    fn event_props(&self, event_id: &str) -> Result<Vec<u8>>;
+}
+
 pub trait FootballDataSource {
     fn epl_season(&self, start_year: i32) -> Result<Vec<u8>>;
 }

@@ -66,7 +66,7 @@ fn problem_at(
 }
 
 fn labels(problem: &PlanInput) -> Vec<String> {
-    scenarios(problem).into_iter().map(|s| s.label).collect()
+    scenarios(problem, &OptimizerParams::default()).into_iter().map(|s| s.label).collect()
 }
 
 struct Team {
@@ -149,8 +149,10 @@ fn scenarios_mid_season_singles_and_pairs() {
     assert_eq!(got.len(), 1 + 12 + 36);
     assert_eq!(got.iter().collect::<HashSet<_>>().len(), got.len());
     // Pairs come in (first position, first name, second position, second name) order.
-    let keys: Vec<Vec<(usize, String)>> =
-        scenarios(&problem)[13..].iter().map(|s| s.chips.clone()).collect();
+    let keys: Vec<Vec<(usize, String)>> = scenarios(&problem, &OptimizerParams::default())[13..]
+        .iter()
+        .map(|s| s.chips.clone())
+        .collect();
     let mut sorted = keys.clone();
     sorted.sort();
     assert_eq!(keys, sorted);
@@ -160,7 +162,7 @@ fn scenarios_mid_season_singles_and_pairs() {
 fn scenarios_skip_used_chips_and_record_chip_ids() {
     let rules = rules();
     let problem = problem_at(5, 3, &[(WC1, 3), (TC1, 4)], &rules, None);
-    let found = scenarios(&problem);
+    let found = scenarios(&problem, &OptimizerParams::default());
     let first: Vec<&str> = found[..7].iter().map(|s| s.label.as_str()).collect();
     assert_eq!(
         first,
@@ -185,7 +187,7 @@ fn free_hits_across_the_set_boundary() {
     for consecutive in [false, true] {
         let rules = Rules { freehit_consecutive: consecutive, ..common::rules() };
         let problem = problem_at(18, 4, &[], &rules, None); // GWs 18-21: set 1 ends at 19
-        let found = scenarios(&problem);
+        let found = scenarios(&problem, &OptimizerParams::default());
         let by_label: HashMap<&str, &ChipScenario> =
             found.iter().map(|s| (s.label.as_str(), s)).collect();
         assert_eq!(by_label["freehit@gw18+freehit@gw20"].chip_ids, vec![FH1, FH2]);
@@ -249,7 +251,7 @@ fn horizon_near_season_end() {
     let rules = rules();
     let problem = problem_at(36, 3, &[], &rules, Some(6)); // only GWs 36-38 in the xP frame
     assert_eq!(problem.gws.iter().map(|g| g.gw_index).collect::<Vec<_>>(), vec![36, 37, 38]);
-    let found = scenarios(&problem);
+    let found = scenarios(&problem, &OptimizerParams::default());
     assert!(found.iter().all(|s| terminal_value(&problem, &OptimizerParams::default(), s) == 0.0));
     let singles: Vec<&ChipScenario> = found.iter().filter(|s| s.chips.len() == 1).collect();
     assert_eq!(singles.len(), 12);
@@ -347,10 +349,9 @@ fn wildcard_under_retain_plus_one() {
     replay(&state, &plan, &pool, &rules);
 }
 
-#[test]
-fn free_hit_for_one_big_gw_reverts() {
-    // Owned players score 1; the market scores 8 in GW6 only, and one MID is worth buying for
-    // good in GW5. Some owned players were bought cheaper (selling price < price).
+/// Owned players score 1; the market scores 8 in GW6 only, and one MID (`keeper`) is worth
+/// buying for good in GW5. Some owned players were bought cheaper (selling price < price).
+fn big_gw_team() -> (Rules, SquadState, Vec<PoolPlayer>, XpFrame, i64) {
     let rules = rules();
     let pool_probe = grid_pool(1..=6, &GRID, None);
     let owned_probe = first_valid_squad(&pool_probe);
@@ -375,6 +376,12 @@ fn free_hit_for_one_big_gw_reverts() {
         ..Team::new(&[1.0, 1.0, 1.0])
     };
     let (state, pool, xp, _) = team.build();
+    (rules, state, pool, xp, keeper)
+}
+
+#[test]
+fn free_hit_for_one_big_gw_reverts() {
+    let (rules, state, pool, xp, keeper) = big_gw_team();
     let params = chip_params(3, &[("freehit", 4.0)]);
     let problem = problem(&state, &pool, &xp, &params, &rules);
     let plans = optimize(&problem, &params, 1, true, true, Search::Bound).unwrap();
@@ -583,11 +590,11 @@ fn terminal_values_by_window_left() {
         chip_value_left: Some(BTreeMap::from([("wildcard".to_string(), vec![1.0, 2.0, 3.0])])),
         ..exact()
     };
-    assert_eq!(chip_value(&params, "wildcard", 1), 1.0);
-    assert_eq!(chip_value(&params, "wildcard", 2), 2.0);
-    assert_eq!(chip_value(&params, "wildcard", 30), 3.0); // longer: the last entry
-    assert_eq!(chip_value(&params, "freehit", 2), 4.0); // not in the table: the flat value
-    assert_eq!(chip_value(&params, "3xc", 2), 0.0);
+    assert_eq!(chip_value(&params, "wildcard", 1, 1, false), 1.0);
+    assert_eq!(chip_value(&params, "wildcard", 2, 1, false), 2.0);
+    assert_eq!(chip_value(&params, "wildcard", 30, 1, false), 3.0); // longer: the last entry
+    assert_eq!(chip_value(&params, "freehit", 2, 1, false), 4.0); // not in the table: the flat value
+    assert_eq!(chip_value(&params, "3xc", 2, 1, false), 0.0);
     let none = ChipScenario::none();
     // GWs 5-7: 12 GWs left in set 1, 31 in set 2 -> the Wildcard's last entry twice.
     let early = problem_at(5, 3, &[], &rules, None);
@@ -613,4 +620,122 @@ fn chip_value_left_is_validated() {
     }
     .validate()
     .unwrap();
+}
+
+fn table(pairs: &[(&str, f64)]) -> Option<BTreeMap<String, Vec<f64>>> {
+    Some(pairs.iter().map(|(k, v)| (k.to_string(), vec![*v])).collect())
+}
+
+#[test]
+fn terminal_values_by_window() {
+    let rules = rules();
+    let params = OptimizerParams {
+        chip_value: BTreeMap::new(),
+        chip_value_left: table(&[("wildcard@1", 1.0), ("wildcard@2", 5.0), ("freehit", 2.0)]),
+        ..exact()
+    };
+    assert_eq!(chip_value(&params, "wildcard", 3, 1, false), 1.0);
+    assert_eq!(chip_value(&params, "wildcard", 3, 2, false), 5.0);
+    assert_eq!(chip_value(&params, "freehit", 3, 2, false), 2.0); // no window key: the name's
+    let none = ChipScenario::none();
+    // GWs 5-7: WC1 1 + WC2 5 + FH 2 per window; BB/TC not in either table: 0.
+    assert_eq!(terminal_value(&problem_at(5, 3, &[], &rules, None), &params, &none), 10.0);
+    // Ordinals follow window start, not chip id: swap the wildcard ids.
+    let mut swapped = rules.clone();
+    for w in swapped.chips.iter_mut().filter(|w| w.name == "wildcard") {
+        w.chip_id = if w.chip_id == WC1 { WC2 } else { WC1 };
+    }
+    assert_eq!(terminal_value(&problem_at(5, 3, &[], &swapped, None), &params, &none), 10.0);
+    // Only set 2 open (GWs 21-23): its wildcard is @2 whatever its chip id.
+    assert_eq!(terminal_value(&problem_at(21, 3, &[], &swapped, None), &params, &none), 7.0);
+}
+
+#[test]
+fn terminal_values_with_a_known_double() {
+    let rules = rules();
+    let params = OptimizerParams {
+        chip_value: BTreeMap::new(),
+        chip_value_left: table(&[
+            ("3xc@1+1", 9.0),
+            ("3xc@1", 1.0),
+            ("3xc@2", 2.0),
+            ("3xc@2+1", 7.0),
+        ]),
+        ..exact()
+    };
+    let none = ChipScenario::none();
+    let problem = problem_at(5, 3, &[], &rules, None);
+    assert!(problem.doubles.is_empty());
+    let with = |doubles: &[i64]| {
+        let p = PlanInput { doubles: doubles.iter().copied().collect(), ..problem.clone() };
+        terminal_value(&p, &params, &none)
+    };
+    assert_eq!(with(&[]), 1.0 + 2.0);
+    assert_eq!(with(&[12]), 9.0 + 2.0); // after the horizon, inside set 1, not set 2
+    assert_eq!(with(&[19]), 9.0 + 2.0); // the window's stop is inclusive
+    assert_eq!(with(&[20]), 1.0 + 7.0); // GW20 belongs to set 2
+    assert_eq!(with(&[6]), 1.0 + 2.0); // inside the horizon: planned already
+}
+
+#[test]
+fn scenarios_without_excluded_chips() {
+    let problem = problem_at(5, 2, &[], &rules(), None);
+    let params = OptimizerParams { exclude_chips: vec!["3xc".to_string()], ..exact() };
+    let kept: Vec<String> = scenarios(&problem, &params).into_iter().map(|s| s.label).collect();
+    assert!(kept[0] == "none" && !kept.iter().any(|l| l.contains("3xc")));
+    let all = labels(&problem);
+    let dropped: Vec<&String> = all.iter().filter(|l| !kept.contains(l)).collect();
+    assert_eq!(dropped, all.iter().filter(|l| l.contains("3xc")).collect::<Vec<_>>());
+}
+
+#[test]
+fn exclude_chips_and_fh_scale_are_validated() {
+    let bogus = OptimizerParams { exclude_chips: vec!["bogus".to_string()], ..Default::default() };
+    assert!(bogus.validate().unwrap_err().to_string().contains("exclude_chips"));
+    let big = OptimizerParams { fh_scale: 1.5, ..Default::default() };
+    assert!(big.validate().unwrap_err().to_string().contains("fh_scale"));
+    let parsed = fplopt_optimize::io::params_from_json(
+        &serde_json::json!({"exclude_chips": ["bboost", "3xc"], "fh_scale": 0.4}),
+    )
+    .unwrap();
+    assert_eq!(parsed.exclude_chips, ["3xc", "bboost"]); // sorted
+    assert_eq!(parsed.fh_scale, 0.4);
+}
+
+#[test]
+fn fh_scale_shrinks_the_free_hit_gain() {
+    // A Free Hit in GW6 (the market scores 8) wins at full value and loses when
+    // none of its gain counts (holding the chip is worth 4).
+    let rules = rules();
+    let (state, pool, xp, _) =
+        Team { other_xp: Some(vec![0.0, 8.0, 0.0]), ..Team::new(&[1.0, 1.0, 1.0]) }.build();
+    let params = chip_params(3, &[("freehit", 4.0)]);
+    let problem = problem(&state, &pool, &xp, &params, &rules);
+    let shrunk = OptimizerParams { fh_scale: 0.0, ..params.clone() };
+    for how in [Search::Bound, Search::All] {
+        let best = |p: &OptimizerParams| {
+            optimize(&problem, p, 1, true, false, how).unwrap().best().scenario.clone()
+        };
+        assert_eq!(best(&params), "freehit@gw6");
+        assert_eq!(best(&shrunk), "none");
+    }
+}
+
+#[test]
+fn fh_scale_bound_search_uses_the_score_for_its_incumbent() {
+    // With the Free Hit's gain unranked, 3xc@gw6 is the best plan; a bound search whose
+    // incumbent used the raw total (the Free Hit plan) would stop before solving it.
+    let rules = rules();
+    let (state, pool, xp, _) =
+        Team { other_xp: Some(vec![0.0, 8.0, 0.0]), ..Team::new(&[1.0, 1.0, 1.0]) }.build();
+    let params =
+        OptimizerParams { fh_scale: 0.0, ..chip_params(3, &[("freehit", 4.0), ("3xc", 0.0)]) };
+    let problem = problem(&state, &pool, &xp, &params, &rules);
+    let found: Vec<_> = [Search::Bound, Search::All]
+        .into_iter()
+        .map(|how| optimize(&problem, &params, 1, true, false, how).unwrap().best().clone())
+        .collect();
+    assert_eq!(found[0].scenario, "3xc@gw6");
+    assert_eq!(found[1].scenario, "3xc@gw6");
+    assert!((found[0].total_objective() - found[1].total_objective()).abs() < 1e-9);
 }

@@ -126,7 +126,7 @@ pub fn optimize(
         bail!("top_k must be >= 1, got {top_k}");
     }
     let start = Instant::now();
-    let candidates = if chips { scenarios(problem) } else { vec![ChipScenario::none()] };
+    let candidates = if chips { scenarios(problem, params) } else { vec![ChipScenario::none()] };
     let found = search(problem, params, &candidates, how)?;
     let (plan1, scenario1) = (found.plan, found.scenario);
 

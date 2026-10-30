@@ -3,7 +3,7 @@
 //! per horizon GW, and the minutes-based bench weights. Prices are fixed over the horizon;
 //! an owned player's first sale earns his selling price, any other sale his buy price.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use fplopt_build::scoring::Rules;
@@ -107,6 +107,9 @@ pub struct PlanInput {
     pub gw1: bool,
     pub n_pool: usize,
     pub bench_weights: Option<Vec<Vec<f64>>>,
+    /// The gw_indexes of double GWs known at the deadline (any club with ≥ 2 league
+    /// fixtures), for double-aware terminal values; empty unless the policy fills it.
+    pub doubles: BTreeSet<i64>,
 }
 
 impl PlanInput {
@@ -241,6 +244,7 @@ impl PlanInput {
             players,
             gws,
             bench_weights,
+            doubles: BTreeSet::new(),
         })
     }
 }

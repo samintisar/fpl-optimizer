@@ -5,14 +5,14 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Result;
-use chrono::{Datelike, TimeDelta};
+use anyhow::{Context, Result};
+use chrono::{DateTime, Datelike, TimeDelta, Utc};
 use fplopt_core::pyjson;
 use fplopt_core::seasons::{bootstrap_season, football_data_code, season_label, season_start_year};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::adapters::{EspnSource, FootballDataSource, FplSource, OddsSource};
+use crate::adapters::{EspnSource, FootballDataSource, FplSource, OddsSource, PropsSource};
 use crate::fetch::FetchError;
 use crate::pytime::isoformat;
 use crate::raw_store::{RawStore, TS_PATTERN, gzip_bytes, parse_ts};
@@ -76,6 +76,59 @@ pub fn snapshot_odds(
     };
     let content = odds.epl_odds()?;
     Ok(Some(store.write("odds", "soccer_epl", &content, &clock.now(), None)?))
+}
+
+pub const PROPS_ENDPOINT: &str = "soccer_epl_player_props";
+/// GW span after the season's last deadline.
+pub const PROPS_FALLBACK_SPAN: TimeDelta = TimeDelta::days(7);
+
+/// Player props of every EPL event kicking off after now and up to `until` (the next GW's
+/// deadline), archived as one JSON list of the per-event responses (as Python's
+/// `json.dumps` of them). Events whose request fails are left out and named in a
+/// SnapshotError raised after the write, so the window isn't fetched again (credits) and the
+/// failure still alerts.
+pub fn snapshot_player_props(
+    store: &RawStore,
+    props: &dyn PropsSource,
+    until: DateTime<Utc>,
+    clock: &dyn Clock,
+) -> Result<PathBuf> {
+    let current = clock.now();
+    let events: Vec<Value> = serde_json::from_slice(&props.epl_events()?)?;
+    let (mut responses, mut errors) = (Vec::new(), Vec::new());
+    for event in &events {
+        let id = event["id"].as_str().context("event without an id")?;
+        let commence = event["commence_time"].as_str().context("event without commence_time")?;
+        let kickoff = DateTime::parse_from_rfc3339(commence)?.with_timezone(&Utc);
+        if !(current < kickoff && kickoff <= until) {
+            continue;
+        }
+        match props.event_props(id).and_then(|body| pyjson::Ordered::parse(&body)) {
+            Ok(response) => responses.push(response),
+            Err(err) => {
+                if err.is::<stop::Terminated>() {
+                    return Err(err);
+                }
+                log::error!("player props for event {id} failed: {err:#}");
+                errors.push(format!("{id}: {}", kind_name(&err)));
+            }
+        }
+    }
+    if !errors.is_empty() && responses.is_empty() {
+        return Err(Failure::error(
+            "SnapshotError",
+            format!("player props: every event failed: {}", errors.join(", ")),
+        ));
+    }
+    let content = pyjson::dumps(&responses)?;
+    let path = store.write("odds", PROPS_ENDPOINT, content.as_bytes(), &clock.now(), None)?;
+    if !errors.is_empty() {
+        return Err(Failure::error(
+            "SnapshotError",
+            format!("player props failed for {}", errors.join(", ")),
+        ));
+    }
+    Ok(path)
 }
 
 /// One season's football-data CSV under football-data/E0/<code>, e.g. E0/1617.
@@ -173,6 +226,7 @@ pub fn run_tick(
     store: &RawStore,
     fpl: &dyn FplSource,
     odds: Option<&dyn OddsSource>,
+    props: Option<&dyn PropsSource>,
     clock: &dyn Clock,
 ) -> Result<bool> {
     let Some(latest) = store.latest("fpl", "bootstrap-static")? else {
@@ -201,6 +255,15 @@ pub fn run_tick(
             PRE_DEADLINE_LEAD,
         )
         .is_some();
+    let props_deadline = match props {
+        None => None,
+        Some(_) => pre_deadline_due(
+            current,
+            &deadlines,
+            &store.times("odds", PROPS_ENDPOINT)?,
+            PRE_DEADLINE_LEAD,
+        ),
+    };
     let mut steps = Vec::new();
     if let Some(deadline) = fpl_deadline {
         log::info!("pre-deadline FPL snapshot for deadline {}", isoformat(&deadline));
@@ -210,12 +273,24 @@ pub fn run_tick(
         log::info!("pre-deadline odds snapshot");
         steps.push(step("odds", || snapshot_odds(store, odds, clock).map(drop)));
     }
+    if let (Some(props), Some(due)) = (props, props_deadline) {
+        let until = deadlines
+            .iter()
+            .filter(|d| **d > due)
+            .min()
+            .copied()
+            .unwrap_or(due + PROPS_FALLBACK_SPAN);
+        log::info!("pre-deadline player props snapshot up to {}", isoformat(&until));
+        steps.push(step("player-props", move || {
+            snapshot_player_props(store, props, until, clock).map(drop)
+        }));
+    }
     if fpl_deadline.is_some() {
         // Last, so it reads the bootstrap the FPL step just archived.
         steps.push(step("post-lockdown", || snapshot_post_lockdown(store, fpl, clock)));
     }
     run_independently(steps)?;
-    Ok(fpl_deadline.is_some() || odds_due)
+    Ok(fpl_deadline.is_some() || odds_due || props_deadline.is_some())
 }
 
 #[derive(Serialize)]

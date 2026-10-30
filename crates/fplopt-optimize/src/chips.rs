@@ -5,6 +5,8 @@
 
 use std::collections::BTreeMap;
 
+use fplopt_build::scoring::ChipWindow;
+
 use crate::params::OptimizerParams;
 use crate::problem::PlanInput;
 use crate::state::{InvalidDecision, chip_window};
@@ -63,9 +65,16 @@ pub fn make_scenario(
 }
 
 /// Every scenario the rules allow: no chip; singles by (position, name); pairs by (first
-/// position, first name, second position, second name).
-pub fn scenarios(problem: &PlanInput) -> Vec<ChipScenario> {
-    let mut names: Vec<&str> = problem.rules.chips.iter().map(|c| c.name.as_str()).collect();
+/// position, first name, second position, second name); names in `params.exclude_chips`
+/// are left out.
+pub fn scenarios(problem: &PlanInput, params: &OptimizerParams) -> Vec<ChipScenario> {
+    let mut names: Vec<&str> = problem
+        .rules
+        .chips
+        .iter()
+        .map(|c| c.name.as_str())
+        .filter(|n| !params.exclude_chips.iter().any(|e| e == n))
+        .collect();
     names.sort_unstable();
     names.dedup();
     let one =
@@ -93,7 +102,8 @@ pub fn scenarios(problem: &PlanInput) -> Vec<ChipScenario> {
 }
 
 /// Σ chip values over the windows unused after the scenario that outlast the last horizon
-/// gw_index (in chip_id order, summed from 0).
+/// gw_index (in chip_id order, summed from 0). Each window is valued by its ordinal among the
+/// chip's windows and whether `problem.doubles` has a double in its part after the horizon.
 pub fn terminal_value(
     problem: &PlanInput,
     params: &OptimizerParams,
@@ -103,23 +113,40 @@ pub fn terminal_value(
         problem.state.chips_used.iter().any(|(c, _)| *c == cid) || scenario.chip_ids.contains(&cid)
     };
     let last = problem.gws.last().map_or(0, |g| g.gw_index);
-    let mut windows: Vec<_> = problem.rules.chips.iter().collect();
+    let all = &problem.rules.chips;
+    let ordinal = |w: &ChipWindow| {
+        1 + all.iter().filter(|o| o.name == w.name && o.start < w.start).count() as i64
+    };
+    let mut windows: Vec<_> = all.iter().collect();
     windows.sort_by_key(|w| w.chip_id);
-    py_sum(
-        windows
-            .into_iter()
-            .filter(|w| !used(w.chip_id) && w.stop > last)
-            .map(|w| chip_value(params, &w.name, w.stop - last)),
-    )
+    py_sum(windows.into_iter().filter(|w| !used(w.chip_id) && w.stop > last).map(|w| {
+        let from = last.max(w.start - 1);
+        let double = problem.doubles.iter().any(|&g| from < g && g <= w.stop);
+        chip_value(params, &w.name, w.stop - last, ordinal(w), double)
+    }))
 }
 
-/// The value of holding chip `name` with `left` (≥ 1) GWs of its window after the horizon.
-pub fn chip_value(params: &OptimizerParams, name: &str, left: i64) -> f64 {
-    if let Some(table) = &params.chip_value_left
-        && let Some(values) = table.get(name)
-    {
-        let i = (left.min(values.len() as i64) - 1).max(0) as usize;
-        return values[i];
+/// The value of holding chip `name` with `left` (≥ 1) GWs of its window after the horizon,
+/// from `params.chip_value_left` (its last entry for a longer window): the first key of
+/// `name@window+double` (0/1), `name@window`, `name` the table has; else the flat
+/// `params.chip_value[name]` (0 if missing).
+pub fn chip_value(
+    params: &OptimizerParams,
+    name: &str,
+    left: i64,
+    window: i64,
+    double: bool,
+) -> f64 {
+    if let Some(table) = &params.chip_value_left {
+        let keys = [
+            format!("{name}@{window}+{}", i64::from(double)),
+            format!("{name}@{window}"),
+            name.to_string(),
+        ];
+        if let Some(values) = keys.iter().find_map(|k| table.get(k)) {
+            let i = (left.min(values.len() as i64) - 1).max(0) as usize;
+            return values[i];
+        }
     }
     params.chip_value.get(name).copied().unwrap_or(0.0)
 }

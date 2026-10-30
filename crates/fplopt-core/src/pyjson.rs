@@ -7,6 +7,8 @@ use std::io;
 
 use anyhow::Result;
 use serde::Serialize;
+use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 use serde_json::ser::{CharEscape, Formatter};
 
 /// `json.dumps(value)`.
@@ -48,6 +50,103 @@ pub fn py_float_repr(f: f64) -> String {
         let rest = if digits.len() > 1 { format!(".{}", &digits[1..]) } else { String::new() };
         let esign = if exp < 0 { '-' } else { '+' };
         format!("{sign}{}{rest}e{esign}{:02}", &digits[..1], exp.abs())
+    }
+}
+
+/// A JSON value as Python's `json.loads` holds it: objects keep their key order (a repeated
+/// key keeps its first place and its last value), integers stay integers. `dumps` of it is
+/// `json.dumps(json.loads(text))`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Ordered {
+    Null,
+    Bool(bool),
+    Int(i128),
+    Float(f64),
+    Str(String),
+    Array(Vec<Ordered>),
+    Object(Vec<(String, Ordered)>),
+}
+
+impl Ordered {
+    pub fn parse(bytes: &[u8]) -> Result<Ordered> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+}
+
+impl Serialize for Ordered {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Ordered::Null => s.serialize_unit(),
+            Ordered::Bool(b) => s.serialize_bool(*b),
+            Ordered::Int(i) => s.serialize_i128(*i),
+            Ordered::Float(f) => s.serialize_f64(*f),
+            Ordered::Str(x) => s.serialize_str(x),
+            Ordered::Array(items) => {
+                let mut seq = s.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(item)?;
+                }
+                seq.end()
+            }
+            Ordered::Object(pairs) => {
+                let mut map = s.serialize_map(Some(pairs.len()))?;
+                for (k, v) in pairs {
+                    map.serialize_entry(k, v)?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Ordered {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Ordered, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Ordered;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Ordered, E> {
+                Ok(Ordered::Null)
+            }
+            fn visit_bool<E: de::Error>(self, b: bool) -> Result<Ordered, E> {
+                Ok(Ordered::Bool(b))
+            }
+            fn visit_i64<E: de::Error>(self, i: i64) -> Result<Ordered, E> {
+                Ok(Ordered::Int(i.into()))
+            }
+            fn visit_u64<E: de::Error>(self, i: u64) -> Result<Ordered, E> {
+                Ok(Ordered::Int(i.into()))
+            }
+            fn visit_f64<E: de::Error>(self, f: f64) -> Result<Ordered, E> {
+                Ok(Ordered::Float(f))
+            }
+            fn visit_str<E: de::Error>(self, x: &str) -> Result<Ordered, E> {
+                Ok(Ordered::Str(x.to_owned()))
+            }
+            fn visit_string<E: de::Error>(self, x: String) -> Result<Ordered, E> {
+                Ok(Ordered::Str(x))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Ordered, A::Error> {
+                let mut items = Vec::new();
+                while let Some(item) = seq.next_element()? {
+                    items.push(item);
+                }
+                Ok(Ordered::Array(items))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Ordered, A::Error> {
+                let mut pairs: Vec<(String, Ordered)> = Vec::new();
+                while let Some((k, v)) = map.next_entry::<String, Ordered>()? {
+                    match pairs.iter_mut().find(|(key, _)| *key == k) {
+                        Some(pair) => pair.1 = v,
+                        None => pairs.push((k, v)),
+                    }
+                }
+                Ok(Ordered::Object(pairs))
+            }
+        }
+        d.deserialize_any(V)
     }
 }
 
@@ -162,6 +261,21 @@ mod tests {
             dumps("Ødegaard é \u{1F600} \u{1} \"q\"").unwrap(),
             // (backslashes spelled out: the expected text is the escapes themselves)
             format!("\"{B}u00d8degaard {B}u00e9 {B}ud83d{B}ude00 {B}u0001 {B}\"q{B}\"\"")
+        );
+    }
+
+    #[test]
+    fn ordered_round_trips_as_python() {
+        // json.dumps(json.loads(text))
+        let text =
+            br#"{"z":1,"a":[1.50,2e2,-0.0,{"k":"x"}],"z2":null,"a":true,"big":12345678901234}"#;
+        assert_eq!(
+            dumps(&Ordered::parse(text).unwrap()).unwrap(),
+            r#"{"z": 1, "a": true, "z2": null, "big": 12345678901234}"#
+        );
+        assert_eq!(
+            dumps(&Ordered::parse(br#"[1.50, 2e2, -0.0, {"k": "x"}]"#).unwrap()).unwrap(),
+            r#"[1.5, 200.0, -0.0, {"k": "x"}]"#
         );
     }
 }

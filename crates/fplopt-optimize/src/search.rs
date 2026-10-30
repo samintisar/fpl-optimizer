@@ -138,15 +138,34 @@ impl State<'_> {
         Ok(())
     }
 
-    /// The best plan so far (ties to the earlier scenario).
+    /// The best plan so far by `score` (ties to the earlier scenario).
     fn incumbent(&self) -> usize {
         let mut best: Option<usize> = None;
-        for (&i, plan) in &self.plans {
-            if best.is_none_or(|b| plan.total_objective() > self.plans[&b].total_objective()) {
+        for &i in self.plans.keys() {
+            if best.is_none_or(|b| self.score(i) > self.score(b)) {
                 best = Some(i);
             }
         }
         best.expect("the no-chip plan")
+    }
+
+    /// What scenario i's plan is ranked by (Python `search._score`): its total objective,
+    /// less (1 − `fh_scale`) of its Free Hit gain over the no-chip plan in the Free Hit GWs
+    /// (never below 0). Only lowers a scenario's value, so the upper bounds stay valid.
+    fn score(&self, i: usize) -> f64 {
+        let plan = &self.plans[&i];
+        if self.params.fh_scale == 1.0 {
+            return plan.total_objective();
+        }
+        let base = &self.plans[&0];
+        let gain = py_sum(
+            self.candidates[i]
+                .chips
+                .iter()
+                .filter(|(_, name)| name == "freehit")
+                .map(|(t, _)| plan.gws[*t].objective - base.gws[*t].objective),
+        );
+        plan.total_objective() - (1.0 - self.params.fh_scale) * gain.max(0.0)
     }
 }
 
@@ -288,7 +307,7 @@ fn bound_search(s: &mut State) -> Result<Vec<(String, f64)>> {
         }
         let u = upper(s, i);
         let incumbent = s.incumbent();
-        let z = s.plans[&incumbent].total_objective();
+        let z = s.score(incumbent);
         if u < z || (u <= z && i > incumbent) {
             break; // no open scenario can beat (or tie earlier than) the incumbent
         }

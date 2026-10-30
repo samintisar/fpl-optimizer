@@ -374,7 +374,7 @@ fn singles(
     let bound =
         |label: &str| plans.scenario_bounds.iter().find(|(l, _)| l == label).map(|(_, b)| *b);
     let mut promising: Vec<(String, fplopt_optimize::ChipScenario)> = Vec::new();
-    for scenario in scenarios(problem) {
+    for scenario in scenarios(problem, params) {
         let Some(b) = bound(&scenario.label) else { continue };
         if scenario.chips.len() != 1 {
             continue;

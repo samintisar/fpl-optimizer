@@ -398,7 +398,7 @@ pub fn chips_text(options: &ChipOptions, shown: usize) -> String {
             if used.contains(&w.chip_id) || w.stop <= last_index || w.start > last_index + 1 {
                 continue;
             }
-            let value = chip_value(params, &w.name, w.stop - last_index);
+            let value = chip_value(params, &w.name, w.stop - last_index, 1, false);
             held.push(format!("{} {value:.1}", chip_label(&w.name)));
         }
         let held = held.join(", ");

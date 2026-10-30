@@ -1104,6 +1104,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "csv",
+ "flate2",
  "log",
  "regex",
  "reqwest 0.13.5",

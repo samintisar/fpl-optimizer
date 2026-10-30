@@ -125,6 +125,18 @@ pub fn params_with(base: OptimizerParams, v: &Value) -> Result<OptimizerParams> 
                     )
                 }
             }
+            "exclude_chips" => {
+                let mut chips: Vec<String> = x
+                    .as_array()
+                    .context("params.exclude_chips")?
+                    .iter()
+                    .map(|c| c.as_str().map(str::to_string).context("params.exclude_chips"))
+                    .collect::<Result<_>>()?;
+                chips.sort();
+                chips.dedup();
+                p.exclude_chips = chips;
+            }
+            "fh_scale" => p.fh_scale = float(x, key)?,
             other => bail!("params: unknown key '{other}'"),
         }
     }

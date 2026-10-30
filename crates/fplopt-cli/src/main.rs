@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use chrono::{TimeDelta, Utc};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
-use fplopt_archive::adapters::{self, OddsSource, base_url};
+use fplopt_archive::adapters::{self, OddsSource, PropsSource, base_url};
 use fplopt_archive::fetch::Http;
 use fplopt_archive::raw_store::RawStore;
 use fplopt_archive::{SystemClock, espn, health, history, jobs, stop};
@@ -218,8 +218,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 SnapshotJob::Daily => snapshot_daily(ctx),
                 SnapshotJob::Tick => {
                     let odds = ctx.odds();
+                    let props = odds.as_ref().map(|o| o as &dyn PropsSource);
                     let odds = odds.as_ref().map(|o| o as &dyn OddsSource);
-                    jobs::run_tick(&ctx.store, &ctx.fpl(), odds, &SystemClock).map(drop)
+                    jobs::run_tick(&ctx.store, &ctx.fpl(), odds, props, &SystemClock).map(drop)
                 }
             }))
         }

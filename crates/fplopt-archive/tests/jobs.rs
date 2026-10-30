@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
-use fplopt_archive::adapters::{FootballDataSource, FplSource, OddsSource};
+use fplopt_archive::adapters::{FootballDataSource, FplSource, OddsSource, PropsSource};
 use fplopt_archive::fetch::FetchError;
 use fplopt_archive::jobs::*;
 use fplopt_archive::raw_store::RawStore;
@@ -248,13 +248,18 @@ fn combined_error_is_one_line_naming_every_source() {
 fn tick_snapshots_an_empty_store_then_once_per_window() {
     let (_d, store) = new_store();
     let fpl = fpl();
-    assert!(run_tick(&store, &fpl, None, &clock(daily())).unwrap());
-    assert!(!run_tick(&store, &fpl, None, &clock(deadline() - TimeDelta::hours(3))).unwrap());
-    assert!(run_tick(&store, &fpl, None, &clock(deadline() - TimeDelta::minutes(110))).unwrap());
-    assert!(!run_tick(&store, &fpl, None, &clock(deadline() - TimeDelta::minutes(95))).unwrap());
+    assert!(run_tick(&store, &fpl, None, None, &clock(daily())).unwrap());
+    assert!(!run_tick(&store, &fpl, None, None, &clock(deadline() - TimeDelta::hours(3))).unwrap());
+    assert!(
+        run_tick(&store, &fpl, None, None, &clock(deadline() - TimeDelta::minutes(110))).unwrap()
+    );
+    assert!(
+        !run_tick(&store, &fpl, None, None, &clock(deadline() - TimeDelta::minutes(95))).unwrap()
+    );
     assert_eq!(n(&store, "fpl", "bootstrap-static"), 2);
     assert!(
-        !run_tick(&store, &fpl, Some(&odds()), &clock(deadline() + TimeDelta::minutes(5))).unwrap()
+        !run_tick(&store, &fpl, Some(&odds()), None, &clock(deadline() + TimeDelta::minutes(5)))
+            .unwrap()
     );
 }
 
@@ -264,17 +269,20 @@ fn tick_retries_odds_until_captured_in_window() {
     let fpl = fpl();
     daily_run(&store, &fpl, Some(&odds()), daily()).unwrap();
     let flaky = FakeOdds { failures: Cell::new(1), message: "odds down" };
-    let err = run_tick(&store, &fpl, Some(&flaky), &clock(deadline() - TimeDelta::minutes(110)))
-        .unwrap_err();
+    let err =
+        run_tick(&store, &fpl, Some(&flaky), None, &clock(deadline() - TimeDelta::minutes(110)))
+            .unwrap_err();
     assert!(err.to_string().contains("odds down"));
     assert_eq!(n(&store, "fpl", "bootstrap-static"), 2);
     assert!(
-        run_tick(&store, &fpl, Some(&flaky), &clock(deadline() - TimeDelta::minutes(95))).unwrap()
+        run_tick(&store, &fpl, Some(&flaky), None, &clock(deadline() - TimeDelta::minutes(95)))
+            .unwrap()
     );
     assert_eq!(n(&store, "odds", "soccer_epl"), 2);
     assert_eq!(n(&store, "fpl", "bootstrap-static"), 2);
     assert!(
-        !run_tick(&store, &fpl, Some(&flaky), &clock(deadline() - TimeDelta::minutes(80))).unwrap()
+        !run_tick(&store, &fpl, Some(&flaky), None, &clock(deadline() - TimeDelta::minutes(80)))
+            .unwrap()
     );
 }
 
@@ -601,7 +609,7 @@ fn pre_deadline_tick_runs_post_lockdown() {
     let (_d, store) = new_store();
     daily_run(&store, &two_gw(&[]), None, daily()).unwrap();
     let fpl = two_gw(&[1]);
-    assert!(run_tick(&store, &fpl, None, &clock(in_window)).unwrap());
+    assert!(run_tick(&store, &fpl, None, None, &clock(in_window)).unwrap());
     assert_eq!(fpl.live_calls.borrow().as_slice(), [1]);
     assert_eq!(fpl.summary_calls.borrow().as_slice(), [1, 2]);
     assert_eq!(latest_complete_element_summary(&store).unwrap(), (2026, 1));
@@ -609,7 +617,7 @@ fn pre_deadline_tick_runs_post_lockdown() {
     let (_d, store) = new_store();
     daily_run(&store, &two_gw(&[1]), None, daily()).unwrap();
     let fpl = two_gw(&[1]);
-    assert!(run_tick(&store, &fpl, None, &clock(in_window)).unwrap());
+    assert!(run_tick(&store, &fpl, None, None, &clock(in_window)).unwrap());
     assert_eq!(n(&store, "fpl", "bootstrap-static"), 3); // daily, its summary run, tick
     assert!(fpl.live_calls.borrow().is_empty() && fpl.summary_calls.borrow().is_empty());
 }
@@ -628,14 +636,15 @@ fn tick_outside_window_skips_post_lockdown_and_failures_do_not_hide_snapshots() 
         )
         .unwrap();
     let fpl = two_gw(&[1]);
-    assert!(!run_tick(&store, &fpl, None, &clock(daily() + TimeDelta::hours(2))).unwrap());
+    assert!(!run_tick(&store, &fpl, None, None, &clock(daily() + TimeDelta::hours(2))).unwrap());
     assert!(fpl.live_calls.borrow().is_empty());
 
     let (_d, store) = new_store();
     daily_run(&store, &two_gw(&[]), None, daily()).unwrap();
     let bad = FakeFpl { fail_live: [1].into(), ..two_gw(&[1]) };
-    let err = run_tick(&store, &bad, Some(&odds()), &clock(deadline() - TimeDelta::minutes(110)))
-        .unwrap_err();
+    let err =
+        run_tick(&store, &bad, Some(&odds()), None, &clock(deadline() - TimeDelta::minutes(110)))
+            .unwrap_err();
     assert!(err.to_string().contains("post-lockdown"));
     assert_eq!(n(&store, "fpl", "bootstrap-static"), 3);
     assert_eq!(n(&store, "odds", "soccer_epl"), 1);
@@ -659,4 +668,147 @@ fn a_teams_csv_problem_fails_only_the_espn_step() {
     let err = run_daily(&store, &fpl(), None, &clock(daily()), None, Some(espn)).unwrap_err();
     assert!(err.to_string().starts_with("espn: FileNotFoundError"), "{err}");
     assert_eq!(n(&store, "fpl", "bootstrap-static"), 1);
+}
+
+/// Events at the given kickoffs (ids e0, e1, ...); `fail` ids fail on their props.
+struct FakeProps {
+    kickoffs: Vec<DateTime<Utc>>,
+    fail: RefCell<HashSet<String>>,
+    calls: RefCell<Vec<String>>,
+}
+
+fn props(kickoffs: &[DateTime<Utc>], fail: &[&str]) -> FakeProps {
+    FakeProps {
+        kickoffs: kickoffs.to_vec(),
+        fail: RefCell::new(fail.iter().map(|s| s.to_string()).collect()),
+        calls: RefCell::new(Vec::new()),
+    }
+}
+
+impl PropsSource for FakeProps {
+    fn epl_events(&self) -> Result<Vec<u8>> {
+        let events: Vec<Value> = self
+            .kickoffs
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                json!({"id": format!("e{i}"), "commence_time": k.format("%Y-%m-%dT%H:%M:%SZ").to_string()})
+            })
+            .collect();
+        Ok(serde_json::to_vec(&events)?)
+    }
+
+    fn event_props(&self, event_id: &str) -> Result<Vec<u8>> {
+        self.calls.borrow_mut().push(event_id.to_string());
+        if self.fail.borrow().contains(event_id) {
+            bail!("props down");
+        }
+        Ok(serde_json::to_vec(&json!({"id": event_id, "bookmakers": []}))?)
+    }
+}
+
+fn props_tick_store(n_events: i64) -> (tempfile::TempDir, RawStore, FakeFpl) {
+    let (dir, store) = new_store();
+    let fpl = FakeFpl { n_events, ..fpl() };
+    daily_run(&store, &fpl, None, daily()).unwrap();
+    (dir, store, fpl)
+}
+
+fn tick_props(store: &RawStore, fpl: &FakeFpl, props: &FakeProps, before: i64) -> Result<bool> {
+    run_tick(store, fpl, None, Some(props), &clock(deadline() - TimeDelta::minutes(before)))
+}
+
+fn archived_ids(store: &RawStore) -> Vec<String> {
+    let path = store.latest("odds", PROPS_ENDPOINT).unwrap().unwrap();
+    let list = RawStore::read_json(&path).unwrap();
+    list.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn tick_archives_props_of_this_gws_events_once_per_window() {
+    let (_d, store, fpl) = props_tick_store(2);
+    // e0 already started, e1/e2 in this GW, e3 after the next deadline (a week later)
+    let props = props(
+        &[
+            deadline() - TimeDelta::hours(3),
+            deadline() + TimeDelta::hours(2),
+            deadline() + TimeDelta::days(6) + TimeDelta::hours(23),
+            deadline() + TimeDelta::days(8),
+        ],
+        &[],
+    );
+    assert!(!tick_props(&store, &fpl, &props, 180).unwrap());
+    assert!(props.calls.borrow().is_empty());
+    assert!(tick_props(&store, &fpl, &props, 110).unwrap());
+    assert_eq!(*props.calls.borrow(), ["e1", "e2"]);
+    assert_eq!(archived_ids(&store), ["e1", "e2"]);
+    assert!(!tick_props(&store, &fpl, &props, 95).unwrap());
+    assert_eq!(*props.calls.borrow(), ["e1", "e2"]);
+}
+
+#[test]
+fn props_after_the_last_deadline_cover_a_week() {
+    let (_d, store, fpl) = props_tick_store(1);
+    let props = props(&[deadline() + TimeDelta::days(6), deadline() + TimeDelta::days(8)], &[]);
+    tick_props(&store, &fpl, &props, 110).unwrap();
+    assert_eq!(*props.calls.borrow(), ["e0"]);
+}
+
+#[test]
+fn props_partial_failure_archives_the_rest_and_alerts_without_retry() {
+    let (_d, store, fpl) = props_tick_store(2);
+    let kickoffs = [deadline() + TimeDelta::hours(2), deadline() + TimeDelta::hours(4)];
+    let props = props(&kickoffs, &["e0"]);
+    let err = tick_props(&store, &fpl, &props, 110).unwrap_err();
+    assert_eq!(kind_name(&err), "SnapshotError");
+    assert!(err.to_string().contains("player props failed for e0"), "{err}");
+    assert_eq!(archived_ids(&store), ["e1"]);
+    assert!(!tick_props(&store, &fpl, &props, 95).unwrap());
+}
+
+#[test]
+fn props_total_failure_writes_nothing_and_retries() {
+    let (_d, store, fpl) = props_tick_store(2);
+    let props = props(&[deadline() + TimeDelta::hours(2)], &["e0"]);
+    let err = tick_props(&store, &fpl, &props, 110).unwrap_err();
+    assert!(err.to_string().contains("every event failed"), "{err}");
+    assert_eq!(n(&store, "odds", PROPS_ENDPOINT), 0);
+    props.fail.borrow_mut().clear();
+    assert!(tick_props(&store, &fpl, &props, 95).unwrap());
+    assert_eq!(n(&store, "odds", PROPS_ENDPOINT), 1);
+}
+
+#[test]
+fn props_window_with_no_events_is_still_marked_done() {
+    let (_d, store, fpl) = props_tick_store(2);
+    let props = props(&[], &[]);
+    assert!(tick_props(&store, &fpl, &props, 110).unwrap());
+    assert!(archived_ids(&store).is_empty());
+}
+
+#[test]
+fn props_are_archived_as_python_dumps_them() {
+    struct Raw;
+    impl PropsSource for Raw {
+        fn epl_events(&self) -> Result<Vec<u8>> {
+            Ok(br#"[{"id":"x1","commence_time":"2026-10-10T12:00:00Z"}]"#.to_vec())
+        }
+        fn event_props(&self, _: &str) -> Result<Vec<u8>> {
+            Ok(br#"{"id":"x1","price":3.10,"n":2,"name":"\u00d8degaard","a":[1e2]}"#.to_vec())
+        }
+    }
+    let (_d, store) = new_store();
+    let until = deadline() + TimeDelta::days(7);
+    let path = snapshot_player_props(&store, &Raw, until, &clock(deadline())).unwrap();
+    let mut text = String::new();
+    std::io::Read::read_to_string(
+        &mut flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap()),
+        &mut text,
+    )
+    .unwrap();
+    // json.dumps([json.loads(body)])
+    assert_eq!(
+        text,
+        r#"[{"id": "x1", "price": 3.1, "n": 2, "name": "\u00d8degaard", "a": [100.0]}]"#
+    );
 }

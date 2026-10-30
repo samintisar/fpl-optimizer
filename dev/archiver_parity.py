@@ -93,6 +93,7 @@ class Recording:
         self.unmatched: list[str] = []
         self._fpl()
         self._odds()
+        self._props()
         self._football_data()
         self._espn()
         self._vaastav()
@@ -140,6 +141,50 @@ class Recording:
             {"x-requests-remaining": "321", "x-requests-used": "179", "x-requests-last": "2"},
             body,
         )
+
+    def _props(self) -> None:
+        """Synthetic player props, relative to now (the tick-window scenario's deadline is in
+        an hour): one event already started, two this GW (one failing with faults), one long
+        after the next deadline. Bodies have unsorted keys, floats and non-ASCII names, which
+        both archivers re-encode as `json.dumps(json.loads(...))`."""
+        now = datetime.now(UTC)
+        kickoffs = {"ev0": -1, "ev1": 3, "ev2": 5, "ev3": 24 * 200}
+        events = [
+            {
+                "id": event_id,
+                "sport_key": "soccer_epl",
+                "commence_time": (now + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "home_team": "Brighton and Hove Albion",
+                "away_team": "Nottingham Forest",
+            }
+            for event_id, h in kickoffs.items()
+        ]
+        base = {"apiKey": ODDS_KEY, "dateFormat": "iso"}
+        self.routes[key("/odds/v4/sports/soccer_epl/events", base)] = (
+            200,
+            {},
+            json.dumps(events).encode(),
+        )
+        query = base | {
+            "regions": "us",
+            "oddsFormat": "decimal",
+            "markets": "player_goal_scorer_anytime,player_assists,player_shots_on_target",
+        }
+        for event in events:
+            body = (
+                (
+                    '{"id":"@ID","bookmakers":[{"key":"draftkings","title":"DraftKings","markets":'
+                    '[{"key":"player_goal_scorer_anytime","outcomes":[{"name":"Yes","description":'
+                    '"Martin \u00d8degaard","price":3.10,"point":0.5},{"name":"Yes","description":'
+                    '"Jo\u00e3o Pedro","price":2.25}]}]}],"commence_time":"@AT"}'
+                )
+                .replace("@ID", event["id"])
+                .replace("@AT", event["commence_time"])
+                .encode()
+            )
+            status = 500 if self.faults and event["id"] == "ev2" else 200
+            path = f"/odds/v4/sports/soccer_epl/events/{event['id']}/odds"
+            self.routes[key(path, query)] = (status, {"x-requests-remaining": "300"}, body)
 
     def _football_data(self) -> None:
         for year in range(2016, 2027):
@@ -283,7 +328,7 @@ class Python:
                 "snapshot daily": lambda: jobs.run_daily(
                     store, fpl, odds, football_data=fd, espn=espn, espn_teams_csv=self.teams_csv
                 ),
-                "snapshot tick": lambda: jobs.run_tick(store, fpl, odds),
+                "snapshot tick": lambda: jobs.run_tick(store, fpl, odds, props=odds),
                 "backfill element-summary": lambda: jobs.backfill_element_summaries(store, fpl),
                 "backfill football-data": lambda: history.backfill_football_data(
                     store, fd, first_season=from_season
@@ -387,7 +432,7 @@ SCENARIOS: dict[str, tuple[str, int, Callable[[RawStore, Recording], None] | Non
     ),
     "freshness-empty": ("check freshness", 2016, None),
 }
-FAULT_SCENARIOS = ("daily", "element-summary", "football-data", "vaastav", "espn")
+FAULT_SCENARIOS = ("daily", "tick-window", "element-summary", "football-data", "vaastav", "espn")
 
 
 # --- comparison ------------------------------------------------------------------------------
