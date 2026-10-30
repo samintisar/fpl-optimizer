@@ -18,7 +18,9 @@ fn copy_tree(from: &Path, to: &Path) {
             continue;
         }
         let target = to.join(&name);
-        if entry.file_type().unwrap().is_dir() {
+        // Follows symlinks (the external libs have some on Unix); a broken one is skipped.
+        let Ok(metadata) = fs::metadata(entry.path()) else { continue };
+        if metadata.is_dir() {
             copy_tree(&entry.path(), &target);
         } else {
             fs::copy(entry.path(), target).unwrap();

@@ -67,6 +67,20 @@ fn dump_db(path: &Path) -> Value {
     Value::Object(out)
 }
 
+/// Where two values differ: around the first differing character for strings (CI cuts long
+/// log lines), else both values.
+fn difference(rust: &Value, python: &Value) -> String {
+    let (Some(a), Some(b)) = (rust.as_str(), python.as_str()) else {
+        return format!("\n  rust:   {rust}\n  python: {python}");
+    };
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let at = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+    let window = |s: &[char]| -> String {
+        s[at.saturating_sub(80)..(at + 80).min(s.len())].iter().collect()
+    };
+    format!("first difference at char {at}\n  rust:   {:?}\n  python: {:?}", window(&a), window(&b))
+}
+
 /// Prints the bot's log to stderr, so a failed step shows why (cargo prints a failing
 /// test's output).
 struct StderrLog;
@@ -111,7 +125,14 @@ fn bot_session_matches_python() {
         let got = db[table].as_array().unwrap();
         assert_eq!(got.len(), rows.as_array().unwrap().len(), "{table}: row count");
         for (i, (g, w)) in got.iter().zip(rows.as_array().unwrap()).enumerate() {
-            assert_eq!(g, w, "{table} row {i}");
+            let differing: Vec<String> = w
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(column, value)| g.get(column.as_str()) != Some(value))
+                .map(|(column, value)| format!("{column}: {}", difference(&g[column], value)))
+                .collect();
+            assert!(differing.is_empty(), "{table} row {i}:\n{}", differing.join("\n"));
         }
     }
     assert_eq!(db, want);
