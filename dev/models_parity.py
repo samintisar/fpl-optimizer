@@ -39,9 +39,10 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from fplopt.backtest.evaluate import family_variants, log_experiment  # noqa: E402
+from fplopt.features.history import training_frame  # noqa: E402
 from fplopt.features.leakcheck import sample_deadlines  # noqa: E402
 from fplopt.features.store import DataStore  # noqa: E402
-from fplopt.models import MODELS, minutes, team  # noqa: E402
+from fplopt.models import MODELS, availability, minutes, shares, team  # noqa: E402
 
 FAMILY = "rust parity"
 QUIET = {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_ADMIN_CHAT_ID": "", "HEALTHCHECK_PING_URL": ""}
@@ -78,8 +79,30 @@ def _minutes(view):
     return minutes.predict_minutes(view, fit), values
 
 
+def _availability(view):
+    history = training_frame(view)
+    fit = minutes.fit_minutes(view, rows=history)
+    layer = availability.fit_availability(view, fit, history, back_split=True)
+    frame = availability.adjust_minutes(view, minutes.predict_minutes(view, fit), layer)
+    return frame, json.loads(json.dumps(dataclasses.asdict(layer)))
+
+
+def _shares(view):
+    lambdas = team.team_lambdas(view, team.fit_team(view))
+    adjusted, _ = _availability(view)
+    fit = shares.fit_shares(view)
+    values = {
+        k: v
+        for k, v in dataclasses.asdict(fit).items()
+        if k not in ("cutoff", "params", "coverage")
+    }
+    return shares.predict_shares(view, fit, adjusted, lambdas), json.loads(json.dumps(values))
+
+
 # name -> (frame and fitted values at the view, the frame's key)
 COMPONENTS = {
+    "shares": (_shares, ["player_key", "horizon", "fixture_key"]),
+    "availability": (_availability, ["player_key", "horizon", "fixture_key"]),
     "team": (_team, ["team_key", "gw_index", "fixture_key"]),
     "minutes": (_minutes, ["player_key", "horizon", "fixture_key"]),
 }

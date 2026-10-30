@@ -13,7 +13,9 @@ fplopt-core = { version = "0.1.0", path = "../fplopt-core" }
 fplopt-features = { version = "0.1.0", path = "../fplopt-features" }
 fplopt-lgbm = { version = "0.1.0", path = "../fplopt-lgbm" }
 fplopt-store = { version = "0.1.0", path = "../fplopt-store" }
+chrono = "0.4.45"
 log = "0.4.34"
+regex = "1.13.1"
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 
 [lints]

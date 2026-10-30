@@ -7,12 +7,16 @@
 // The numerical ports index like the reference code (MINPACK, scipy, numpy) on purpose, so
 // they can be read against it line by line.
 #![allow(clippy::needless_range_loop)]
+// Models key maps and sorts by tuples of table columns, as the feature builders do.
+#![allow(clippy::type_complexity)]
 
+pub mod availability;
 pub mod baseline;
 pub mod fitted;
 pub mod gbm;
 pub mod minutes;
 pub mod optim;
+pub mod shares;
 pub mod team;
 pub mod util;
 
@@ -29,7 +33,7 @@ pub const MODELS: &[&str] = &["rolling", "ep_next", "ep_next_fade"];
 
 /// Model components the parity gate checks on their own, fitted at the view's deadline
 /// (not the refit cutoff): name → (frame, fitted values).
-pub const COMPONENTS: &[&str] = &["team", "minutes"];
+pub const COMPONENTS: &[&str] = &["team", "minutes", "availability", "shares"];
 
 pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Value)> {
     match name {
@@ -40,6 +44,28 @@ pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Valu
         "minutes" => {
             let fit = minutes::fit_minutes(view, &minutes::MinutesParams::default(), None)?;
             Ok((minutes::predict_minutes(view, &fit)?.to_table(), fit.to_json()?))
+        }
+        "availability" => {
+            let history = fplopt_features::history::training_frame(view)?;
+            let params = minutes::MinutesParams::default();
+            let fit = minutes::fit_minutes(view, &params, Some(&history))?;
+            let layer = availability::fit_availability(view, &fit, Some(&history), true)?;
+            let adjusted =
+                availability::adjust_minutes(view, &minutes::predict_minutes(view, &fit)?, &layer)?;
+            Ok((adjusted.to_table(), layer.to_json()))
+        }
+        "shares" => {
+            let team_fit = team::fit_team(view, &team::TeamParams::default())?;
+            let lambdas = team::team_lambdas(view, &team_fit)?;
+            let history = fplopt_features::history::training_frame(view)?;
+            let params = minutes::MinutesParams::default();
+            let fit = minutes::fit_minutes(view, &params, Some(&history))?;
+            let layer = availability::fit_availability(view, &fit, Some(&history), true)?;
+            let adjusted =
+                availability::adjust_minutes(view, &minutes::predict_minutes(view, &fit)?, &layer)?;
+            let shares_fit = shares::fit_shares(view, &shares::SharesParams::default())?;
+            let frame = shares::predict_shares(view, &shares_fit, &adjusted, &lambdas)?;
+            Ok((frame.to_table(), shares_fit.to_json()))
         }
         other => bail!("unknown component {other:?} (known: {})", COMPONENTS.join(", ")),
     }
