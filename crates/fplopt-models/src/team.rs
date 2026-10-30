@@ -328,7 +328,7 @@ fn solve_market(
 
 /// One fixture's de-vigged markets (NaN = missing).
 #[derive(Clone, Copy, Debug)]
-struct Markets {
+pub(crate) struct Markets {
     fixture_key: i64,
     p_home: f64,
     p_draw: f64,
@@ -339,7 +339,7 @@ struct Markets {
 }
 
 /// Per fixture (sorted): (fixture_key, λ_home, λ_away, success); NaN without complete 1X2.
-fn market_lambdas(markets: &[Markets], rho: f64) -> Result<Vec<(i64, f64, f64, bool)>> {
+pub(crate) fn market_lambdas(markets: &[Markets], rho: f64) -> Result<Vec<(i64, f64, f64, bool)>> {
     let size = MAX_GOALS + 1;
     let grid = |f: &dyn Fn(f64, f64) -> bool| -> Vec<f64> {
         let mut out = vec![0.0; size * size];
@@ -391,7 +391,7 @@ fn market_lambdas(markets: &[Markets], rho: f64) -> Result<Vec<(i64, f64, f64, b
 
 /// One visible pre-match odds row.
 #[derive(Clone, Debug)]
-struct OddsRow {
+pub(crate) struct OddsRow {
     fixture_key: i64,
     bookmaker: String,
     market: String,
@@ -403,7 +403,7 @@ struct OddsRow {
 /// Pre-match odds of `fixture_keys` visible in the view, one snapshot per fixture:
 /// football-data `avg` (newest snapshot) where its h2h is complete, else the newest Odds API
 /// snapshot (every bookmaker in it).
-fn visible_odds(view: &AsOfView, fixture_keys: &HashSet<i64>) -> Result<Vec<OddsRow>> {
+pub(crate) fn visible_odds(view: &AsOfView, fixture_keys: &HashSet<i64>) -> Result<Vec<OddsRow>> {
     let columns = [
         "fixture_key",
         "source",
@@ -572,7 +572,7 @@ impl Ord for OrdF64 {
 }
 
 /// Per fixture with complete 1X2: the de-vigged markets (NaN where missing), sorted.
-fn market_probabilities(odds: &[OddsRow], method: Devig) -> Vec<Markets> {
+pub(crate) fn market_probabilities(odds: &[OddsRow], method: Devig) -> Vec<Markets> {
     let h2h = devig_market(odds, "h2h", &OUTCOMES_1X2, method);
     let totals_rows: Vec<OddsRow> = odds
         .iter()

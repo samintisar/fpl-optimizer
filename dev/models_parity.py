@@ -42,7 +42,7 @@ from fplopt.backtest.evaluate import family_variants, log_experiment  # noqa: E4
 from fplopt.features.history import training_frame  # noqa: E402
 from fplopt.features.leakcheck import sample_deadlines  # noqa: E402
 from fplopt.features.store import DataStore  # noqa: E402
-from fplopt.models import MODELS, availability, minutes, shares, team  # noqa: E402
+from fplopt.models import MODELS, availability, components, minutes, shares, team  # noqa: E402
 
 FAMILY = "rust parity"
 QUIET = {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_ADMIN_CHAT_ID": "", "HEALTHCHECK_PING_URL": ""}
@@ -51,10 +51,10 @@ TOLERANCE = {"v1": ["--rtol", "0", "--atol", "0.01"]}  # others: the parity chec
 FIT_RTOL = 1e-6
 
 
-def _team(view):
-    fit = team.fit_team(view)
-    values = {k: v for k, v in dataclasses.asdict(fit).items() if k not in ("cutoff", "params")}
-    return team.team_lambdas(view, fit), values
+def _values(fit, skip=("cutoff", "params")) -> dict:
+    """A fit's dataclass fields as JSON values (`skip` left out)."""
+    values = {k: v for k, v in dataclasses.asdict(fit).items() if k not in skip}
+    return json.loads(json.dumps(values))
 
 
 def _part(part) -> dict:
@@ -64,19 +64,29 @@ def _part(part) -> dict:
     return {"model": text[: text.rindex("\npandas_categorical:")]}  # the package's suffix
 
 
+def _minutes_values(fit) -> dict:
+    values = {k: _part(getattr(fit, k)) for k in ("start", "sixty", "sub")}
+    names = (
+        "minutes_sixty", "minutes_short", "minutes_sub", "n_rows", "ban_start", "ban_sub",
+        "ban_start_likely", "ban_sub_likely",
+    )  # fmt: skip
+    return {**values, **{k: getattr(fit, k) for k in names}}
+
+
+def _components_values(fit) -> dict:
+    return json.loads(
+        json.dumps({k: dataclasses.asdict(getattr(fit, k)) for k in ("bonus", "saves", "rates")})
+    )
+
+
+def _team(view):
+    fit = team.fit_team(view)
+    return team.team_lambdas(view, fit), _values(fit)
+
+
 def _minutes(view):
     fit = minutes.fit_minutes(view)
-    values = {
-        **{k: _part(getattr(fit, k)) for k in ("start", "sixty", "sub")},
-        **{
-            k: getattr(fit, k)
-            for k in (
-                "minutes_sixty", "minutes_short", "minutes_sub", "n_rows", "ban_start",
-                "ban_sub", "ban_start_likely", "ban_sub_likely",
-            )
-        },
-    }  # fmt: skip
-    return minutes.predict_minutes(view, fit), values
+    return minutes.predict_minutes(view, fit), _minutes_values(fit)
 
 
 def _availability(view):
@@ -84,30 +94,51 @@ def _availability(view):
     fit = minutes.fit_minutes(view, rows=history)
     layer = availability.fit_availability(view, fit, history, back_split=True)
     frame = availability.adjust_minutes(view, minutes.predict_minutes(view, fit), layer)
-    return frame, json.loads(json.dumps(dataclasses.asdict(layer)))
+    return frame, _values(layer, ())
 
 
 def _shares(view):
     lambdas = team.team_lambdas(view, team.fit_team(view))
     adjusted, _ = _availability(view)
     fit = shares.fit_shares(view)
+    frame = shares.predict_shares(view, fit, adjusted, lambdas)
+    return frame, _values(fit, ("cutoff", "params", "coverage"))
+
+
+def _components(view):
+    lambdas = team.team_lambdas(view, team.fit_team(view))
+    adjusted, _ = _availability(view)
+    fit = components.fit_components(view)
+    frame = components.predict_components(view, fit, adjusted, lambdas, shares.fit_shares(view))
+    return frame, _components_values(fit)
+
+
+def _v1(view):
+    """The model itself: fitted at the refit cutoff (gate 1: every component's values),
+    predicted at the deadline (gate 2: the xP frame)."""
+    model = MODELS["v1"]
+    fit = model.fit(view.earlier(model.cutoff(view)))
     values = {
-        k: v
-        for k, v in dataclasses.asdict(fit).items()
-        if k not in ("cutoff", "params", "coverage")
+        "team": _values(fit.team),
+        "minutes": _minutes_values(fit.minutes),
+        "availability": _values(fit.availability, ()),
+        "shares": _values(fit.shares, ("cutoff", "params", "coverage")),
+        "components": _components_values(fit.components),
     }
-    return shares.predict_shares(view, fit, adjusted, lambdas), json.loads(json.dumps(values))
+    return model.predict(view, fit), values
 
 
 # name -> (frame and fitted values at the view, the frame's key)
 COMPONENTS = {
+    "v1": (_v1, ["player_key", "horizon"]),
+    "components": (_components, ["player_key", "horizon", "fixture_key"]),
     "shares": (_shares, ["player_key", "horizon", "fixture_key"]),
     "availability": (_availability, ["player_key", "horizon", "fixture_key"]),
     "team": (_team, ["team_key", "gw_index", "fixture_key"]),
     "minutes": (_minutes, ["player_key", "horizon", "fixture_key"]),
 }
-for _name in COMPONENTS:
-    TOLERANCE[_name] = ["--rtol", str(FIT_RTOL), "--atol", "0"]
+for _name in COMPONENTS:  # v1's frame keeps the plan's xP tolerance
+    TOLERANCE.setdefault(_name, ["--rtol", str(FIT_RTOL), "--atol", "0"])
 
 
 def compare_fits(python: dict, rust: dict, where: str = "") -> list[str]:

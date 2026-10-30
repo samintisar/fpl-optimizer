@@ -244,7 +244,7 @@ impl Minutes {
 }
 
 /// The keys of a minutes row (`KEYS`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Key {
     pub player_key: i64,
     pub fixture_key: i64,

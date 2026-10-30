@@ -10,8 +10,11 @@
 // Models key maps and sorts by tuples of table columns, as the feature builders do.
 #![allow(clippy::type_complexity)]
 
+pub mod assemble;
 pub mod availability;
 pub mod baseline;
+pub mod calibration;
+pub mod components;
 pub mod fitted;
 pub mod gbm;
 pub mod minutes;
@@ -29,14 +32,16 @@ pub use baseline::HORIZON;
 pub const MAX_HORIZON: i64 = HORIZON + 1;
 
 /// The registered models (Python's `MODELS`), by name.
-pub const MODELS: &[&str] = &["rolling", "ep_next", "ep_next_fade"];
+pub const MODELS: &[&str] = &["rolling", "ep_next", "ep_next_fade", "v1"];
 
 /// Model components the parity gate checks on their own, fitted at the view's deadline
-/// (not the refit cutoff): name → (frame, fitted values).
-pub const COMPONENTS: &[&str] = &["team", "minutes", "availability", "shares"];
+/// (not the refit cutoff): name → (frame, fitted values); `v1` is the model itself (fitted
+/// at the refit cutoff), its xP frame and every component's fitted values.
+pub const COMPONENTS: &[&str] = &["team", "minutes", "availability", "shares", "components", "v1"];
 
 pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Value)> {
     match name {
+        "v1" => assemble::xp_v1_with_fit(view),
         "team" => {
             let fit = team::fit_team(view, &team::TeamParams::default())?;
             Ok((team::team_lambdas(view, &fit)?, fit.to_json()))
@@ -67,6 +72,27 @@ pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Valu
             let frame = shares::predict_shares(view, &shares_fit, &adjusted, &lambdas)?;
             Ok((frame.to_table(), shares_fit.to_json()))
         }
+        "components" => {
+            let team_fit = team::fit_team(view, &team::TeamParams::default())?;
+            let lambdas = team::team_lambdas(view, &team_fit)?;
+            let history = fplopt_features::history::training_frame(view)?;
+            let params = minutes::MinutesParams::default();
+            let fit = minutes::fit_minutes(view, &params, Some(&history))?;
+            let layer = availability::fit_availability(view, &fit, Some(&history), true)?;
+            let adjusted =
+                availability::adjust_minutes(view, &minutes::predict_minutes(view, &fit)?, &layer)?;
+            let shares_fit = shares::fit_shares(view, &shares::SharesParams::default())?;
+            let components_fit =
+                components::fit_components(view, &components::ComponentsParams::default())?;
+            let frame = components::predict_components(
+                view,
+                &components_fit,
+                &adjusted,
+                &lambdas,
+                &shares_fit,
+            )?;
+            Ok((frame.to_table(), components_fit.to_json()))
+        }
         other => bail!("unknown component {other:?} (known: {})", COMPONENTS.join(", ")),
     }
 }
@@ -77,6 +103,7 @@ pub fn predict(name: &str, view: &AsOfView) -> Result<Table> {
         "rolling" => baseline::xp_rolling(view),
         "ep_next" => baseline::xp_ep_next(view),
         "ep_next_fade" => baseline::xp_ep_next_fade(view),
+        "v1" => assemble::xp_v1(view),
         other => bail!("unknown xP model {other:?} (known: {})", MODELS.join(", ")),
     }
 }

@@ -81,6 +81,32 @@ def test_names_golden_is_current():
     assert all(fuzz.token_set_ratio(a, b) == score for a, b, score in golden["pairs"])
 
 
+CALIBRATION_FILE = (
+    Path(__file__).resolve().parents[1] / "crates" / "fplopt-models" / "calibration_table.json"
+)
+
+
+def calibration_export() -> dict:
+    """`fplopt.models.calibration_table` as JSON (embedded by crates/fplopt-models): per
+    season its parts, isotonic maps as [first horizon, x, y] and the xp map as [position, a,
+    b]; `params` is the V1Params fingerprint the table was fitted with."""
+    from fplopt.models.calibration_table import CALIBRATION_PARAMS, CALIBRATION_TABLE
+
+    def plain(value):
+        return [plain(v) for v in value] if isinstance(value, tuple) else value
+
+    table = [
+        [season, {name: plain(value) for name, value in parts}]
+        for season, parts in CALIBRATION_TABLE
+    ]
+    return {"params": CALIBRATION_PARAMS, "table": table}
+
+
+def test_calibration_export_is_current():
+    stored = json.loads(CALIBRATION_FILE.read_text(encoding="utf-8"))
+    assert stored == json.loads(json.dumps(calibration_export()))
+
+
 LGBM_CASES = [
     # (name, seed, rows, weights, GbmParams overrides)
     ("weighted", 0, 600, "decay", {"num_boost_round": 30, "num_leaves": 7, "min_data_in_leaf": 20}),
@@ -167,5 +193,7 @@ if __name__ == "__main__":
     GOLDEN.mkdir(parents=True, exist_ok=True)
     text = json.dumps(seasons_golden(), indent=1, sort_keys=True) + "\n"
     (GOLDEN / "seasons.json").write_text(text, encoding="utf-8", newline="\n")
+    text = json.dumps(calibration_export(), separators=(",", ":")) + "\n"
+    CALIBRATION_FILE.write_text(text, encoding="utf-8", newline="\n")
     lgbm = json.dumps(lgbm_golden(), separators=(",", ":")).encode()
     (GOLDEN / "lgbm.json.gz").write_bytes(gzip.compress(lgbm, mtime=0))

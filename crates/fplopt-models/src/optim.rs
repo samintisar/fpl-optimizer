@@ -932,6 +932,365 @@ pub fn lmder(
     Ok((x, info))
 }
 
+// --- L-BFGS-B (no bounds) ----------------------------------------------------------------
+
+/// One end of the Moré–Thuente interval: step, function value, derivative.
+#[derive(Clone, Copy, Debug)]
+struct End {
+    stp: f64,
+    f: f64,
+    d: f64,
+}
+
+/// MINPACK-2 `dcstep`: the safeguarded cubic / quadratic step of the Moré–Thuente search;
+/// updates the interval ends `x`, `y` and returns the new step.
+#[allow(clippy::too_many_arguments)]
+fn dcstep(
+    x: &mut End,
+    y: &mut End,
+    stp: f64,
+    fp: f64,
+    dp: f64,
+    brackt: &mut bool,
+    stpmin: f64,
+    stpmax: f64,
+) -> f64 {
+    let (stx, fx, dx) = (x.stp, x.f, x.d);
+    let (sty, fy, dy) = (y.stp, y.f, y.d);
+    let sgnd = dp * (dx / dx.abs());
+    let stpf;
+    if fp > fx {
+        let theta = 3.0 * (fx - fp) / (stp - stx) + dx + dp;
+        let s = theta.abs().max(dx.abs()).max(dp.abs());
+        let mut gamma = s * ((theta / s).powi(2) - (dx / s) * (dp / s)).sqrt();
+        if stp < stx {
+            gamma = -gamma;
+        }
+        let p = (gamma - dx) + theta;
+        let q = ((gamma - dx) + gamma) + dp;
+        let r = p / q;
+        let stpc = stx + r * (stp - stx);
+        let stpq = stx + ((dx / ((fx - fp) / (stp - stx) + dx)) / 2.0) * (stp - stx);
+        stpf =
+            if (stpc - stx).abs() < (stpq - stx).abs() { stpc } else { stpc + (stpq - stpc) / 2.0 };
+        *brackt = true;
+    } else if sgnd < 0.0 {
+        let theta = 3.0 * (fx - fp) / (stp - stx) + dx + dp;
+        let s = theta.abs().max(dx.abs()).max(dp.abs());
+        let mut gamma = s * ((theta / s).powi(2) - (dx / s) * (dp / s)).sqrt();
+        if stp > stx {
+            gamma = -gamma;
+        }
+        let p = (gamma - dp) + theta;
+        let q = ((gamma - dp) + gamma) + dx;
+        let r = p / q;
+        let stpc = stp + r * (stx - stp);
+        let stpq = stp + (dp / (dp - dx)) * (stx - stp);
+        stpf = if (stpc - stp).abs() > (stpq - stp).abs() { stpc } else { stpq };
+        *brackt = true;
+    } else if dp.abs() < dx.abs() {
+        let theta = 3.0 * (fx - fp) / (stp - stx) + dx + dp;
+        let s = theta.abs().max(dx.abs()).max(dp.abs());
+        let mut gamma = s * (0.0f64.max((theta / s).powi(2) - (dx / s) * (dp / s))).sqrt();
+        if stp > stx {
+            gamma = -gamma;
+        }
+        let p = (gamma - dp) + theta;
+        let q = (gamma + (dx - dp)) + gamma;
+        let r = p / q;
+        let stpc = if r < 0.0 && gamma != 0.0 {
+            stp + r * (stx - stp)
+        } else if stp > stx {
+            stpmax
+        } else {
+            stpmin
+        };
+        let stpq = stp + (dp / (dp - dx)) * (stx - stp);
+        if *brackt {
+            let f = if (stpc - stp).abs() < (stpq - stp).abs() { stpc } else { stpq };
+            stpf = if stp > stx {
+                (stp + 0.66 * (sty - stp)).min(f)
+            } else {
+                (stp + 0.66 * (sty - stp)).max(f)
+            };
+        } else {
+            let f = if (stpc - stp).abs() > (stpq - stp).abs() { stpc } else { stpq };
+            stpf = stpmin.max(stpmax.min(f));
+        }
+    } else if *brackt {
+        let theta = 3.0 * (fp - fy) / (sty - stp) + dy + dp;
+        let s = theta.abs().max(dy.abs()).max(dp.abs());
+        let mut gamma = s * ((theta / s).powi(2) - (dy / s) * (dp / s)).sqrt();
+        if stp > sty {
+            gamma = -gamma;
+        }
+        let p = (gamma - dp) + theta;
+        let q = ((gamma - dp) + gamma) + dy;
+        let r = p / q;
+        stpf = stp + r * (sty - stp);
+    } else if stp > stx {
+        stpf = stpmax;
+    } else {
+        stpf = stpmin;
+    }
+    if fp > fx {
+        *y = End { stp, f: fp, d: dp };
+    } else {
+        if sgnd < 0.0 {
+            *y = *x;
+        }
+        *x = End { stp, f: fp, d: dp };
+    }
+    stpf
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Search {
+    Fg,
+    Convergence,
+    Warning,
+    Error,
+}
+
+/// MINPACK-2 `dcsrch` (Moré–Thuente) with L-BFGS-B's settings: ftol 1e-3, gtol 0.9,
+/// xtol 0.1, stpmin 0.
+struct Dcsrch {
+    stpmax: f64,
+    brackt: bool,
+    stage: u8,
+    finit: f64,
+    ginit: f64,
+    gtest: f64,
+    width: f64,
+    width1: f64,
+    x: End,
+    y: End,
+    stmin: f64,
+    stmax: f64,
+}
+
+const LS_FTOL: f64 = 1e-3;
+const LS_GTOL: f64 = 0.9;
+const LS_XTOL: f64 = 0.1;
+const LS_STPMIN: f64 = 0.0;
+
+impl Dcsrch {
+    /// task = 'START': the checks and the initial state (Fg, or Error).
+    fn start(f: f64, g: f64, stp: f64, stpmax: f64) -> (Dcsrch, Search) {
+        let error = stp < LS_STPMIN || stp > stpmax || g >= 0.0;
+        let width = stpmax - LS_STPMIN;
+        let state = Dcsrch {
+            stpmax,
+            brackt: false,
+            stage: 1,
+            finit: f,
+            ginit: g,
+            gtest: LS_FTOL * g,
+            width,
+            width1: width / 0.5,
+            x: End { stp: 0.0, f, d: g },
+            y: End { stp: 0.0, f, d: g },
+            stmin: 0.0,
+            stmax: stp + 4.0 * stp,
+        };
+        (state, if error { Search::Error } else { Search::Fg })
+    }
+
+    /// f and g at `stp`: the next `stp` to try (Fg), or the end of the search.
+    fn next(&mut self, f: f64, g: f64, stp: &mut f64) -> Search {
+        let ftest = self.finit + *stp * self.gtest;
+        if self.stage == 1 && f <= ftest && g >= 0.0 {
+            self.stage = 2;
+        }
+        let mut task = Search::Fg;
+        if self.brackt && (*stp <= self.stmin || *stp >= self.stmax) {
+            task = Search::Warning;
+        }
+        if self.brackt && self.stmax - self.stmin <= LS_XTOL * self.stmax {
+            task = Search::Warning;
+        }
+        if *stp == self.stpmax && f <= ftest && g <= self.gtest {
+            task = Search::Warning;
+        }
+        if *stp == LS_STPMIN && (f > ftest || g >= self.gtest) {
+            task = Search::Warning;
+        }
+        if f <= ftest && g.abs() <= LS_GTOL * (-self.ginit) {
+            task = Search::Convergence;
+        }
+        if task != Search::Fg {
+            return task;
+        }
+        let (stmin, stmax) = (self.stmin, self.stmax);
+        let new = if self.stage == 1 && f <= self.x.f && f > ftest {
+            // The modified function ψ(stp) = f − stp · gtest.
+            let gtest = self.gtest;
+            let mut xm =
+                End { stp: self.x.stp, f: self.x.f - self.x.stp * gtest, d: self.x.d - gtest };
+            let mut ym =
+                End { stp: self.y.stp, f: self.y.f - self.y.stp * gtest, d: self.y.d - gtest };
+            let fm = f - *stp * gtest;
+            let gm = g - gtest;
+            let new = dcstep(&mut xm, &mut ym, *stp, fm, gm, &mut self.brackt, stmin, stmax);
+            self.x = End { stp: xm.stp, f: xm.f + xm.stp * gtest, d: xm.d + gtest };
+            self.y = End { stp: ym.stp, f: ym.f + ym.stp * gtest, d: ym.d + gtest };
+            new
+        } else {
+            dcstep(&mut self.x, &mut self.y, *stp, f, g, &mut self.brackt, stmin, stmax)
+        };
+        *stp = new;
+        if self.brackt {
+            if (self.y.stp - self.x.stp).abs() >= 0.66 * self.width1 {
+                *stp = self.x.stp + 0.5 * (self.y.stp - self.x.stp);
+            }
+            self.width1 = self.width;
+            self.width = (self.y.stp - self.x.stp).abs();
+        }
+        if self.brackt {
+            self.stmin = self.x.stp.min(self.y.stp);
+            self.stmax = self.x.stp.max(self.y.stp);
+        } else {
+            self.stmin = *stp + 1.1 * (*stp - self.x.stp);
+            self.stmax = *stp + 4.0 * (*stp - self.x.stp);
+        }
+        *stp = stp.max(LS_STPMIN).min(self.stpmax);
+        if (self.brackt && (*stp <= self.stmin || *stp >= self.stmax))
+            || (self.brackt && self.stmax - self.stmin <= LS_XTOL * self.stmax)
+        {
+            *stp = self.x.stp;
+        }
+        Search::Fg
+    }
+}
+
+pub struct LbfgsbResult {
+    pub x: Vec<f64>,
+    pub fun: f64,
+    pub success: bool,
+    pub nit: usize,
+}
+
+/// `minimize(fun, x0, jac=True, method="L-BFGS-B", options={"maxiter": maxiter})` without
+/// bounds (scipy's defaults: 10 corrections, ftol 2.22e-9, gtol 1e-5, 20 line-search steps).
+/// With no bounds L-BFGS-B's generalized Cauchy point and subspace minimization give the
+/// L-BFGS step: −g/θ while the memory is empty, else −H g (two-loop recursion, H₀ = I/θ,
+/// θ = y·y / s·y of the newest pair). The search starts from 1/‖d‖ on the first iteration,
+/// else 1, and a step of exactly 1 lands on z itself, as in `lnsrlb`.
+pub fn lbfgsb(
+    mut fun: impl FnMut(&[f64]) -> (f64, Vec<f64>),
+    x0: Vec<f64>,
+    maxiter: usize,
+) -> Result<LbfgsbResult> {
+    const M: usize = 10;
+    const FTOL: f64 = 2.220446049250313e-9;
+    const PGTOL: f64 = 1e-5;
+    const MAXLS: usize = 20;
+    const BIG: f64 = 1e10;
+    let tol = (FTOL / f64::EPSILON) * f64::EPSILON;
+    let n = x0.len();
+    let mut x = x0;
+    let (mut f, mut g) = fun(&x);
+    let inf_norm = |g: &[f64]| g.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let mut pairs: std::collections::VecDeque<(Vec<f64>, Vec<f64>, f64)> = Default::default();
+    let mut theta = 1.0;
+    let mut iter = 0;
+    let mut success = inf_norm(&g) <= PGTOL;
+    while !success {
+        // The search point z (Cauchy point or subspace minimizer) and d = z − x.
+        let z: Vec<f64> = if pairs.is_empty() {
+            let f1: f64 = g.iter().fold(0.0, |acc, gi| acc - gi * gi);
+            let f2 = -theta * f1;
+            let dtm = (-f1 / f2).max(0.0);
+            (0..n).map(|i| x[i] + dtm * (-g[i])).collect()
+        } else {
+            let mut q = g.clone();
+            let mut alpha = vec![0.0; pairs.len()];
+            for (k, (s, y, rho)) in pairs.iter().enumerate().rev() {
+                alpha[k] = rho * dot(s, &q);
+                for i in 0..n {
+                    q[i] -= alpha[k] * y[i];
+                }
+            }
+            let mut r: Vec<f64> = q.iter().map(|v| v / theta).collect();
+            for (k, (s, y, rho)) in pairs.iter().enumerate() {
+                let beta = rho * dot(y, &r);
+                for i in 0..n {
+                    r[i] += s[i] * (alpha[k] - beta);
+                }
+            }
+            (0..n).map(|i| x[i] - r[i]).collect()
+        };
+        let d: Vec<f64> = (0..n).map(|i| z[i] - x[i]).collect();
+        let dnorm = dot(&d, &d).sqrt();
+        let mut stp = if iter == 0 { (1.0 / dnorm).min(BIG) } else { 1.0 };
+        let (t, r, fold) = (x.clone(), g.clone(), f);
+        let gdold = dot(&g, &d);
+        if gdold >= 0.0 {
+            // An ascent direction: L-BFGS-B restarts from an empty memory, or gives up.
+            if pairs.is_empty() {
+                break;
+            }
+            pairs.clear();
+            theta = 1.0;
+            continue;
+        }
+        let (mut search, mut task) = Dcsrch::start(f, gdold, stp, BIG);
+        let mut gd = gdold;
+        let mut ifun = 0;
+        while task == Search::Fg {
+            if ifun >= MAXLS {
+                task = Search::Error;
+                break;
+            }
+            ifun += 1;
+            x = if stp == 1.0 { z.clone() } else { (0..n).map(|i| stp * d[i] + t[i]).collect() };
+            (f, g) = fun(&x);
+            gd = dot(&g, &d);
+            task = search.next(f, gd, &mut stp);
+        }
+        if task == Search::Error {
+            // Back to the last good point; with an empty memory L-BFGS-B gives up.
+            x = t;
+            g = r;
+            f = fold;
+            if pairs.is_empty() {
+                break;
+            }
+            pairs.clear();
+            theta = 1.0;
+            continue;
+        }
+        iter += 1;
+        if iter >= maxiter {
+            break;
+        }
+        if inf_norm(&g) <= PGTOL {
+            success = true;
+            break;
+        }
+        if fold - f <= tol * fold.abs().max(f.abs()).max(1.0) {
+            success = true;
+            break;
+        }
+        let y: Vec<f64> = (0..n).map(|i| g[i] - r[i]).collect();
+        let rr = dot(&y, &y);
+        let (dr, s, ddum) = if stp == 1.0 {
+            (gd - gdold, d.clone(), -gdold)
+        } else {
+            ((gd - gdold) * stp, d.iter().map(|v| stp * v).collect(), -gdold * stp)
+        };
+        if dr <= f64::EPSILON * ddum {
+            continue; // skip the update
+        }
+        theta = rr / dr;
+        if pairs.len() == M {
+            pairs.pop_front();
+        }
+        pairs.push_back((s, y, 1.0 / dr));
+    }
+    Ok(LbfgsbResult { x, fun: f, success, nit: iter })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
