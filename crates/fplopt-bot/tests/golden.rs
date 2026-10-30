@@ -67,8 +67,25 @@ fn dump_db(path: &Path) -> Value {
     Value::Object(out)
 }
 
+/// Prints the bot's log to stderr, so a failed step shows why (cargo prints a failing
+/// test's output).
+struct StderrLog;
+
+impl log::Log for StderrLog {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        eprintln!("{} {}", record.level(), record.args());
+    }
+
+    fn flush(&self) {}
+}
+
 #[test]
 fn bot_session_matches_python() {
+    let _ = log::set_logger(&StderrLog).map(|()| log::set_max_level(log::LevelFilter::Info));
     let root = repo();
     // Rules and chip values are read relative to the repo root, as the CLI runs.
     std::env::set_current_dir(&root).unwrap();
