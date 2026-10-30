@@ -315,6 +315,20 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
       which is the five-subs season of idea 2). The real fix for the club effect is
       European / cup fixtures as a source (`main` has the ESPN adapter and congestion
       features since #51, which `research` lacks: see *Needs the user*).
+    - **2026-10-30, after the main merge** (6439125: `europe_week`, `rest_days_all`,
+      `days_to_next`, cup minutes alongside the two Elo features). The merge alone moved the
+      baseline MSE h0 4.24287 → 4.22904. Head walk (`diag-europe-head.txt`): top-6 regulars
+      vs mid / bottom sides −0.9 / −1.3 pp (from −1.3 / −1.7), so the club effect is smaller
+      but not gone. Regulars at clubs without a UEFA match are +0.8 pp overall, but that is
+      2022 (+3.3 pp, the five-subs season, idea 2) plus keepers (+1.6, idea 9) and MIDs
+      (+1.4); other seasons are within ±0.75 (`diag-europe-head2.txt`).
+    - `no-club-rating` (drop `club_rating` now that the real European data is in): DISCARD,
+      MSE h0 +0.00128, 5 of 6 seasons worse. **Keep both Elo features at promotion**: they
+      add beyond `europe_week`.
+    - `europe-next` (a UEFA match within 4 days *after* the fixture; top-6 regulars −2.3 pp
+      with it vs −0.3 pp with it before, 5 of 6 seasons): DISCARD, flat (+0.00004, 3–3).
+      `days_to_next` with `europe_week` already carries the direction. The line is done unless
+      a new source arrives (e.g. squad-rotation news, the crowd of idea 13).
 16. **DEF goal spread: closed** (model; new 2026-10-29, one variant DISCARD). Starters'
     realized DEF goals on E[goals] have slope 0.68 at h0 / 0.66 at h1–5 (MID 0.95, FWD
     0.98), top share quintile 0.85 of expected, bottom 1.19 (`diag-def-spread.txt`).
@@ -322,6 +336,17 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
     pooled slope is mostly between-season level: in-season slopes are 0.69–0.97, and even a
     perfect in-season rescale of DEF goal points is worth ≤ −0.0005 pooled in any season
     (`diag-def-ceiling.txt`). Not worth another value.
+
+17. **MID xP band shape** (model; new 2026-10-30, diagnostic only). Head walk 6439125 h0
+    (`diag-head-scan.txt`, `diag-mid-band.txt`): MID xP 2.5–3.5 under-predicted +0.139
+    (z 4.2, 5 of 6 seasons) and 3.5–4.5 +0.129; ≥ 5.5 over-predicted −0.273 (5 of 6), 4.5–5.5
+    −0.133. Components: the 2.5–4.5 gap is spread thin (appearance +0.03, goals +0.03–0.06,
+    CS +0.03 (idea 6's subbing pattern), bonus +0.02; 2019 −0.03); the top band's is bonus
+    −0.12 in all 6 seasons (idea 4's premium-MID finding again) plus goals −0.19 that swing
+    by season (2020 −0.73, 2021 +0.32). Removable SSE of every MID cell together ≈ 4 bp of
+    total (≤ ~0.002 MSE even if fully removed). No single-component fix; a bonus cap or
+    interaction would repeat `bonus-team-goals` / `cs-attack-bonus`. Not a loop
+    experiment without a new mechanism. Keepers at xP 2.5–3.5 +0.152 (6 of 6) are ideas 9–10.
 
 Looked at 2026-10-28, no lead: the team model (λ_against calibrated within 2 % at every
 horizon, P(CS) 0.279 vs 0.281, slope 0.92–0.95, `diag-team-lambda.txt`); P(60+ | start)
@@ -332,6 +357,15 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 `diag-finish-price-over.txt`).
 
 ## Needs the user (not the loop's to do)
+
+- **2026-10-30**: after the main merge, the model ideas the loop can test are used up. Two
+  tried tonight (both DISCARD), and I stopped there rather than spend variants on knobs. What
+  would open new lines: (1) the crowd inputs in the pinned harness (idea 13; still not in
+  `dev/calibrate_v1.py`'s `TABLES` / `SNAPSHOT_COLUMNS` on `research`); (2) a calibration
+  table regenerated on `research` (decision experiments, idea 5 FT value 2.0, are still
+  blocked: `research` runs `main`'s table with other defaults); (3) your call on the
+  for-the-user DISCARDs (ideas 6, 7, 9, 10). Also: `club_rating` and `win_expectancy`
+  both still pay their way on top of the ESPN features (idea 15), so promote both.
 
 - **Two new keeps on `research`** (2026-10-29, idea 15): `win_expectancy` (1ff8914) and
   `club_rating` (6e09a1c), Elo match strength and the club's own Elo as minutes lag
