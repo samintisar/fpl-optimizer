@@ -1844,7 +1844,7 @@ JOBS: dict[str, Job] = {
         espn=EspnClient(c.http),
         espn_teams_csv=TEAMS_CSV,
     ),
-    "snapshot tick": lambda c: jobs.run_tick(c.store, c.fpl, c.odds),
+    "snapshot tick": lambda c: jobs.run_tick(c.store, c.fpl, c.odds, props=c.odds),
     "backfill element-summary": lambda c: jobs.backfill_element_summaries(c.store, c.fpl),
     "backfill football-data": lambda c: history.backfill_football_data(
         c.store, FootballDataClient(c.http), first_season=c.args.from_season

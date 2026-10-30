@@ -1,4 +1,5 @@
-"""The Odds API (v4): live EPL match odds. Methods return the raw response bytes."""
+"""The Odds API (v4): live EPL match odds and player props. Methods return the raw response
+bytes."""
 
 from __future__ import annotations
 
@@ -14,6 +15,10 @@ BASE_URL = "https://api.the-odds-api.com/v4"
 SPORT = "soccer_epl"
 MARKETS = ("h2h", "totals")
 REGIONS = ("uk",)
+# Player props (per event): US bookmakers only on The Odds API (PLAN §11). A call costs the
+# number of these markets returned times len(PROP_REGIONS) credits.
+PROP_MARKETS = ("player_goal_scorer_anytime", "player_assists", "player_shots_on_target")
+PROP_REGIONS = ("us",)
 LOW_CREDIT_WARNING = 50
 
 
@@ -29,18 +34,29 @@ class OddsClient:
 
     def epl_odds(self) -> bytes:
         """Current EPL odds. Costs len(MARKETS) * len(REGIONS) credits per call."""
+        return self._get(f"sports/{SPORT}/odds/", REGIONS, MARKETS)
+
+    def epl_events(self) -> bytes:
+        """Upcoming EPL events (ids, teams, kickoff times). Free: no credits."""
+        return self._get(f"sports/{SPORT}/events", None, None)
+
+    def event_props(self, event_id: str) -> bytes:
+        """Player props of one event (`PROP_MARKETS` in `PROP_REGIONS`)."""
+        if not event_id.isalnum():
+            raise ValueError(f"bad event id {event_id!r}")
+        return self._get(f"sports/{SPORT}/events/{event_id}/odds", PROP_REGIONS, PROP_MARKETS)
+
+    def _get(
+        self, path: str, regions: tuple[str, ...] | None, markets: tuple[str, ...] | None
+    ) -> bytes:
+        params = {"apiKey": self._api_key, "dateFormat": "iso"}
+        if regions is not None:
+            params |= {"regions": ",".join(regions), "oddsFormat": "decimal"}
+        if markets is not None:
+            params["markets"] = ",".join(markets)
         try:
             response = get_json_response(
-                self._client,
-                f"{self._base}/sports/{SPORT}/odds/",
-                params={
-                    "apiKey": self._api_key,
-                    "regions": ",".join(REGIONS),
-                    "markets": ",".join(MARKETS),
-                    "oddsFormat": "decimal",
-                    "dateFormat": "iso",
-                },
-                attempts=3,
+                self._client, f"{self._base}/{path}", params=params, attempts=3
             )
         except httpx.HTTPStatusError as exc:
             failure = f"HTTP {exc.response.status_code} {_error_code(exc.response)}".rstrip()
