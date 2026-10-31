@@ -100,6 +100,9 @@ MINUTES_COLUMNS = (*KEYS, "p_start", "p_60", "p_sub", "e_minutes", "p_play", "ba
 SORT_BY = ("player_key", "horizon", "fixture_key")
 
 
+GBM_ROUNDS = 400  # boosting rounds of each minutes part
+
+
 @dataclass(frozen=True)
 class MinutesParams:
     """Tuned on develop walk-forward (dev/minutes_eval.py, 2017/18–2022/23): `GbmParams()`
@@ -107,11 +110,12 @@ class MinutesParams:
     and feature fraction 0.8, and beat 100 rounds × 7 leaves and 400 × 31; season decay 0.7
     ≈ 0.9 > 0.5; horizon decay 0.85 > 0.9 > 0.75 > 1 (no decay); the normalization bounds
     and the long-run prior barely matter (normalization on vs off: log loss 0.532 vs
-    0.533)."""
+    0.533). That was with about half of today's `LAG_FEATURES`; 400 rounds (2026-10-31,
+    autoresearch) re-checks the capacity for the full set."""
 
-    start: GbmParams = field(default_factory=GbmParams)
-    sixty: GbmParams = field(default_factory=GbmParams)
-    sub: GbmParams = field(default_factory=GbmParams)
+    start: GbmParams = field(default_factory=lambda: GbmParams(num_boost_round=GBM_ROUNDS))
+    sixty: GbmParams = field(default_factory=lambda: GbmParams(num_boost_round=GBM_ROUNDS))
+    sub: GbmParams = field(default_factory=lambda: GbmParams(num_boost_round=GBM_ROUNDS))
     season_decay: float = 0.7  # training weight per season of age
     horizon_decay: float = 0.85  # weight of the model's p_start at horizon h: decay ** h
     horizon_shrink: float = 0.92  # logit p_start × shrink ** h after the decay (1: off)
