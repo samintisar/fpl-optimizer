@@ -17,6 +17,8 @@ pub const MAX_PLAN_HORIZON: i64 = 6;
 
 #[derive(Subcommand)]
 pub enum OptimizeJob {
+    /// Solve-time and pruning benchmark (#10).
+    Bench(crate::bench::BenchArgs),
     /// Top plans and the roll plan at a real deadline.
     Plan(PlanArgs),
     /// Import an FPL team as a squad file to check or edit.

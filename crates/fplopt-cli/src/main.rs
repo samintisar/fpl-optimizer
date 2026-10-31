@@ -10,9 +10,13 @@
 //! successful `snapshot daily|tick` pings HEALTHCHECK_PING_URL if set.
 
 mod backtest;
+mod bench;
 mod bot;
+mod chips;
+mod holdout;
 mod live;
 mod models;
+mod models_eval;
 mod optimize;
 mod optimize_plan;
 
@@ -97,6 +101,16 @@ enum Command {
         #[command(subcommand)]
         command: backtest::BacktestJob,
     },
+    /// The chip study's estimators.
+    Chips {
+        #[command(subcommand)]
+        command: chips::ChipsJob,
+    },
+    /// The holdout season's inputs (the Phase 6 run itself stays Python's).
+    Holdout {
+        #[arg(value_enum)]
+        command: HoldoutJob,
+    },
     /// The MILP planner.
     Optimize {
         #[command(subcommand)]
@@ -125,6 +139,11 @@ enum FeaturesJob {
         #[arg(long)]
         out: PathBuf,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HoldoutJob {
+    Check,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -265,6 +284,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 features_dump(&ctx.settings.data_dir, &deadlines, &out)
             }))
         }
+        Command::Models { command: models::ModelsJob::Eval(args) } => models_eval::run(&args),
         Command::Models { command: models::ModelsJob::Context { now, out } } => {
             Ok(run_job("models context", |ctx| models::context(&ctx.settings.data_dir, &now, &out)))
         }
@@ -274,11 +294,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }))
         }
         Command::Backtest { command } => backtest::run(&command),
+        Command::Chips { command } => {
+            Ok(run_job("chips", |ctx| chips::run(&command, &ctx.settings.data_dir)))
+        }
+        Command::Holdout { command: HoldoutJob::Check } => {
+            Ok(run_job("holdout check", |ctx| holdout::check(&ctx.settings.data_dir)))
+        }
         Command::Optimize { command } => match command {
             optimize::OptimizeJob::Solve { case, out } => {
                 optimize::solve(&case, &out)?;
                 Ok(ExitCode::SUCCESS)
             }
+            optimize::OptimizeJob::Bench(args) => bench::run(&args),
             optimize::OptimizeJob::Plan(args) => optimize_plan::plan(&args),
             optimize::OptimizeJob::Squad(args) => optimize_plan::squad(&args),
         },
@@ -353,8 +380,12 @@ fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
         anyhow::bail!("no eligible deadlines: the leakage check was not performed");
     };
     // Every feature and history frame, and the xP models as 'model:<name>'.
-    let builders: Vec<(&'static str, fplopt_features::FeatureBuilder)> =
-        fplopt_features::FRAMES.iter().chain(fplopt_models::LEAKAGE_BUILDERS).copied().collect();
+    let builders: Vec<(&'static str, fplopt_features::FeatureBuilder)> = fplopt_features::FRAMES
+        .iter()
+        .chain(fplopt_models::LEAKAGE_BUILDERS)
+        .chain(fplopt_backtest::probes::PROBE_BUILDERS)
+        .copied()
+        .collect();
     log::info!(
         "leakage check: {} deadline(s) from {} to {}, {} frame(s), seed {seed}",
         deadlines.len(),

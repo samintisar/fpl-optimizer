@@ -9,6 +9,8 @@ use fplopt_features::leakcheck::fmt_micros;
 
 #[derive(Subcommand)]
 pub enum ModelsJob {
+    /// Walk-forward xP and decision metrics of models over seasons.
+    Eval(crate::models_eval::EvalArgs),
     /// Build the plan context for the next deadline after --now from data/ (no rebuild) and
     /// write it under <out>/ as `live prepare` would (the batch 6 gate's entry point).
     Context {

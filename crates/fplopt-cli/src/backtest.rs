@@ -131,7 +131,7 @@ pub fn run(job: &BacktestJob) -> Result<ExitCode> {
 // --- checks -----------------------------------------------------------------------------------
 
 /// `shlex.join(["fplopt", *argv])` of this invocation (as fplopt-rs).
-fn command_line() -> String {
+pub(crate) fn command_line() -> String {
     let quote = |a: &str| {
         if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c))
         {
@@ -146,7 +146,7 @@ fn command_line() -> String {
 }
 
 /// (2016, 2017, 2018, 2021) -> '2016-2018,2021'.
-fn format_seasons(seasons: &[i64]) -> String {
+pub(crate) fn format_seasons(seasons: &[i64]) -> String {
     let mut runs: Vec<Vec<i64>> = Vec::new();
     for &s in seasons {
         match runs.last_mut() {
@@ -168,7 +168,7 @@ fn spec_or_usage(text: &str, flag: &str) -> Result<PolicySpec> {
     parse_policy_spec(text).or_else(|e| usage(format!("argument {flag}: {e}")))
 }
 
-fn seasons_with_data(store: &DataStore) -> Result<BTreeSet<i64>> {
+pub(crate) fn seasons_with_data(store: &DataStore) -> Result<BTreeSet<i64>> {
     let view = store.as_of(FAR_FUTURE);
     let gws: BTreeSet<i64> =
         view.table("gameweek", Some(&["season"]))?.i64("season")?.iter().copied().collect();
@@ -350,7 +350,7 @@ fn decisions_table(rows: &[PerDecision]) -> Table {
         .with("diff_xg", of(&|r| r.diff_xg))
 }
 
-fn write_json(path: &Path, value: &Ordered) -> Result<()> {
+pub(crate) fn write_json(path: &Path, value: &Ordered) -> Result<()> {
     std::fs::write(path, dumps_indent(value, 2)? + "\n")?;
     Ok(())
 }
@@ -382,14 +382,14 @@ fn starts_by_season(results: &[GridRow]) -> Ordered {
 
 // --- tables -----------------------------------------------------------------------------------
 
-fn num_text(value: f64, digits: usize, sign: bool) -> String {
+pub(crate) fn num_text(value: f64, digits: usize, sign: bool) -> String {
     if value.is_nan() {
         return "-".to_owned();
     }
     if sign { format!("{value:+.digits$}") } else { format!("{value:.digits$}") }
 }
 
-fn text_table(headers: &[String], rows: &[Vec<String>], left: usize) -> String {
+pub(crate) fn text_table(headers: &[String], rows: &[Vec<String>], left: usize) -> String {
     let widths: Vec<usize> = (0..headers.len())
         .map(|c| {
             rows.iter()

@@ -5,10 +5,14 @@
 
 #![allow(clippy::type_complexity, clippy::excessive_precision)]
 
+pub mod bench;
+pub mod chip_values;
+pub mod eval;
 pub mod evaluate;
 pub mod gw_score;
 pub mod outcomes;
 pub mod policies;
+pub mod probes;
 pub mod pyrepr;
 pub mod simulator;
 pub mod specs;
