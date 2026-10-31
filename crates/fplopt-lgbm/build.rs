@@ -18,8 +18,13 @@ fn copy_tree(from: &Path, to: &Path) {
             continue;
         }
         let target = to.join(&name);
-        // Follows symlinks (the external libs have some on Unix); a broken one is skipped.
+        // Follows symlinks to files (the external libs have some on Unix); a broken one is
+        // skipped, and so is one to a directory (nanoarrow's python/subprojects loops back up).
         let Ok(metadata) = fs::metadata(entry.path()) else { continue };
+        let link = entry.file_type().is_ok_and(|t| t.is_symlink());
+        if metadata.is_dir() && link {
+            continue;
+        }
         if metadata.is_dir() {
             copy_tree(&entry.path(), &target);
         } else {
