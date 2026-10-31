@@ -348,6 +348,27 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
     interaction would repeat `bonus-team-goals` / `cs-attack-bonus`. Not a loop
     experiment without a new mechanism. Keepers at xP 2.5–3.5 +0.152 (6 of 6) are ideas 9–10.
 
+18. **Minutes GBM capacity** (model; new 2026-10-31, **one keep**). `GbmParams()` (200
+    rounds × 15 leaves, lr 0.05, 200 rows per leaf) was tuned in Phase 5 with about half of
+    today's 32 `LAG_FEATURES`. `gbm-400` (400 rounds in all three parts, bee446a): **KEEP,
+    MSE h0 −0.00539, h1–5 −0.00160, all 6 seasons better (2020 −0.0124)**, Brier start h0
+    −0.35 %; the largest single keep in the ledger. `gbm-800`: DISCARD (+0.00206, minutes
+    log loss +0.52 %, worst in 2017–19 where the fit has fewest seasons): rounds closed at
+    400 (3 values). `gbm-ff08` (feature_fraction 0.8 on top): DISCARD (+0.00070, 2–4).
+    Settings not re-checked: `num_leaves`, `min_data_in_leaf`, learning rate (one value
+    each at most, and only after a fresh head walk shows where the minutes error is).
+    Note: a sampling change swings single seasons by ±0.005, so judge GBM settings by how
+    many seasons move, not by size alone.
+    - Eval time 274 → 346 s; the live `live prepare` fit grows ~proportionally (minutes is
+      ~11 s per cutoff of ~4 min).
+19. **Relative price and end of season: looked at 2026-10-31.** `price-rank` (rank by price
+    among same-position club-mates, a minutes lag feature; the most expensive at a
+    club-position starts +2.1 pp at P(start) 0.7–0.9, z 4.0, `diag-club-price.txt`):
+    DISCARD, flat (+0.00013, 3–3); `price` and `comp_rank` already carry it. Dead rubbers
+    (`diag-season-end.txt`: GW31+, clubs safe and out of the European race by a crude
+    table): regulars −3.5 pp (z −2.7, 5 of 6 seasons), rotation +3.5 pp, but 2.4 % of rows
+    (≈ 0.0001 MSE): not a loop experiment.
+
 Looked at 2026-10-28, no lead: the team model (λ_against calibrated within 2 % at every
 horizon, P(CS) 0.279 vs 0.281, slope 0.92–0.95, `diag-team-lambda.txt`); P(60+ | start)
 (within 0.01 at h0; `diag-c60.txt`); P(start) by price (premium outfield ±0.02 by season,
@@ -357,6 +378,13 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 `diag-finish-price-over.txt`).
 
 ## Needs the user (not the loop's to do)
+
+- **New keep on `research`** (2026-10-31, idea 18): `gbm-400` (bee446a), 400 boosting
+  rounds in each minutes part. MSE h0 −0.00539, all 6 develop seasons. Promotion checks:
+  (1) the Rust port's LightGBM golden (`tests/fixtures/rust_golden/lgbm.json.gz`) and the
+  calibration table both change with it; (2) `live prepare` time on the server (minutes fit
+  roughly doubles); (3) `check leakage` is unaffected (no new input). Also: `main` has moved
+  on (c7869f2: chip policy 2, player-props archive) and `research` lacks it.
 
 - **2026-10-30**: after the main merge, the model ideas the loop can test are used up. Two
   tried tonight (both DISCARD), and I stopped there rather than spend variants on knobs. What
