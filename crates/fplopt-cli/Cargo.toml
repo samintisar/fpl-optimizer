@@ -24,6 +24,7 @@ fplopt-parity = { version = "0.1.0", path = "../fplopt-parity" }
 fplopt-store = { version = "0.1.0", path = "../fplopt-store" }
 gethostname = "1"
 log = "0.4.34"
+mimalloc = "0.1.52"
 serde_json = "1.0.154"
 
 [target.'cfg(unix)'.dependencies]

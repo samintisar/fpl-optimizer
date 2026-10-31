@@ -12,8 +12,10 @@ links = "highs"
 # highspy bundles), built with CMake; the C API is declared by hand in src/lib.rs.
 [dependencies]
 anyhow = "1.0.104"
+libmimalloc-sys = "0.1.49"
 
 [build-dependencies]
+cc = "1.10.0"
 cmake = "0.1.58"
 
 [lints]

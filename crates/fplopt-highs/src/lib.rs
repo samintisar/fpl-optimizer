@@ -6,6 +6,8 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 
 use anyhow::{Result, bail};
+// mimalloc's library, which src/new_delete.cpp calls
+use libmimalloc_sys as _;
 
 type HighsInt = i32; // HIGHSINT64 is OFF in the build
 
@@ -14,6 +16,7 @@ const K_ERROR: HighsInt = -1;
 const K_INTEGER: HighsInt = 1;
 
 unsafe extern "C" {
+    fn fplopt_highs_new_delete();
     fn Highs_create() -> *mut c_void;
     fn Highs_destroy(highs: *mut c_void);
     fn Highs_version() -> *const c_char;
@@ -179,8 +182,12 @@ impl Drop for Highs {
 
 impl Highs {
     pub fn new() -> Highs {
-        // SAFETY: no arguments; a null return would be an allocation failure.
-        let ptr = unsafe { Highs_create() };
+        // SAFETY: no arguments; it only keeps src/new_delete.cpp (mimalloc's operator
+        // new/delete) in the link. A null Highs_create would be an allocation failure.
+        let ptr = unsafe {
+            fplopt_highs_new_delete();
+            Highs_create()
+        };
         assert!(!ptr.is_null(), "Highs_create returned null");
         Highs { ptr }
     }

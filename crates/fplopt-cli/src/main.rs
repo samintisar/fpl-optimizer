@@ -38,6 +38,11 @@ use fplopt_core::settings::Settings;
 use fplopt_parity::{Tolerance, diff_tables, read_parquet};
 use serde_json::json;
 
+/// mimalloc instead of the system heap: backtest units allocate on many threads at once
+/// (polars frames per decision), and the Windows heap serializes them.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const DEFAULT_EXPERIMENTS: &str = "results/experiments.csv";
 const PARITY_FAMILY: &str = "rust parity";
 /// Jobs whose success pings HEALTHCHECK_PING_URL: the scheduled archiver runs.

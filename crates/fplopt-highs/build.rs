@@ -45,6 +45,14 @@ fn main() {
     } else if target.contains("linux") || target.contains("windows-gnu") {
         println!("cargo:rustc-link-lib=stdc++");
     }
+    // operator new/delete through mimalloc (src/new_delete.cpp), as Rust's allocations are
+    let mimalloc = env::var("DEP_MIMALLOC_INCLUDE_DIR").expect("libmimalloc-sys's include dir");
+    cc::Build::new()
+        .cpp(true)
+        .include(mimalloc)
+        .file("src/new_delete.cpp")
+        .compile("fplopt_highs_new_delete");
+    println!("cargo:rerun-if-changed=src/new_delete.cpp");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../../third_party/HiGHS/Version.txt");
 }
