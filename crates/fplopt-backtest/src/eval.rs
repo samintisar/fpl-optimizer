@@ -372,6 +372,7 @@ pub fn evaluate(
     jobs: usize,
     n_random: usize,
     seed: u64,
+    caches: &Caches,
 ) -> Result<EvalResult> {
     if models.is_empty() {
         bail!("no models to evaluate");
@@ -388,7 +389,6 @@ pub fn evaluate(
             holdout.join(", ")
         );
     }
-    let caches = Caches::default();
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Option<Result<SeasonResult>>>> =
         Mutex::new((0..seasons.len()).map(|_| None).collect());
@@ -401,7 +401,7 @@ pub fn evaluate(
                         break;
                     }
                     let r = rules_for(seasons[i]).and_then(|rules| {
-                        season_unit(store, &caches, &rules, seasons[i], models, n_random, seed)
+                        season_unit(store, caches, &rules, seasons[i], models, n_random, seed)
                     });
                     results.lock().unwrap()[i] = Some(r);
                 }

@@ -216,6 +216,16 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
 - Bootstrap CIs use resampling: point estimates must match exactly, CIs within Monte Carlo error (or use the same RNG port).
 - **Gate:** re-run the logged `backtest compare` / `models eval` rows in `results/experiments.csv` (develop + validate seasons): point estimates within `1e-6`, CIs within Monte Carlo error, same verdicts.
 - Then the user re-pins the research harness (§5).
+- *As built:* one crate, `fplopt-backtest`, and its CLI in `fplopt-cli` (`backtest run|compare`, `models eval`, `optimize bench`, `chips values|size`, `holdout check`, the probes in `check leakage`).
+  - numpy's RNG ported rather than frozen (open question 3): `fplopt_core::nprng` is `SeedSequence`, PCG64 and `Generator.integers` (Lemire on a buffered 32-bit draw), `permutation`, `choice` with and without `p`, draw for draw (golden `nprng.json.gz`). Random start squads, the block bootstrap, the bench's deadline sample and `chips size`' resamples are Python's exactly, so CIs match as well as point estimates.
+  - The simulator (`season_schedule`, `decide_step` / `play_step`, transfer gains, the `Decided` replay for `--continuation own`), the state (`apply_decision`, squad value, chip availability), the policies (roll, greedy, optimizer, `chipgains`, `chiprules`, chip policy 2's keys), the outcomes (realized and xG-scored), the start states, and the statistics (paired full run, per-decision windows, GW-block bootstrap, season and window t-tests via `lgamma`, AS241's normal quantile, family deflation). Units run on `std::thread::scope` over shared caches, results in unit order: `--jobs N` gives the same output as `--jobs 1`, as in Python.
+  - `models eval`: predictions, candidate MSE, bands, regrets on the template and random squads, Diebold-Mariano clustered by GW, per split; `metrics.json` and the log row as Python writes them (`pyjson::Ordered`, Python's float repr, `json.dumps(indent=2)`).
+  - Found on the way: numpy's `xp @ weights` in pruning goes through OpenBLAS's `dgemv_t`, whose 4-lane FMA accumulation rounds differently from a plain sum; ep_next's flat xP per price made ties at the top-N cutoff, so the candidate set (and a MIP gap) differed. `prune::blas_dot` reproduces the kernel's order (4 lanes reduced as (l0+l2)+(l1+l3), then the tail), and the batch 4 gate subsets pass after it (71/71).
+  - Not ported: `holdout run` (the one-off Phase 6 run, already in the log) and the chip diagnostics (dev scripts only).
+  - Added (no Python counterpart): the caches are single-flight (one thread computes a v1 fit, xP frame, pool or outcome, the others asking for it wait), and xP frames are also cached on disk across runs (`fplopt_backtest::xp_cache`, `results/.xp-cache/`, keyed by `data/`'s tables and the binary's bytes, so a rebuild of either starts afresh; `--no-xp-cache`, `--xp-cache DIR`). Off, cold and warm give identical tables and metrics; warm, a v1 eval of 2023/24 takes 7 s instead of 173 s and a greedy:v1 season 4 s instead of 120 s.
+- *Gate (2026-10-31, first pass):* the 17 logged commands without v1 backtests or chips (`--select '^(?!.*v1)(?!.*chips=1)|^models eval'`), on the local `data/`: 17/17 pass. Tables identical except v1's predictions (at most 3.8e-9 relative, batch 6's last digits; the table tolerance is 1e-7), every metric within 1e-6, CIs included. `check leakage` passes with the probes (28 deadlines × 18 frames).
+  - Speed: greedy, roll and eval runs 1.8–8× faster than Python; the optimizer compares 1.3–1.9× *slower* (e.g. 896 s vs 1304 s). One case at a time (`optimize bench`) Rust's solves are as fast or faster (plan solves 25.6 s vs 23.6 s, chip search 96 s vs 58 s), so the loss comes with parallel units: under investigation.
+  - Still to run: the v1 backtests and the chip study (hours each in Python).
 
 ### Batch 8 — Retire Python (~1 week)
 
@@ -243,6 +253,6 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
 
 1. Approve the batch order, especially bot (5) **before** models (6)?
 2. Batch 6 fallback: is a `v1rs` variant that passes the comparisons acceptable live, or must Rust match Python v1 exactly? *Not needed: the gate passed (2026-10-30); a plan #1 that differs only where both solves stopped at the 0.5% MIP gap counts as a tie.*
-3. Batch 7: freeze random start states as a fixture (recommended) or port numpy's RNG?
+3. Batch 7: freeze random start states as a fixture (recommended) or port numpy's RNG? *Ported (batch 7): the port turned out small and makes the bootstrap CIs exact too.*
 4. Batch 8: keep notebooks as Python analysis over Parquet, or drop them?
 5. One PR per batch (as with the earlier phases)? *Changed 2026-10-29: one branch, one switch (see Status).*

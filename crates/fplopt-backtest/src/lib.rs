@@ -18,3 +18,4 @@ pub mod simulator;
 pub mod specs;
 pub mod state;
 pub mod stats;
+pub mod xp_cache;

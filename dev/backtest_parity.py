@@ -6,8 +6,9 @@ Python (`uv run fplopt ...`) and today's Rust (`target/release/fplopt-rs ...`), 
 own --out and experiment log (so both log n_variants = 1), and compared:
 
 - the output tables (backtest: gws, paired, per_decision; eval: predictions, regrets) row
-  for row, numbers within --rtol (1e-9 by default: v1's xP differs from Python's in the last
-  digits, batch 6, which the metrics absorb);
+  for row, numbers within --rtol (1e-7 by default: v1's xP differs from Python's in the 9th
+  digit, batch 6's fits within 5.5e-8; the 2016-22 eval's predictions 3.8e-9 apart, every
+  other table exact);
 - every metric of the logged row (and of eval's metrics.json) within --metrics-rtol (1e-6,
   the migration plan's tolerance for point estimates; the bootstrap draws numpy's generator
   draw for draw, so CIs fall under it too).
@@ -55,7 +56,8 @@ def logged_commands(path: Path) -> list[list[str]]:
     """The logged research commands as argv (without the program), in log order, deduped."""
     out, seen = [], set()
     for row in csv.DictReader(path.open(encoding="utf-8")):
-        argv = shlex.split(row["command"], posix=True)
+        # a trailing "[note]" (e.g. "[run on the server, ...]") is not part of the command
+        argv = shlex.split(re.sub(r"\s*\[[^\]]*\]\s*$", "", row["command"]), posix=True)
         if (
             not argv
             or argv[0] != "fplopt"
@@ -150,7 +152,7 @@ def main() -> int:
     parser.add_argument("--select", help="regex over the commands to run (default: all)")
     parser.add_argument("--list", action="store_true", help="print the commands and exit")
     parser.add_argument("--jobs", type=int, default=max((os.cpu_count() or 2) - 1, 1))
-    parser.add_argument("--rtol", type=float, default=1e-9)
+    parser.add_argument("--rtol", type=float, default=1e-7)
     parser.add_argument("--metrics-rtol", type=float, default=1e-6)
     parser.add_argument("--keep", type=Path, help="keep the outputs here")
     args = parser.parse_args()

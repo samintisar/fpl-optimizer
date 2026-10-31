@@ -369,8 +369,12 @@ fn features_dump(data_dir: &Path, deadlines: &Path, out: &Path) -> Result<()> {
 fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
     use fplopt_features::leakcheck::{FEATURE_TABLES, check_leakage, sample_deadlines};
     let started = std::time::Instant::now();
-    let names: Vec<&str> =
-        FEATURE_TABLES.iter().chain(fplopt_models::MODEL_TABLES).copied().collect();
+    let names: Vec<&str> = FEATURE_TABLES
+        .iter()
+        .chain(fplopt_models::MODEL_TABLES)
+        .chain(fplopt_backtest::probes::PROBE_TABLES)
+        .copied()
+        .collect();
     let tables = fplopt_store::load_tables(data_dir, &names)?;
     let holdout: Vec<i64> =
         fplopt_core::seasons::HOLDOUT_SEASONS.iter().map(|&s| i64::from(s)).collect();

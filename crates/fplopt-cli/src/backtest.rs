@@ -18,6 +18,7 @@ use fplopt_backtest::evaluate::{
 use fplopt_backtest::simulator::Caches;
 use fplopt_backtest::specs::{PolicySpec, make_policy_spec, parse_policy_spec};
 use fplopt_backtest::stats::{Diff, FULL_RUN_WINDOW, full_run_window_test, season_points};
+use fplopt_backtest::xp_cache;
 use fplopt_build::table::{Column, Table, write_parquet};
 use fplopt_core::experiments::{family_variants, log_experiment};
 use fplopt_core::pyjson::{Ordered, dumps_indent};
@@ -67,6 +68,29 @@ pub struct Common {
     /// 'run <policy> <seasons>').
     #[arg(long)]
     pub family: Option<String>,
+    #[command(flatten)]
+    pub xp_cache: XpCacheArgs,
+}
+
+/// The xP frames' disk cache (`fplopt_backtest::xp_cache`; not in the Python CLI).
+#[derive(Args, Clone)]
+pub struct XpCacheArgs {
+    /// Where xP frames are cached across runs (keyed by data/ and this binary).
+    #[arg(long, default_value = xp_cache::DEFAULT_ROOT)]
+    pub xp_cache: PathBuf,
+    /// Compute every xP frame afresh, without reading or writing the cache.
+    #[arg(long)]
+    pub no_xp_cache: bool,
+}
+
+impl XpCacheArgs {
+    pub fn caches(&self) -> Result<Caches> {
+        if self.no_xp_cache {
+            return Ok(Caches::default());
+        }
+        let disk = xp_cache::DiskCache::open(&self.xp_cache, &Settings::from_env().data_dir)?;
+        Ok(Caches::with_disk(disk))
+    }
 }
 
 #[derive(Args)]
@@ -892,7 +916,7 @@ fn backtest_run(args: &RunArgs) -> Result<()> {
     let out = out_dir(&args.common.out, "run");
     let policy = spec.build()?;
     let began = Instant::now();
-    let caches = Caches::default();
+    let caches = args.common.xp_cache.caches()?;
     let results = run_grid(
         &checked.store,
         &checked.seasons,
@@ -969,7 +993,7 @@ fn backtest_compare(args: &CompareArgs) -> Result<()> {
         Some(c) => Some(c.build()?),
         None => None,
     };
-    let caches = Caches::default();
+    let caches = args.common.xp_cache.caches()?;
     let began = Instant::now();
     let results = run_grid(
         &checked.store,

@@ -52,6 +52,8 @@ pub struct EvalArgs {
     /// First random squad seed.
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
+    #[command(flatten)]
+    pub xp_cache: crate::backtest::XpCacheArgs,
 }
 
 pub fn run(args: &EvalArgs) -> Result<ExitCode> {
@@ -286,7 +288,9 @@ fn run_eval(args: &EvalArgs) -> Result<()> {
             .join(format!("{}-eval", chrono::Utc::now().format("%Y%m%dT%H%M%SZ")))
     });
     let began = Instant::now();
-    let result = evaluate(&store, &models, &seasons, args.jobs, args.n_random as usize, args.seed)?;
+    let caches = args.xp_cache.caches()?;
+    let result =
+        evaluate(&store, &models, &seasons, args.jobs, args.n_random as usize, args.seed, &caches)?;
     let runtime = began.elapsed().as_secs_f64();
     let int = |i: i64| Ordered::Int(i128::from(i));
     let config = record(vec![

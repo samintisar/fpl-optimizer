@@ -149,6 +149,10 @@ fn optimizer_rolling_random0(view: &AsOfView) -> Result<Table> {
     run_probe(view, &optimizer("rolling"), random0)
 }
 
+/// The tables the probes read beyond the features' and models': the template start's
+/// ownership (what `check leakage` also loads).
+pub const PROBE_TABLES: &[&str] = &["player_gw_ownership"];
+
 /// The probes as leakage-check builders.
 pub const PROBE_BUILDERS: &[(&str, FeatureBuilder)] = &[
     ("probe:greedy_rolling_random0", greedy_rolling_random0),

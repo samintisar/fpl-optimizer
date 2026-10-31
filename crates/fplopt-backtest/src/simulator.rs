@@ -9,9 +9,10 @@
 //! `GAIN_WINDOW` recorded GWs (one under a Free Hit).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::hash::Hash;
+use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use fplopt_build::scoring::Rules;
 use fplopt_core::seasons::{HOLDOUT_SEASONS, season_label};
 use fplopt_features::baseline::player_pool;
@@ -27,6 +28,7 @@ use crate::policies::{CHIP_DIAGNOSTICS, DecisionContext, Policy, best_lineup};
 use crate::state::{
     Decision, PoolPlayer, SquadState, apply_decision, next_state, refresh, squad_value,
 };
+use crate::xp_cache::DiskCache;
 
 /// GWs over which transfer gains are measured (PLAN §5's per-decision k).
 pub const GAIN_WINDOW: usize = 4;
@@ -37,52 +39,74 @@ pub struct Xp {
     pub frame: XpFrame,
 }
 
+/// A map whose values are computed once per key: the first thread to ask computes, the
+/// others asking for the same key wait for it (units of one season reach the same deadlines
+/// at the same time, and a v1 fit takes seconds). Errors are kept as their text.
+struct OnceMap<K, V>(Mutex<HashMap<K, Arc<OnceLock<std::result::Result<Arc<V>, String>>>>>);
+
+impl<K, V> Default for OnceMap<K, V> {
+    fn default() -> Self {
+        OnceMap(Mutex::new(HashMap::new()))
+    }
+}
+
+impl<K: Eq + Hash, V> OnceMap<K, V> {
+    fn get_or_compute(&self, key: K, compute: impl FnOnce() -> Result<V>) -> Result<Arc<V>> {
+        let cell = self.0.lock().unwrap().entry(key).or_default().clone();
+        cell.get_or_init(|| compute().map(Arc::new).map_err(|e| format!("{e:#}")))
+            .clone()
+            .map_err(|e| anyhow!(e))
+    }
+}
+
 /// xP frames per (model, deadline), v1 fits per cutoff, pools per deadline and outcomes per
-/// (season, gw, rules label), shared across policies, start states and threads.
+/// (season, gw, rules label), shared across policies, start states and threads; the xP
+/// frames also on disk when given one (`xp_cache`), shared across runs.
 #[derive(Default)]
 pub struct Caches {
-    xp: Mutex<HashMap<(String, Micros), Arc<Xp>>>,
-    fits: Mutex<HashMap<Micros, Arc<V1Fit>>>,
-    pools: Mutex<HashMap<Micros, Arc<Vec<PoolPlayer>>>>,
-    outcomes: Mutex<HashMap<(i64, i64, String), Arc<GwOutcomes>>>,
+    disk: Option<DiskCache>,
+    xp: OnceMap<(String, Micros), Xp>,
+    fits: OnceMap<Micros, V1Fit>,
+    pools: OnceMap<Micros, Vec<PoolPlayer>>,
+    outcomes: OnceMap<(i64, i64, String), GwOutcomes>,
 }
 
 impl Caches {
+    /// Caches whose xP frames are also read from and written to `disk`.
+    pub fn with_disk(disk: DiskCache) -> Caches {
+        Caches { disk: Some(disk), ..Caches::default() }
+    }
+
     pub fn pool(&self, view: &AsOfView) -> Result<Arc<Vec<PoolPlayer>>> {
-        if let Some(p) = self.pools.lock().unwrap().get(&view.deadline()) {
-            return Ok(p.clone());
-        }
-        let pool = Arc::new(pool_players(&player_pool(view)?)?);
-        self.pools.lock().unwrap().insert(view.deadline(), pool.clone());
-        Ok(pool)
+        self.pools.get_or_compute(view.deadline(), || pool_players(&player_pool(view)?))
     }
 
     /// The model's xP frame at the view (v1: predicted with the memoized fit at its refit
     /// cutoff, the same as calling the model).
     pub fn xp(&self, model: &str, view: &AsOfView) -> Result<Arc<Xp>> {
-        let key = (model.to_owned(), view.deadline());
-        if let Some(x) = self.xp.lock().unwrap().get(&key) {
-            return Ok(x.clone());
-        }
-        let table = if model == "v1" {
-            let cutoff = refit_deadline(view, REFIT_EVERY)?;
-            let cached = self.fits.lock().unwrap().get(&cutoff).cloned();
-            let fit = match cached {
-                Some(f) => f,
-                None => {
-                    let f = Arc::new(fit_v1(&view.earlier(cutoff)?, &V1Params::default())?);
-                    self.fits.lock().unwrap().insert(cutoff, f.clone());
-                    f
-                }
+        self.xp.get_or_compute((model.to_owned(), view.deadline()), || {
+            let cached = match &self.disk {
+                Some(disk) => disk.load(model, view.deadline())?,
+                None => None,
             };
-            predict_v1(view, &fit)?
-        } else {
-            fplopt_models::predict(model, view)?
-        };
-        let frame = XpFrame::from_table(&table)?;
-        let xp = Arc::new(Xp { table, frame });
-        self.xp.lock().unwrap().insert(key, xp.clone());
-        Ok(xp)
+            let hit = cached.is_some();
+            let table = if let Some(t) = cached {
+                t
+            } else if model == "v1" {
+                let cutoff = refit_deadline(view, REFIT_EVERY)?;
+                let fit = self.fits.get_or_compute(cutoff, || {
+                    fit_v1(&view.earlier(cutoff)?, &V1Params::default())
+                })?;
+                predict_v1(view, &fit)?
+            } else {
+                fplopt_models::predict(model, view)?
+            };
+            if let (Some(disk), false) = (&self.disk, hit) {
+                disk.store(model, view.deadline(), &table)?;
+            }
+            let frame = XpFrame::from_table(&table)?;
+            Ok(Xp { table, frame })
+        })
     }
 
     pub fn outcomes(
@@ -93,13 +117,9 @@ impl Caches {
         gw: i64,
         lockdown: Micros,
     ) -> Result<Arc<GwOutcomes>> {
-        let key = (season, gw, rules.label.clone());
-        if let Some(o) = self.outcomes.lock().unwrap().get(&key) {
-            return Ok(o.clone());
-        }
-        let o = Arc::new(read_outcomes(store, rules, season, gw, lockdown)?);
-        self.outcomes.lock().unwrap().insert(key, o.clone());
-        Ok(o)
+        self.outcomes.get_or_compute((season, gw, rules.label.clone()), || {
+            read_outcomes(store, rules, season, gw, lockdown)
+        })
     }
 }
 
@@ -525,4 +545,53 @@ pub fn simulate(
         pending_state,
         pending_decision,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn once_map_computes_each_key_once_across_threads() {
+        let map: OnceMap<i64, i64> = OnceMap::default();
+        let calls = AtomicUsize::new(0);
+        let results: Vec<i64> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|i| {
+                    let (map, calls) = (&map, &calls);
+                    scope.spawn(move || {
+                        let key = i % 2;
+                        *map.get_or_compute(key, || {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            Ok(key * 10)
+                        })
+                        .unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        for (i, r) in results.iter().enumerate() {
+            assert_eq!(*r, (i as i64 % 2) * 10);
+        }
+    }
+
+    #[test]
+    fn once_map_hands_an_error_to_every_caller() {
+        let map: OnceMap<i64, i64> = OnceMap::default();
+        let calls = AtomicUsize::new(0);
+        for _ in 0..3 {
+            let err = map
+                .get_or_compute(1, || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(anyhow!("no fit at 1: {}", "cause"))
+                })
+                .unwrap_err();
+            assert_eq!(err.to_string(), "no fit at 1: cause");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 }
