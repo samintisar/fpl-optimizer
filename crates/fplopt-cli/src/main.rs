@@ -1,19 +1,53 @@
 //! `fplopt-rs`: the Rust port's CLI. Subcommands and flags match the Python `fplopt` CLI
-//! so a migrated job only swaps the binary name (migration plan §2). Batch 0 has only the
-//! parity check; each batch adds the commands it ports.
+//! so a migrated job only swaps the binary name (migration plan §2). Each batch adds the
+//! commands it ports: batch 0 the parity check, batch 1 the archiver (`snapshot`,
+//! `backfill`, `check freshness`), batch 2 the build (`build`, `rules export`), batch 3 the
+//! as-of store and features (`check leakage`, and `features dump` for the parity gate),
+//! batch 4 the optimizer (`optimize plan|squad`, and `optimize solve` for the parity gate).
+//!
+//! Archiver jobs run like Python's: a failure is logged and alerted to Telegram (exit 1);
+//! SIGTERM stops a long run cleanly, after its manifest is written (exit 143, no alert); a
+//! successful `snapshot daily|tick` pings HEALTHCHECK_PING_URL if set.
+
+mod backtest;
+mod bench;
+mod bot;
+mod chips;
+mod holdout;
+mod live;
+mod models;
+mod models_eval;
+mod optimize;
+mod optimize_plan;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Result;
-use chrono::Utc;
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use chrono::{TimeDelta, Utc};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use fplopt_archive::adapters::{self, OddsSource, PropsSource, base_url};
+use fplopt_archive::fetch::Http;
+use fplopt_archive::raw_store::RawStore;
+use fplopt_archive::{SystemClock, espn, health, history, jobs, stop};
+use fplopt_core::alerts::send_admin_alert;
 use fplopt_core::experiments::{GIT_SHA, family_variants, log_experiment};
+use fplopt_core::heartbeat::send_heartbeat;
+use fplopt_core::redact::redact;
+use fplopt_core::settings::Settings;
 use fplopt_parity::{Tolerance, diff_tables, read_parquet};
 use serde_json::json;
 
+/// mimalloc instead of the system heap: backtest units allocate on many threads at once
+/// (polars frames per decision), and the Windows heap serializes them.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const DEFAULT_EXPERIMENTS: &str = "results/experiments.csv";
 const PARITY_FAMILY: &str = "rust parity";
+/// Jobs whose success pings HEALTHCHECK_PING_URL: the scheduled archiver runs.
+const HEARTBEAT_JOBS: [&str; 2] = ["snapshot daily", "snapshot tick"];
+const TEAMS_CSV: &str = "config/teams.csv";
 
 #[derive(Parser)]
 #[command(name = "fplopt-rs", about = "Fantasy Premier League decision optimizer (Rust port)")]
@@ -24,15 +58,137 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Checks.
+    /// Archive API snapshots into raw/.
+    Snapshot {
+        #[arg(value_enum)]
+        command: SnapshotJob,
+    },
+    /// One-off backfills into raw/.
+    Backfill {
+        #[arg(value_enum)]
+        command: BackfillJob,
+        /// football-data, espn: first season's start year.
+        #[arg(long, default_value_t = history::FIRST_SEASON, value_name = "YEAR")]
+        from_season: i32,
+    },
+    /// Per-season rules config.
+    Rules {
+        #[arg(value_enum)]
+        command: RulesJob,
+        /// Season label, e.g. 2026-27.
+        season: String,
+        /// Output directory.
+        #[arg(long, default_value = "config/scoring")]
+        out: PathBuf,
+    },
+    /// Build data/<table>.parquet from raw/.
+    Build {
+        /// Table name, or 'all'.
+        target: String,
+    },
+    /// Archive health and parity checks.
     Check {
         #[command(subcommand)]
         check: Check,
     },
+    /// Feature frames at given deadlines (the batch 3 parity gate; not in the Python CLI).
+    Features {
+        #[command(subcommand)]
+        command: FeaturesJob,
+    },
+    /// xP models' frames at given deadlines (the batch 6 parity gate; not in the Python CLI).
+    Models {
+        #[command(subcommand)]
+        command: models::ModelsJob,
+    },
+    /// Season replays and paired policy comparisons.
+    Backtest {
+        #[command(subcommand)]
+        command: backtest::BacktestJob,
+    },
+    /// The chip study's estimators.
+    Chips {
+        #[command(subcommand)]
+        command: chips::ChipsJob,
+    },
+    /// The holdout season's inputs (the Phase 6 run itself stays Python's).
+    Holdout {
+        #[arg(value_enum)]
+        command: HoldoutJob,
+    },
+    /// The MILP planner.
+    Optimize {
+        #[command(subcommand)]
+        command: optimize::OptimizeJob,
+    },
+    /// Go-live jobs: plan contexts and deadline alerts.
+    Live {
+        #[arg(value_enum)]
+        command: live::LiveJob,
+    },
+    /// The Telegram bot.
+    Bot {
+        #[command(subcommand)]
+        command: bot::BotJob,
+    },
+}
+
+#[derive(Subcommand)]
+enum FeaturesJob {
+    /// Write every feature frame and the history frames at each deadline to
+    /// <out>/<NN>/<frame>.parquet (NN: the deadline's line number in the file, from 00).
+    Dump {
+        /// A file with one ISO 8601 deadline per line.
+        #[arg(long)]
+        deadlines: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HoldoutJob {
+    Check,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SnapshotJob {
+    Daily,
+    Tick,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum RulesJob {
+    Export,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum BackfillJob {
+    ElementSummary,
+    FootballData,
+    Vaastav,
+    Fplcache,
+    Espn,
 }
 
 #[derive(Subcommand)]
 enum Check {
+    /// Fail if the newest bootstrap snapshot is missing or too old (a dead-man's switch for
+    /// the timers).
+    Freshness {
+        /// Fail if the newest bootstrap snapshot is older than this.
+        #[arg(long, default_value_t = health::DEFAULT_MAX_AGE_HOURS, value_name = "H")]
+        max_age_hours: f64,
+    },
+    /// Corrupt-the-future check of every feature and the history frames on data/ (the
+    /// feature part of Python's `check leakage`; models and probes are ported later).
+    Leakage {
+        /// Sampled deadlines on top of the edge list.
+        #[arg(long, default_value_t = fplopt_features::leakcheck::DEFAULT_DEADLINES)]
+        deadlines: usize,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+    },
     /// Compare Python and Rust outputs (the migration's parity gate).
     Parity {
         #[command(subcommand)]
@@ -86,11 +242,338 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
+        Command::Snapshot { command } => {
+            let name = format!("snapshot {}", value_name(command));
+            Ok(run_job(&name, |ctx| match command {
+                SnapshotJob::Daily => snapshot_daily(ctx),
+                SnapshotJob::Tick => {
+                    let odds = ctx.odds();
+                    let props = odds.as_ref().map(|o| o as &dyn PropsSource);
+                    let odds = odds.as_ref().map(|o| o as &dyn OddsSource);
+                    jobs::run_tick(&ctx.store, &ctx.fpl(), odds, props, &SystemClock).map(drop)
+                }
+            }))
+        }
+        Command::Backfill { command, from_season } => {
+            let name = format!("backfill {}", value_name(command));
+            Ok(run_job(&name, |ctx| backfill(ctx, command, from_season)))
+        }
+        Command::Rules { command: RulesJob::Export, season, out } => {
+            // The label is parsed inside the job, so a bad label is alerted like any failure.
+            Ok(run_job("rules export", |ctx| {
+                let season = fplopt_core::seasons::parse_season_label(&season)?;
+                fplopt_build::rules::export_rules(&ctx.store, season, &out).map(drop)
+            }))
+        }
+        Command::Build { target } => Ok(run_job("build", |ctx| {
+            let mut build_ctx = fplopt_build::BuildContext::new(
+                ctx.store.clone(),
+                &ctx.settings.data_dir,
+                "config",
+            );
+            fplopt_build::build(&[target], &mut build_ctx).map(drop)
+        })),
+        Command::Check { check: Check::Freshness { max_age_hours } } => {
+            Ok(run_job("check freshness", |ctx| {
+                let max_age = TimeDelta::microseconds((max_age_hours * 3.6e9).round() as i64);
+                health::check_freshness(&ctx.store, Utc::now(), max_age).map(drop)
+            }))
+        }
+        Command::Check { check: Check::Leakage { deadlines, seed } } => {
+            Ok(run_job("check leakage", |ctx| {
+                check_leakage(&ctx.settings.data_dir, deadlines, seed)
+            }))
+        }
+        Command::Features { command: FeaturesJob::Dump { deadlines, out } } => {
+            Ok(run_job("features dump", |ctx| {
+                features_dump(&ctx.settings.data_dir, &deadlines, &out)
+            }))
+        }
+        Command::Models { command: models::ModelsJob::Eval(args) } => models_eval::run(&args),
+        Command::Models { command: models::ModelsJob::Context { now, out } } => {
+            Ok(run_job("models context", |ctx| models::context(&ctx.settings.data_dir, &now, &out)))
+        }
+        Command::Models { command: models::ModelsJob::Dump { models, deadlines, out } } => {
+            Ok(run_job("models dump", |ctx| {
+                models::dump(&ctx.settings.data_dir, &models, &deadlines, &out)
+            }))
+        }
+        Command::Backtest { command } => backtest::run(&command),
+        Command::Chips { command } => {
+            Ok(run_job("chips", |ctx| chips::run(&command, &ctx.settings.data_dir)))
+        }
+        Command::Holdout { command: HoldoutJob::Check } => {
+            Ok(run_job("holdout check", |ctx| holdout::check(&ctx.settings.data_dir)))
+        }
+        Command::Optimize { command } => match command {
+            optimize::OptimizeJob::Solve { case, out } => {
+                optimize::solve(&case, &out)?;
+                Ok(ExitCode::SUCCESS)
+            }
+            optimize::OptimizeJob::Bench(args) => bench::run(&args),
+            optimize::OptimizeJob::Plan(args) => optimize_plan::plan(&args),
+            optimize::OptimizeJob::Squad(args) => optimize_plan::squad(&args),
+        },
+        Command::Live { command } => {
+            let name = match command {
+                live::LiveJob::Tick => "live tick",
+                live::LiveJob::Prepare => "live prepare",
+            };
+            Ok(run_job(name, |ctx| live::run(command, &ctx.store, &ctx.fpl(), &ctx.settings)))
+        }
+        Command::Bot { command: bot::BotJob::Run } => Ok(run_job("bot run", |ctx| {
+            bot::run(&ctx.settings)?;
+            Ok(stop::check()?)
+        })),
+        Command::Bot { command: bot::BotJob::Replay { script, state, fpl, out } } => {
+            bot::replay(&script, &state, &fpl, &out)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Check { check: Check::Parity { area } } => match area {
             Parity::Table { python, rust, keys, rtol, atol, out, experiments } => {
                 parity_table(&python, &rust, &keys, Tolerance { rtol, atol }, out, &experiments)
             }
         },
+    }
+}
+
+/// An ISO 8601 instant with an offset as µs since the epoch (UTC).
+fn parse_deadline(text: &str) -> Result<i64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(text.trim())
+        .map_err(|e| anyhow::anyhow!("bad deadline {text:?}: {e}"))?;
+    Ok(parsed.timestamp_micros())
+}
+
+fn features_dump(data_dir: &Path, deadlines: &Path, out: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(deadlines)?;
+    let deadlines: Vec<i64> =
+        text.lines().filter(|l| !l.trim().is_empty()).map(parse_deadline).collect::<Result<_>>()?;
+    let store = fplopt_store::DataStore::open(data_dir)?;
+    for (i, &deadline) in deadlines.iter().enumerate() {
+        let dir = out.join(format!("{i:02}"));
+        std::fs::create_dir_all(&dir)?;
+        let view = store.as_of(deadline);
+        for (name, builder) in fplopt_features::FRAMES {
+            let started = std::time::Instant::now();
+            let frame = builder(&view)
+                .map_err(|e| e.context(format!("{name} at {}", fmt_micros(deadline))))?;
+            fplopt_build::table::write_parquet(&frame, &dir.join(format!("{name}.parquet")))?;
+            log::debug!(
+                "{name}: {} rows, {:.2} s",
+                frame.height(),
+                started.elapsed().as_secs_f64()
+            );
+        }
+        log::info!("features at {}: written", fmt_micros(deadline));
+    }
+    Ok(())
+}
+
+/// `check leakage`: every feature and the history frames at the edge deadlines plus
+/// `n_deadlines` sampled ones; fails listing the leaks.
+fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
+    use fplopt_features::leakcheck::{FEATURE_TABLES, check_leakage, sample_deadlines};
+    let started = std::time::Instant::now();
+    let names: Vec<&str> = FEATURE_TABLES
+        .iter()
+        .chain(fplopt_models::MODEL_TABLES)
+        .chain(fplopt_backtest::probes::PROBE_TABLES)
+        .copied()
+        .collect();
+    let tables = fplopt_store::load_tables(data_dir, &names)?;
+    let holdout: Vec<i64> =
+        fplopt_core::seasons::HOLDOUT_SEASONS.iter().map(|&s| i64::from(s)).collect();
+    let deadlines = sample_deadlines(&tables, n_deadlines, seed, &holdout)?;
+    let (Some(&first), Some(&last)) = (deadlines.first(), deadlines.last()) else {
+        // Checking nothing must not read as a pass.
+        anyhow::bail!("no eligible deadlines: the leakage check was not performed");
+    };
+    // Every feature and history frame, and the xP models as 'model:<name>'.
+    let builders: Vec<(&'static str, fplopt_features::FeatureBuilder)> = fplopt_features::FRAMES
+        .iter()
+        .chain(fplopt_models::LEAKAGE_BUILDERS)
+        .chain(fplopt_backtest::probes::PROBE_BUILDERS)
+        .copied()
+        .collect();
+    log::info!(
+        "leakage check: {} deadline(s) from {} to {}, {} frame(s), seed {seed}",
+        deadlines.len(),
+        fmt_micros(first),
+        fmt_micros(last),
+        builders.len()
+    );
+    let leaks = check_leakage(tables, &deadlines, seed, &builders)?;
+    if let Some(leak) = leaks.first() {
+        for leak in &leaks {
+            log::error!(
+                "leak: {} @ {} ({}): {}",
+                leak.feature,
+                fmt_micros(leak.deadline),
+                leak.variant,
+                leak.detail
+            );
+        }
+        let features: std::collections::BTreeSet<_> = leaks.iter().map(|l| &l.feature).collect();
+        let at: std::collections::BTreeSet<_> = leaks.iter().map(|l| l.deadline).collect();
+        anyhow::bail!(
+            "{} leak(s) in {} builder(s) at {} deadline(s); first: {} @ {} ({}): {}",
+            leaks.len(),
+            features.len(),
+            at.len(),
+            leak.feature,
+            fmt_micros(leak.deadline),
+            leak.variant,
+            leak.detail
+        );
+    }
+    log::info!(
+        "leakage check passed: {} deadline(s) x {} frame(s) x 2 variants in {:.0} s",
+        deadlines.len(),
+        builders.len(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+use fplopt_features::leakcheck::fmt_micros;
+
+fn value_name(value: impl ValueEnum) -> String {
+    value.to_possible_value().map(|v| v.get_name().to_owned()).unwrap_or_default()
+}
+
+/// What an archiver job runs with. Base URLs can be redirected with `FPLOPT_<NAME>_URL`
+/// (`adapters::base_url`), for the parity harness only.
+struct JobContext {
+    store: RawStore,
+    http: Http,
+    settings: Settings,
+}
+
+impl JobContext {
+    fn fpl(&self) -> adapters::fpl::FplClient<'_> {
+        adapters::fpl::FplClient::new(&self.http, &base_url("FPL", adapters::fpl::BASE_URL))
+    }
+
+    fn odds(&self) -> Option<adapters::odds::OddsClient<'_>> {
+        let key = self.settings.odds_api_key.as_deref()?;
+        let url = base_url("ODDS", adapters::odds::BASE_URL);
+        Some(adapters::odds::OddsClient::new(&self.http, key, &url))
+    }
+
+    fn football_data(&self) -> adapters::football_data::FootballDataClient<'_> {
+        let url = base_url("FOOTBALL_DATA", adapters::football_data::BASE_URL);
+        adapters::football_data::FootballDataClient::new(&self.http, &url)
+    }
+
+    fn espn(&self) -> adapters::espn::EspnClient<'_> {
+        adapters::espn::EspnClient::new(&self.http, &base_url("ESPN", adapters::espn::BASE_URL))
+    }
+}
+
+fn snapshot_daily(ctx: &JobContext) -> Result<()> {
+    let (fpl, odds, fd, espn) = (ctx.fpl(), ctx.odds(), ctx.football_data(), ctx.espn());
+    let odds = odds.as_ref().map(|o| o as &dyn OddsSource);
+    let daily_espn = jobs::DailyEspn { source: &espn, teams_csv: Path::new(TEAMS_CSV) };
+    jobs::run_daily(&ctx.store, &fpl, odds, &SystemClock, Some(&fd), Some(daily_espn))
+}
+
+fn backfill(ctx: &JobContext, command: BackfillJob, from_season: i32) -> Result<()> {
+    let clock = &SystemClock;
+    let github = || base_url("GITHUB_API", adapters::vaastav::API_URL);
+    match command {
+        BackfillJob::ElementSummary => jobs::backfill_element_summaries(
+            &ctx.store,
+            &ctx.fpl(),
+            clock,
+            jobs::ELEMENT_SUMMARY_PAUSE,
+            jobs::MAX_CONSECUTIVE_FAILURES,
+        )
+        .map(drop),
+        BackfillJob::FootballData => history::backfill_football_data(
+            &ctx.store,
+            &ctx.football_data(),
+            clock,
+            history::FOOTBALL_DATA_PAUSE,
+            from_season,
+        )
+        .map(drop),
+        BackfillJob::Espn => {
+            let team_ids = espn::espn_team_ids(Path::new(TEAMS_CSV))?;
+            espn::backfill_espn(&ctx.store, &ctx.espn(), &team_ids, from_season, clock, espn::PAUSE)
+        }
+        BackfillJob::Vaastav => {
+            let raw = base_url("GITHUB_RAW", adapters::vaastav::RAW_URL);
+            let source = adapters::vaastav::VaastavClient::new(&ctx.http, &github(), &raw);
+            history::backfill_vaastav(
+                &ctx.store,
+                &source,
+                adapters::vaastav::PINNED_COMMIT,
+                clock,
+                history::VAASTAV_PAUSE,
+                jobs::MAX_CONSECUTIVE_FAILURES,
+            )
+            .map(drop)
+        }
+        BackfillJob::Fplcache => {
+            let codeload = base_url("CODELOAD", adapters::fplcache::CODELOAD_URL);
+            let source = adapters::fplcache::FplcacheClient::new(&ctx.http, &github(), &codeload);
+            history::backfill_fplcache(&ctx.store, &source, clock).map(drop)
+        }
+    }
+}
+
+/// Run an archiver job the way Python's `main` does: alert on failure (exit 1), exit 143
+/// without an alert when stopped by SIGTERM, heartbeat after a scheduled run succeeds.
+fn run_job(name: &str, job: impl FnOnce(&JobContext) -> Result<()>) -> ExitCode {
+    let settings = Settings::from_env();
+    if settings.telegram_bot_token.is_none() || settings.telegram_admin_chat_id.is_none() {
+        log::warn!(
+            "TELEGRAM_BOT_TOKEN/TELEGRAM_ADMIN_CHAT_ID not set: failures will not be alerted"
+        );
+    }
+    log::info!("job '{name}' starting (raw dir {})", settings.raw_dir.display());
+    register_sigterm();
+    let result = Http::new().map_err(anyhow::Error::from).and_then(|http| {
+        let store = RawStore::new(&settings.raw_dir);
+        job(&JobContext { store, http, settings: settings.clone() })
+    });
+    match result {
+        Ok(()) => {
+            log::info!("job '{name}' done");
+            if let Some(url) = &settings.healthcheck_ping_url
+                && HEARTBEAT_JOBS.contains(&name)
+            {
+                send_heartbeat(url, None);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) if err.is::<stop::Terminated>() => {
+            log::warn!("job '{name}' stopped by SIGTERM");
+            ExitCode::from(143)
+        }
+        Err(err) => {
+            log::error!("job '{name}' failed: {}", redact(&format!("{err:#}")));
+            let host = gethostname::gethostname().to_string_lossy().into_owned();
+            let text = format!(
+                "fplopt-rs {name} failed on {host}: {}: {}",
+                fplopt_archive::kind_name(&err),
+                fplopt_archive::summary(&err)
+            );
+            send_admin_alert(
+                &redact(&text),
+                settings.telegram_bot_token.as_deref(),
+                settings.telegram_admin_chat_id.as_deref(),
+            );
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// SIGTERM sets the stop flag the long loops check (`fplopt_archive::stop`).
+fn register_sigterm() {
+    #[cfg(unix)]
+    if let Err(err) = signal_hook::flag::register(signal_hook::consts::SIGTERM, stop::flag()) {
+        log::warn!("could not install the SIGTERM handler: {err}");
     }
 }
 

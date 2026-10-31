@@ -1,0 +1,408 @@
+[
+ null,
+ {
+  "replies": [
+   [
+    5,
+    "Send /start first."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Waiting for access: the admin has been asked."
+   ],
+   [
+    1000,
+    "New user asks for access: chat 5. /allow 5"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Waiting for access: the admin has been asked."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Waiting for access: the admin has been asked."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    6,
+    "Send /start first."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Waiting for access: the admin has been asked."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    1000,
+    "<b>FPL optimizer</b>: transfer plans for your FPL team, from the model that passed its 2025/26 test. You make the final call.\n\n/register &lt;team ID&gt; · your FPL team (the number in your team's URL)\n/plan · plans for the next deadline\n/chips · what the (untested) chip planner would do: information only\n/transfer &lt;out&gt; -&gt; &lt;in&gt; · a transfer you already made for the next GW (FPL doesn't show it before the deadline); /transfer list, /transfer undo, /transfer clear\n/setft &lt;n&gt; · correct the free transfers for the next GW (/setft clear to undo)\n/alerts on|off · the message 24 hours before each deadline (and a re-run about 2 hours before, only if the plan changes)\n/help · this list\n\nAdmin: /allow &lt;chat id&gt;, /block &lt;chat id&gt;, /users"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    1000,
+    "Usage: /allow &lt;chat id&gt;"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    1000,
+    "Chat 5: active."
+   ],
+   [
+    5,
+    "You have access.\n\n<b>FPL optimizer</b>: transfer plans for your FPL team, from the model that passed its 2025/26 test. You make the final call.\n\n/register &lt;team ID&gt; · your FPL team (the number in your team's URL)\n/plan · plans for the next deadline\n/chips · what the (untested) chip planner would do: information only\n/transfer &lt;out&gt; -&gt; &lt;in&gt; · a transfer you already made for the next GW (FPL doesn't show it before the deadline); /transfer list, /transfer undo, /transfer clear\n/setft &lt;n&gt; · correct the free transfers for the next GW (/setft clear to undo)\n/alerts on|off · the message 24 hours before each deadline (and a re-run about 2 hours before, only if the plan changes)\n/help · this list"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    1000,
+    "chat 5: active, team -, alerts on"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "<b>FPL optimizer</b>: transfer plans for your FPL team, from the model that passed its 2025/26 test. You make the final call.\n\n/register &lt;team ID&gt; · your FPL team (the number in your team's URL)\n/plan · plans for the next deadline\n/chips · what the (untested) chip planner would do: information only\n/transfer &lt;out&gt; -&gt; &lt;in&gt; · a transfer you already made for the next GW (FPL doesn't show it before the deadline); /transfer list, /transfer undo, /transfer clear\n/setft &lt;n&gt; · correct the free transfers for the next GW (/setft clear to undo)\n/alerts on|off · the message 24 hours before each deadline (and a re-run about 2 hours before, only if the plan changes)\n/help · this list"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Unknown command. /help lists them."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Unknown command. /help lists them."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Register your team first: /register &lt;team ID&gt;"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Register your team first: /register &lt;team ID&gt;"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Usage: /register &lt;team ID&gt;, the number in your FPL team's URL (fantasy.premierleague.com/entry/<b>1234567</b>/event/…)."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Usage: /register &lt;team ID&gt;, the number in your FPL team's URL (fantasy.premierleague.com/entry/<b>1234567</b>/event/…)."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Usage: /register &lt;team ID&gt;, the number in your FPL team's URL (fantasy.premierleague.com/entry/<b>1234567</b>/event/…)."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "FPL has no team with ID 8."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Registered.\n\n<b>Team 7</b> before GW6 (2023-24)\nSquad: P100109, P100202, P100204, P100214, P100402, P100410, P100505, P100514, P100600, P100611, P100711, P100802, P100807, P100914, P101001\nBank £0.5m · 5 free transfers\nChips played: none\n\n/plan for the GW6 plan."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "<b>GW6 plan</b> · deadline Fri 15 Sep 18:30 (UK)\nTeam 7 · bank £0.5m · 5 FT\nChips you can play this GW: Wildcard, Free Hit, Bench Boost, Triple Captain\nxP data from Fri 08 Sep 18:30 (UK)\nPrices live from FPL at Thu 14 Sep 22:30 (UK)\n\n<b>Plan 1</b> · +29.9 xP vs saving the FT (next 1 GWs)\nGW6: P101001 → P100900, P100202 → P100503, P100402 → P100905, P100807 → P101007, P100514 → P100613\nCaptain P100905 · vice P100503\n\n<b>GW6 team</b> (plan 1)\nGK P100900\nDEF P100905 (C), P100503 (V), P100204, P100505, P100802\nMID P101007, P100109, P100410\nFWD P100613, P100214\nBench P100600, P100611, P100914, P100711\n\n<b>Plan 2</b> (+29.9): GW6 P101001 → P100900, P100202 → P100503, P100402 → P100905, P100807 → P101007, P100914 → P100613\n<b>Plan 3</b> (+29.8): GW6 P100202 → P100503, P100402 → P100903, P100802 → P100905, P100807 → P101007, P100514 → P100613\n<b>Save the FT</b>: GW6 xP 33.2 (plan 1: 63.0)\n\nPlans 1 and 3 are within the solver's precision of each other: treat them as equally good.\nChips are your call: the system doesn't plan them yet.\nMade transfers for GW6 already? FPL doesn't show them before the deadline: tell the bot with /transfer.\n\nNotes:\n· free transfers 5: replayed from the transfers and chips of GW1-GW5"
+   ]
+  ]
+ },
+ {
+  "alert": "sent",
+  "texts": [
+   [
+    5,
+    "<b>GW6 plan</b> · deadline Fri 15 Sep 18:30 (UK)\nTeam 7 · bank £0.5m · 5 FT\nChips you can play this GW: Wildcard, Free Hit, Bench Boost, Triple Captain\nxP data from Fri 08 Sep 18:30 (UK)\nPrices live from FPL at Thu 14 Sep 22:30 (UK)\n\n<b>Plan 1</b> · +29.9 xP vs saving the FT (next 1 GWs)\nGW6: P101001 → P100900, P100202 → P100503, P100402 → P100905, P100807 → P101007, P100514 → P100613\nCaptain P100905 · vice P100503\n\n<b>GW6 team</b> (plan 1)\nGK P100900\nDEF P100905 (C), P100503 (V), P100204, P100505, P100802\nMID P101007, P100109, P100410\nFWD P100613, P100214\nBench P100600, P100611, P100914, P100711\n\n<b>Plan 2</b> (+29.9): GW6 P101001 → P100900, P100202 → P100503, P100402 → P100905, P100807 → P101007, P100914 → P100613\n<b>Plan 3</b> (+29.8): GW6 P100202 → P100503, P100402 → P100903, P100802 → P100905, P100807 → P101007, P100514 → P100613\n<b>Save the FT</b>: GW6 xP 33.2 (plan 1: 63.0)\n\nPlans 1 and 3 are within the solver's precision of each other: treat them as equally good.\nChips are your call: the system doesn't plan them yet.\nMade transfers for GW6 already? FPL doesn't show them before the deadline: tell the bot with /transfer.\n\nNotes:\n· free transfers 5: replayed from the transfers and chips of GW1-GW5"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Usage: /setft &lt;0-5&gt; or /setft clear"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "GW6 (deadline Fri 15 Sep 18:30): planning with 2 free transfers."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "<b>GW6 plan</b> · deadline Fri 15 Sep 18:30 (UK)\nTeam 7 · bank £0.5m · 2 FT\nChips you can play this GW: Wildcard, Free Hit, Bench Boost, Triple Captain\nxP data from Fri 08 Sep 18:30 (UK)\nPrices live from FPL at Thu 14 Sep 22:30 (UK)\n\n<b>Plan 1</b> · +15.4 xP vs saving the FT (next 1 GWs)\nGW6: P100202 → P100503, P100402 → P100905\nCaptain P100905 · vice P100503\n\n<b>GW6 team</b> (plan 1)\nGK P100600\nDEF P100905 (C), P100503 (V), P100204, P100505, P100802\nMID P100109, P100410, P100807, P100611\nFWD P100214\nBench P101001, P100914, P100711, P100514\n\n<b>Plan 2</b> (+15.2): GW6 P100202 → P100905, P100807 → P101007, P100514 → P100613 (−4 hit)\n<b>Plan 3</b> (+15.2): GW6 P100202 → P100905, P100807 → P101007, P100914 → P100613 (−4 hit)\n<b>Save the FT</b>: GW6 xP 33.2 (plan 1: 48.6)\n\nPlans 1, 2 and 3 are within the solver's precision of each other: treat them as equally good.\nChips are your call: the system doesn't plan them yet.\nMade transfers for GW6 already? FPL doesn't show them before the deadline: tell the bot with /transfer.\n\nNotes:\n· free transfers 5: replayed from the transfers and chips of GW1-GW5\n· free transfers 2: set by you (/setft)"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "GW6: free transfers from the import again."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "GW6 transfers you've told me about: none"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Usage: /transfer Wissa -&gt; Gonzalo (or /transfer Wissa Gonzalo); /transfer list, /transfer undo, /transfer clear"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "No player called 'Nobody' this season."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Recorded for GW6: P100109 → P100311. All GW6 transfers: P100109 → P100311. Bank £3.9m, 4 FT left. /plan and the alerts now plan from this squad."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Can't record that transfer: P100109 isn't in the squad"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Can't record that transfer: P100109 isn't in the squad"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "GW6 transfers you've told me about: P100109 → P100311"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "<b>GW6 plan</b> · deadline Fri 15 Sep 18:30 (UK)\nTeam 7 · bank £3.9m · 4 FT\nChips you can play this GW: Wildcard, Free Hit, Bench Boost, Triple Captain\nxP data from Fri 08 Sep 18:30 (UK)\nPrices live from FPL at Thu 14 Sep 22:30 (UK)\n\n<b>Plan 1</b> · +26.8 xP vs saving the FT (next 1 GWs)\nGW6: P100202 → P100503, P100402 → P100905, P100311 → P101007, P100514 → P100613\nCaptain P100905 · vice P100503\n\n<b>GW6 team</b> (plan 1)\nGK P100600\nDEF P100905 (C), P100503 (V), P100204, P100505, P100802\nMID P101007, P100410, P100807\nFWD P100613, P100214\nBench P101001, P100611, P100914, P100711\n\n<b>Plan 2</b> (+26.8): GW6 P100202 → P100503, P100402 → P100905, P100807 → P101007, P100514 → P100613\n<b>Plan 3</b> (+26.8): GW6 P100202 → P100503, P100402 → P100905, P100311 → P101007, P100914 → P100613\n<b>Save the FT</b>: GW6 xP 29.8 (plan 1: 56.6)\n\nPlans 1 and 2 are within the solver's precision of each other: treat them as equally good.\nChips are your call: the system doesn't plan them yet.\nMade transfers for GW6 already? FPL doesn't show them before the deadline: tell the bot with /transfer.\n\nNotes:\n· free transfers 5: replayed from the transfers and chips of GW1-GW5\n· transfers you told the bot about (/transfer): P100109 → P100311; bank now £3.9m, 4 free transfer(s) left"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "<b>GW6 chips</b> · information only\nThe chip planner isn't tested yet: weigh this against your own judgement.\nUnused chips: Bench Boost (until GW19), Triple Captain (until GW19), Wildcard (until GW19), Free Hit (until GW19), Wildcard (until GW38), Free Hit (until GW38), Bench Boost (until GW38), Triple Captain (until GW38)\nPrices live from FPL at Thu 14 Sep 22:30 (UK)\n\n<b>Best over the next 1 GWs:</b> Free Hit GW6, +13.5 xP vs holding every chip\nThis GW with it: P101001 → P100200, P100202 → P100205, P100204 → P100503, P100402 → P100903, P100505 → P100904, P100802 → P100905, P100311 → P100108, P100410 → P100208, P100611 → P100507, P100711 → P100708, P100807 → P101007, P100214 → P100613, P100914 → P101014; captain P100905\n\nEach chip on its own, in its most promising GW (xP vs no chip):\n· Wildcard GW6: +11.5\n· Free Hit GW6: +13.5\n· Bench Boost GW6: -1.0\n· Triple Captain GW6: +5.0\n\nOptions the solver checked (xP vs no chip):\n· Free Hit GW6: +13.5\n· no chip: +0.0\n\nHow to read it: a chip still held after GW6 counts as worth a guessed value (Wildcard 6, Free Hit 4, Bench Boost 4, Triple Captain 3 xP); a chip whose window ends sooner is worth nothing if held. So a chip wins only if it beats that guess. The bot's plans don't play chips."
+   ]
+  ]
+ },
+ null,
+ {
+  "alert": "sent",
+  "texts": [
+   [
+    5,
+    "<b>GW6 update</b> · deadline Fri 15 Sep 18:30 (UK)\nTransfers changed: was P100202 → P100503, P100402 → P100905, P100514 → P100613, P100807 → P101007, P101001 → P100900, now P100202 → P100503, P100311 → P101007, P100402 → P100905, P100514 → P100613.\nTeam 7 · bank £3.9m · 4 FT\nChips you can play this GW: Wildcard, Free Hit, Bench Boost, Triple Captain\nxP data from Fri 08 Sep 18:30 (UK)\nPrices live from FPL at Fri 15 Sep 16:30 (UK)\n\n<b>Plan 1</b> · +26.8 xP vs saving the FT (next 1 GWs)\nGW6: P100202 → P100503, P100402 → P100905, P100311 → P101007, P100514 → P100613\nCaptain P100905 · vice P100503\n\n<b>GW6 team</b> (plan 1)\nGK P100600\nDEF P100905 (C), P100503 (V), P100204, P100505, P100802\nMID P101007, P100410, P100807\nFWD P100613, P100214\nBench P101001, P100611, P100914, P100711\n\n<b>Plan 2</b> (+26.8): GW6 P100202 → P100503, P100402 → P100905, P100807 → P101007, P100514 → P100613\n<b>Plan 3</b> (+26.8): GW6 P100202 → P100503, P100402 → P100905, P100311 → P101007, P100914 → P100613\n<b>Save the FT</b>: GW6 xP 29.8 (plan 1: 56.6)\n\nPlans 1 and 2 are within the solver's precision of each other: treat them as equally good.\nChips are your call: the system doesn't plan them yet.\nMade transfers for GW6 already? FPL doesn't show them before the deadline: tell the bot with /transfer.\n\nNotes:\n· free transfers 5: replayed from the transfers and chips of GW1-GW5\n· transfers you told the bot about (/transfer): P100109 → P100311; bank now £3.9m, 4 free transfer(s) left"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Removed 1. GW6 transfers now: none"
+   ]
+  ]
+ },
+ {
+  "alert": "sent",
+  "texts": [
+   [
+    5,
+    "<b>GW6 update</b> · deadline Fri 15 Sep 18:30 (UK)\nTransfers changed: was P100202 → P100503, P100311 → P101007, P100402 → P100905, P100514 → P100613, now P100202 → P100503, P100402 → P100905, P100514 → P100613, P100807 → P101007, P101001 → P100900.\nTeam 7 · bank £0.5m · 5 FT\nChips you can play this GW: Wildcard, Free Hit, Bench Boost, Triple Captain\nxP data from Fri 08 Sep 18:30 (UK)\nPrices live from FPL at Fri 15 Sep 16:30 (UK)\n\n<b>Plan 1</b> · +29.9 xP vs saving the FT (next 1 GWs)\nGW6: P101001 → P100900, P100202 → P100503, P100402 → P100905, P100807 → P101007, P100514 → P100613\nCaptain P100905 · vice P100503\n\n<b>GW6 team</b> (plan 1)\nGK P100900\nDEF P100905 (C), P100503 (V), P100204, P100505, P100802\nMID P101007, P100109, P100410\nFWD P100613, P100214\nBench P100600, P100611, P100914, P100711\n\n<b>Plan 2</b> (+29.9): GW6 P101001 → P100900, P100202 → P100503, P100402 → P100905, P100807 → P101007, P100914 → P100613\n<b>Plan 3</b> (+29.8): GW6 P100202 → P100503, P100402 → P100903, P100802 → P100905, P100807 → P101007, P100514 → P100613\n<b>Save the FT</b>: GW6 xP 33.2 (plan 1: 63.0)\n\nPlans 1 and 3 are within the solver's precision of each other: treat them as equally good.\nChips are your call: the system doesn't plan them yet.\nMade transfers for GW6 already? FPL doesn't show them before the deadline: tell the bot with /transfer.\n\nNotes:\n· free transfers 5: replayed from the transfers and chips of GW1-GW5"
+   ]
+  ]
+ },
+ null,
+ {
+  "replies": [
+   [
+    5,
+    "<b>GW6 plan</b> · deadline Fri 15 Sep 18:30 (UK)\nTeam 7 · bank £0.5m · 5 FT\nChips you can play this GW: Wildcard, Free Hit, Bench Boost, Triple Captain\nxP data from Fri 08 Sep 18:30 (UK)\nPrices live from FPL at Fri 15 Sep 16:30 (UK)\n\n<b>Plan 1</b> · +29.9 xP vs saving the FT (next 1 GWs)\nGW6: P101001 → P100900, P100202 → P100503, P100402 → P100905, P100807 → P101007, P100514 → P100613\nCaptain P100905 · vice P100503\n\n<b>GW6 team</b> (plan 1)\nGK P100900\nDEF P100905 (C), P100503 (V), P100204, P100505, P100802\nMID P101007, P100109, P100410\nFWD P100613, P100214\nBench P100600, P100611, P100914, P100711\n\n<b>Plan 2</b> (+29.9): GW6 P101001 → P100900, P100202 → P100503, P100402 → P100905, P100807 → P101007, P100914 → P100613\n<b>Plan 3</b> (+29.8): GW6 P100202 → P100503, P100402 → P100903, P100802 → P100905, P100807 → P101007, P100514 → P100613\n<b>Save the FT</b>: GW6 xP 33.2 (plan 1: 63.0)\n\nPlans 1 and 3 are within the solver's precision of each other: treat them as equally good.\nChips are your call: the system doesn't plan them yet.\nMade transfers for GW6 already? FPL doesn't show them before the deadline: tell the bot with /transfer.\n\nNotes:\n· free transfers 5: replayed from the transfers and chips of GW1-GW5"
+   ]
+  ]
+ },
+ null,
+ {
+  "replies": [
+   [
+    5,
+    "<b>GW6 plan</b> · deadline Fri 15 Sep 18:30 (UK)\nTeam 7 · bank £0.5m · 5 FT\nChips you can play this GW: Wildcard, Free Hit, Bench Boost, Triple Captain\nxP data from Fri 08 Sep 18:30 (UK)\nPrices live from FPL at Fri 15 Sep 16:30 (UK)\n\n<b>Plan 1</b> · +29.9 xP vs saving the FT (next 1 GWs)\nGW6: P101001 → P100900, P100202 → P100503, P100402 → P100905, P100807 → P101007, P100514 → P100613\nCaptain P100905 · vice P100503\n\n<b>GW6 team</b> (plan 1)\nGK P100900\nDEF P100905 (C), P100503 (V), P100204, P100505, P100802\nMID P101007, P100109, P100410\nFWD P100613, P100214\nBench P100600, P100611, P100914, P100711\n\n<b>Plan 2</b> (+29.9): GW6 P101001 → P100900, P100202 → P100503, P100402 → P100905, P100807 → P101007, P100914 → P100613\n<b>Plan 3</b> (+29.8): GW6 P100202 → P100503, P100402 → P100903, P100802 → P100905, P100807 → P101007, P100514 → P100613\n<b>Save the FT</b>: GW6 xP 33.2 (plan 1: 63.0)\n\nPlans 1 and 3 are within the solver's precision of each other: treat them as equally good.\nChips are your call: the system doesn't plan them yet.\nMade transfers for GW6 already? FPL doesn't show them before the deadline: tell the bot with /transfer.\n\nNotes:\n· free transfers 5: replayed from the transfers and chips of GW1-GW5"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Alerts are on. Usage: /alerts on|off"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Alerts off."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    5,
+    "Alerts are off. Usage: /alerts on|off"
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    1000,
+    "That's you."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    1000,
+    "Chat 5: blocked."
+   ]
+  ]
+ },
+ {
+  "replies": []
+ },
+ {
+  "replies": []
+ },
+ {
+  "replies": [
+   [
+    1000,
+    "chat 5: blocked, team 7, alerts off"
+   ]
+  ]
+ },
+ null,
+ {
+  "replies": [
+   [
+    1000,
+    "Registered team 7.\nThe data for the next deadline isn't ready yet (it's rebuilt after each new snapshot). Try again in a few minutes."
+   ]
+  ]
+ },
+ {
+  "replies": [
+   [
+    1000,
+    "The data for the next deadline isn't ready yet (it's rebuilt after each new snapshot). Try again in a few minutes."
+   ]
+  ]
+ }
+]

@@ -1,0 +1,30 @@
+[package]
+name = "fplopt-archive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+csv = "1.4.0"
+fastrand = "2"
+flate2 = "1"
+fplopt-core = { version = "0.1.0", path = "../fplopt-core" }
+log = "0.4.34"
+lzma-rs = "0.3"
+regex = "1.13.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "query", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha1 = "0.10"
+tar = "0.4"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tiny_http = "0.12"

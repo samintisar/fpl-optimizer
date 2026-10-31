@@ -217,6 +217,46 @@ scp 'fplopt-server:/tmp/fplopt-scoring/*.json' config/scoring/
 
 Each file records the snapshot it came from (`source.path`, `source.snapshot_at`).
 
+## Rust archiver shadow (migration batch 1)
+
+Gate (b) of the Rust migration (`docs/superpowers/plans/2026-10-28-rust-migration.md`), run in
+the week before the switch to Rust (the whole migration switches over at once, from the
+`rust-migration` branch). The Rust archiver runs beside the live one for a week, writing only
+to `raw-shadow/` (gitignored), from its own timers 2 (tick) and 15 (daily) minutes after the live ones. It doesn't ping the heartbeat;
+its failures alert as `fplopt-rs ... failed`. It doubles the archiver's API calls for that week,
+odds credits included (~80 a month more, within the free 500).
+
+Rust lives in the `fplopt` user's home (`~/.cargo`, installed with rustup, no sudo). The binary
+is built in its own checkout of the branch, `~/fpl-optimizer-rs`; the live `~/fpl-optimizer`
+stays on `main` (the shadow units run there only for `.env` and `config/`):
+
+From batch 4 on the build also compiles HiGHS (the pinned submodule `third_party/HiGHS`, v1.15.1 like highspy), which needs CMake ≥ 3.15 and a C++ compiler (`cmake --version`, `g++ --version`; without sudo, `uv tool install cmake` puts CMake in `~/.local/bin`):
+
+```bash
+git clone -b rust-migration --recurse-submodules --shallow-submodules https://github.com/samintisar/fpl-optimizer.git ~/fpl-optimizer-rs
+cd ~/fpl-optimizer-rs && nice -n 15 ~/.cargo/bin/cargo build --release --locked -j 8
+cp deploy/systemd-shadow/* ~/.config/systemd/user/ && systemctl --user daemon-reload
+systemctl --user enable --now fplopt-rs-shadow-tick.timer fplopt-rs-shadow-daily.timer
+```
+
+After a `git pull` (and `git submodule update --init`) in `~/fpl-optimizer-rs` during the week, rebuild there (the units run its `target/release/fplopt-rs`). Logs:
+`journalctl --user -u 'fplopt-rs-shadow-*' --since today`. After a week, compare (`--since`
+skips the first shadow daily, which backfills what `raw/` already had):
+
+```bash
+.venv/bin/python dev/shadow_compare.py --since <UTC time after the first shadow daily>
+```
+
+**Cutover** (at the switch, once every batch's gates pass): in `fplopt-tick.service`, `fplopt-daily.service` and
+`fplopt-freshness.service`, `ExecStart` runs `%h/fpl-optimizer/target/release/fplopt-rs` instead
+of `.venv/bin/fplopt` (same arguments); re-copy, `daemon-reload`, then disable and remove the
+shadow timers and `raw-shadow/`. Rollback: revert the three units (the Python CLI stays
+installed until batch 8).
+
+**Bot cutover** (batch 5, at the same switch, between two gameweeks, never in the 24 h before a deadline): in `fplopt-bot.service`, `ExecStart` runs `%h/fpl-optimizer/target/release/fplopt-rs bot run` instead of `.venv/bin/fplopt bot run` (same environment: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, `FPLOPT_STATE_DIR`); re-copy, `daemon-reload`, `restart`. The Rust bot uses the same `state/bot.sqlite` and reads the plan contexts the live job writes (Rust's after the live cutover below). Before it, re-run the gate on the server against a fresh backup of `bot.sqlite` (`python3 -c "import sqlite3; s = sqlite3.connect('file:state/bot.sqlite?mode=ro', uri=True); d = sqlite3.connect('../fpl-optimizer-rs/gate/bot-copy.sqlite'); s.backup(d)"`) and the newest context, never the live file: `dev/bot_parity.py --server <a directory with both>`. Rollback: revert the unit.
+
+**Live cutover** (batch 6, with the bot): in `fplopt-live.service` (the 15-minute alert job), `ExecStart` runs `%h/fpl-optimizer/target/release/fplopt-rs live tick` instead of `.venv/bin/fplopt live tick` (same environment; `live prepare` likewise when run by hand). The Rust job rebuilds `data/` with `fplopt-rs build all` in a subprocess and writes plan contexts from its own v1 model to the same `state/context/`; its first run after the switch sees a new commit and builds a fresh context (~a few minutes), so switch more than an hour before an alert window. The build needs LightGBM's sources (`git submodule update --init --recursive`: `third_party/LightGBM` and its `external_libs`) and, besides CMake and a C++ compiler, OpenMP (`libgomp`, part of gcc). Before it, run `dev/models_parity.py --models v1 --seasons 2025,2026 --plans` on the server (its `data/`, read only) and `dev/bot_parity.py --server <copy> --deadlines <the next GW> --rust-contexts`. Rollback: revert the unit; the Python job reads the Rust-built contexts (same layout) or rebuilds its own on the next commit change.
+
 ## Copy raw/ to the dev machine
 
 For notebooks and Phase 1b, from the repo root on the dev machine (Git Bash):

@@ -12,10 +12,23 @@ chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive", "string"] }
 dotenvy = "0.15.7"
 env_logger = "0.11.11"
+fplopt-archive = { version = "0.1.0", path = "../fplopt-archive" }
+fplopt-backtest = { version = "0.1.0", path = "../fplopt-backtest" }
+fplopt-bot = { version = "0.1.0", path = "../fplopt-bot" }
+fplopt-build = { version = "0.1.0", path = "../fplopt-build" }
 fplopt-core = { version = "0.1.0", path = "../fplopt-core" }
+fplopt-features = { version = "0.1.0", path = "../fplopt-features" }
+fplopt-models = { version = "0.1.0", path = "../fplopt-models" }
+fplopt-optimize = { version = "0.1.0", path = "../fplopt-optimize" }
 fplopt-parity = { version = "0.1.0", path = "../fplopt-parity" }
+fplopt-store = { version = "0.1.0", path = "../fplopt-store" }
+gethostname = "1"
 log = "0.4.34"
+mimalloc = "0.1.52"
 serde_json = "1.0.154"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
 
 [lints]
 workspace = true

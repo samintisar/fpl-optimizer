@@ -547,3 +547,153 @@ realized rate; Brier is of the `needed` event:
   `needed` rates are 0.27 / 0.56 / 0.56 / 0.51, random 0.23 / 0.86 / 0.82 / 0.79.
 
 > **Adopted (2026-10-08):** the package's `minutes_bench_weights` now uses the skip-aware weights (`skip_aware_tail`). In the table below, the `minutes` column is the version without skips and `skip` is what is shipped.
+
+## `archiver_parity.py` and `shadow_compare.py`: Rust migration batch 1 gate
+
+`archiver_parity.py` is gate (a): a local replay server answers every source's URLs from real
+payloads in `raw/` (FPL, odds, football-data, vaastav, fplcache; ESPN synthetic), the Python
+jobs run in process against it and `fplopt-rs` runs as a subprocess with `FPLOPT_<SOURCE>_URL`
+overrides, each from the same seed store. The two trees must match: paths with timestamps
+masked, contents decompressed, run-manifest times and failure-reason texts masked (the exception
+type is kept), and the same exit status. Never alerts or pings (the Rust run gets the variables
+set empty and runs outside the repo, away from `.env`).
+
+```sh
+cargo build --release -p fplopt-cli
+uv run python dev/archiver_parity.py [--only daily,tick-window] [--keep DIR]
+```
+
+`shadow_compare.py` is gate (b), on the server after the shadow week
+(`deploy/README.md`, *Rust archiver shadow*): every live snapshot in `raw/` needs a shadow twin
+in `raw-shadow/` within 20 minutes and vice versa (write-once files and element-summary runs as
+sets), and every shadow file must parse. Pass `--since` after the shadow's first daily run, which
+backfills event-live and element summaries the live archive already had.
+
+```sh
+uv run python dev/shadow_compare.py --since 2026-10-31T00:00
+```
+
+Both log a row to `results/experiments.csv` (family `rust parity`) and exit 1 on any difference.
+
+## `build_parity.py` and `name_golden.py`: Rust migration batch 2 gate
+
+`build_parity.py` runs `fplopt build all` and `fplopt-rs build all` from the same `raw/` (as
+subprocesses from the repo root, alerts and heartbeat off, each into its own data directory)
+and compares every table in `fplopt.build.tables.TABLES` with `fplopt-rs check parity table`
+on the table's key. The two builds must also write the same set of files. On 2026-10-29 (local
+copy of the server's raw/): 22/22 tables identical, Python 354 s, Rust 140 s.
+
+```sh
+cargo build --release -p fplopt-cli
+uv run python dev/build_parity.py [--raw raw] [--python-data DIR] [--keep DIR]
+```
+
+`name_golden.py` writes `tests/fixtures/rust_golden/names.json.gz` from a full build's
+`data/`: every name the Understat and ESPN maps normalise and the (source, FPL) name pairs
+they score with rapidfuzz's `token_set_ratio`. It keeps every pair scoring >= 50, plus a fixed
+sample of 20,000 below 50. Only those scores can change a map, and all 1.8M pairs would be
+15 MB. The Rust test (`crates/fplopt-build/src/fuzz.rs`) checks the file. Set
+`FPLOPT_NAMES_GOLDEN` to point it at an untrimmed set instead (all 1,844,337 pairs matched on
+2026-10-29). `tests/test_rust_golden.py` re-checks the file against the installed rapidfuzz.
+
+```sh
+uv run python dev/name_golden.py --data data
+```
+
+`build_parity.py` logs a row to `results/experiments.csv` (family `rust parity`) and exits 1
+on any difference.
+
+## `features_parity.py`: Rust migration batch 3 gate
+
+`features_parity.py` computes every registered feature (`fplopt.features.FEATURES`) and the
+minutes model's history frames (`history.training_frame`, `history.prediction_frame`) with
+Python's `DataStore`, at the leakage check's edge deadlines plus 10 sampled ones
+(`sample_deadlines`, seed 0). It then runs `fplopt-rs features dump` on the same deadlines and
+compares each pair of frames with `fplopt-rs check parity table` on the frame's key, plus the
+row order. On 2026-10-30 (local `data/`): 234/234 frames identical at 26 deadlines, Python
+80 s, Rust 33 s.
+
+```sh
+cargo build --release -p fplopt-cli
+uv run python dev/features_parity.py [--data data] [--n-random 10] [--keep DIR]
+```
+
+The second half of the gate is `fplopt-rs check leakage`, the corrupt-the-future check of the
+same frames in Rust (2026-10-30: 28 deadlines, no leaks, 17 min). `features_parity.py` logs a row to `results/experiments.csv` (family
+`rust parity`) and exits 1 on any difference.
+
+## `optimize_parity.py`: Rust migration batch 4 gate
+
+`optimize_parity.py` builds a corpus of planner cases at seeded real deadlines (2021/22 to
+2026/27, every pick's GW1/GW2 kind included): template, `random:1`, `random:2` and two
+"carried" squads (an earlier GW's template held to the deadline: stale prices, departed
+players, clubs over the cap, more FTs, a sell-on fee, chips used), `ep_next` frames everywhere
+and `v1` at `--v1` deadlines, default settings plus hit variants, with and without chips.
+Each case is solved from the same files by Python (`PlanInput.from_context` + `optimize`) and
+`fplopt-rs optimize solve`; it checks the candidates, horizon and bench weights, every plan
+(#1..3 and the roll plan: objective within 1e-6, the same plan unless Python's ties its
+runner-up within 1e-6) and replays every Rust plan through Python's `apply_decision` /
+`next_state` (hits, bank and FTs must equal the replay's).
+
+On 2026-10-30 (local `data/`): seed 0 (12 deadlines) 120/120 cases and seed 1 (20 deadlines)
+173/173: all 1,172 plans identical (no ties needed), HiGHS node counts equal in every case,
+bench weights identical; Python and Rust take about the same time (Rust ~10% faster).
+
+```sh
+cargo build --release -p fplopt-cli
+uv run python dev/optimize_parity.py [--data data] [--deadlines 12] [--v1 4] [--seed 0] [--keep DIR]
+```
+
+It logs a row to `results/experiments.csv` (family `rust parity`) and exits 1 on any failure.
+
+## `bot_parity.py`: Rust migration batch 5 gate
+
+`bot_parity.py` replays scripted bot sessions twice on copies of the same state, through
+Python's `BotService` (`tests/bot_replay.py`) and `fplopt-rs bot replay`, with FPL's
+responses recorded once (`--fpl`) so both see the same bytes. Sessions: `server` (a copy of
+the server's `state/`: a backup of `bot.sqlite`, never the live file, and the newest context;
+every registered user plans as now, and public FPL teams register on new chats) and
+`local-<season>-<gw>` (v1 contexts built from `data/`, a new database). Each team: `/plan`,
+`/transfer list`, both alerts, some `/chips` and `/setft`; then FPL down, and after the
+deadline. Checks: every reply and alert text byte for byte, every database row (write times
+aside), and the batch 4 tie rule where a plan differs.
+
+On 2026-10-30 (the server's GW9 context and state copied that day; 2026/27 GW4 and GW8 built
+locally; the registered user's team and 11 public teams): 3/3 sessions identical, 303 steps,
+333 messages, 93 plans logged, no ties. Both implementations fail the same steps (alerts for
+a chat whose team FPL doesn't know, which the alert job never alerts), and at GW4 most
+imports stop at chips played after GW4 (today's FPL history replayed at a past GW), alike in
+both. Python and Rust take about the same time (the solves dominate).
+
+```sh
+cargo build --release -p fplopt-cli
+uv run python dev/bot_parity.py --server DIR [--data data] [--deadlines 2026:4,2026:8] [--fpl DIR] [--keep DIR]
+```
+
+It logs a row to `results/experiments.csv` (family `rust parity`) and exits 1 on any failure.
+
+## `models_parity.py`: Rust migration batch 6 gate
+
+`models_parity.py` computes each `--models` frame in Python and with `fplopt-rs models dump`
+at the same deadlines from the same `data/`, and compares them with `fplopt-rs check parity
+table` on (player_key, horizon) plus the row order. The baselines must match within rtol
+1e-9; `v1` follows the plan's gate: its fit at the refit cutoff (every component's fitted
+values: the team ratings, the LightGBM boosters as model text, the availability mapping, the
+shares' and components' parameters) within 1e-6 relative, its xP within an absolute 0.01.
+The components (`team`, `minutes`, `availability`, `shares`, `components`) can be checked on
+their own, fitted at the deadline itself. Deadlines: the leakage check's edge list plus
+`--n-random` sampled ones, or `--seasons 2025,2026` (every deadline of those seasons so far:
+the plan's gate 2; the holdout season is run, never scored). `--plans` plans the template
+squad with the Rust planner on Python's and on Rust's v1 frame (no chips, the bot's setting)
+and wants plan #1 the same: gate 3, the xP's effect alone, since batch 4 showed the planners
+agree on the same frame. `bot_parity.py --rust-contexts` covers the registered users: the
+Rust bot on Rust-built contexts against the Python bot on Python's.
+
+```sh
+cargo build --release -p fplopt-cli
+uv run python dev/models_parity.py [--data data] [--models v1] [--n-random 10 | --seasons 2025,2026] [--plans] [--keep DIR]
+uv run python dev/bot_parity.py --server DIR --deadlines 2026:8,2026:9 --rust-contexts
+```
+
+It logs a row to `results/experiments.csv` (family `rust parity`) and exits 1 on any
+difference.
