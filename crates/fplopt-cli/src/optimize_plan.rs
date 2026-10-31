@@ -22,7 +22,7 @@ use fplopt_core::settings::Settings;
 use fplopt_features::baseline::player_pool;
 use fplopt_optimize::entry::{
     EntryClient, EntryError, GwIndex, SquadSpec, apply_overrides, import_squad, money,
-    read_squad_file, squad_file_text, squad_state,
+    read_squad_file, season_elements, squad_file_text, squad_state,
 };
 use fplopt_optimize::plans::{GwPlan, PlanSet};
 use fplopt_optimize::start::{
@@ -515,34 +515,16 @@ fn real_squad(
     rules: &Rules,
 ) -> Result<RealSquad> {
     let gw_index: GwIndex = season_gw_index(store, season)?;
-    let table =
-        view.table("player_season", Some(&["player_key", "season", "element_id", "web_name"]))?;
-    let (keys, seasons) = (table.opt_i64("player_key")?, table.opt_i64("season")?);
-    let (elements, web) = (table.opt_i64("element_id")?, table.opt_str("web_name")?);
-    // This season's rows, deduplicated on element_id keeping the last (in row order).
-    let rows: Vec<usize> = (0..table.height()).filter(|&i| seasons[i] == Some(season)).collect();
-    let mut last: HashMap<Option<i64>, usize> = HashMap::new();
-    for &i in &rows {
-        last.insert(elements[i], i);
-    }
-    let kept: Vec<usize> =
-        rows.into_iter().filter(|i| last.get(&elements[*i]) == Some(i)).collect();
     let mut element_keys: HashMap<i64, i64> = HashMap::new();
     let mut names: HashMap<i64, String> = HashMap::new();
+    // Python's {k: e for e, k in element_keys.items()}: the last element of a key wins.
     let mut key_elements: HashMap<i64, i64> = HashMap::new();
     let mut players: Vec<(i64, String)> = Vec::new();
-    for &i in &kept {
-        let (Some(e), Some(k)) = (elements[i], keys[i]) else { continue };
-        let name = web[i].clone().unwrap_or_else(|| "None".to_owned());
+    for (e, k, name) in season_elements(view, season)? {
         element_keys.insert(e, k);
         names.insert(e, name.clone());
+        key_elements.insert(k, e);
         players.push((e, name));
-    }
-    // Python's {k: e for e, k in element_keys.items()}: the last element of a key wins.
-    for &i in &kept {
-        if let (Some(e), Some(k)) = (elements[i], keys[i]) {
-            key_elements.insert(k, e);
-        }
     }
 
     let mut initial_prices = |first_gw: i64| -> Result<HashMap<i64, i64>> {

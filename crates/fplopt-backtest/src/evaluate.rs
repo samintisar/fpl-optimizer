@@ -8,6 +8,7 @@
 //! `jobs = 1`'s.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -16,6 +17,7 @@ use fplopt_build::scoring::{Rules, backtest_rules, default_config_dir};
 use fplopt_core::numpy::np_sum;
 use fplopt_core::pyjson::Ordered;
 use fplopt_core::seasons::{DEVELOP_SEASONS, HOLDOUT_SEASONS, VALIDATE_SEASONS, season_label};
+use fplopt_optimize::entry::squad_file_state;
 use fplopt_optimize::start::{MAX_BANK, StartStateError, random_state, template_state};
 use fplopt_store::DataStore;
 
@@ -29,17 +31,23 @@ use crate::stats::{
 
 // --- start states ---------------------------------------------------------------------------
 
-/// One start state: the template squad, or a random squad with `seed`, at `gw_index`.
+/// One start state: the template squad, a random squad with `seed`, or a real squad from a
+/// squad file (`squad`; Rust only), at `gw_index`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartSpec {
     pub random: bool,
     pub gw_index: i64,
     pub seed: u64,
+    pub squad: Option<PathBuf>,
 }
 
 impl StartSpec {
     pub fn start_id(&self, gw_index: Option<i64>) -> String {
         let gw = gw_index.unwrap_or(self.gw_index);
+        if let Some(path) = &self.squad {
+            let stem = path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
+            return format!("squad:{stem}@{gw}");
+        }
         if self.random { format!("random{}@{gw}", self.seed) } else { format!("template@{gw}") }
     }
 
@@ -50,6 +58,9 @@ impl StartSpec {
         gw_index: i64,
         rules: &Rules,
     ) -> Result<SquadState> {
+        if let Some(path) = &self.squad {
+            return squad_file_state(store, season, gw_index, path, rules);
+        }
         let deadline = season_schedule(store, season, gw_index)?[0].deadline;
         let view = store.as_of(deadline);
         if self.random {
@@ -61,16 +72,19 @@ impl StartSpec {
 }
 
 /// `"template@1,random:5@1,random:3@20"` -> the template at gw_index 1, random seeds 0-4 at
-/// 1 and seeds 0-2 at 20 (`random@g` = seed 0). Duplicates raise.
+/// 1 and seeds 0-2 at 20 (`random@g` = seed 0); `squad:FILE@g`: the squad file's squad at g
+/// (Rust only; at gw_index 1 every squad may be rebuilt for free, so a real GW1 squad starts
+/// at 2). Duplicates raise.
 pub fn parse_start_specs(text: &str) -> Result<Vec<StartSpec>> {
     let mut specs = Vec::new();
     for item in text.split(',').map(str::trim) {
         let bad = || {
             anyhow::anyhow!(
-                "bad start spec '{item}': expected template@<gw>, random@<gw> or random:<n>@<gw>"
+                "bad start spec '{item}': expected template@<gw>, random@<gw>, random:<n>@<gw> \
+                 or squad:<file>@<gw>"
             )
         };
-        let (kind, gw) = item.split_once('@').ok_or_else(bad)?;
+        let (kind, gw) = item.rsplit_once('@').ok_or_else(bad)?;
         if gw.is_empty() || !gw.bytes().all(|b| b.is_ascii_digit()) {
             return Err(bad());
         }
@@ -78,8 +92,14 @@ pub fn parse_start_specs(text: &str) -> Result<Vec<StartSpec>> {
         if gw_index < 1 {
             bail!("bad start spec '{item}': gw_index must be >= 1");
         }
-        if kind == "template" {
-            specs.push(StartSpec { random: false, gw_index, seed: 0 });
+        if let Some(path) = kind.strip_prefix("squad:") {
+            if path.is_empty() {
+                return Err(bad());
+            }
+            let squad = Some(PathBuf::from(path));
+            specs.push(StartSpec { random: false, gw_index, seed: 0, squad });
+        } else if kind == "template" {
+            specs.push(StartSpec { random: false, gw_index, seed: 0, squad: None });
         } else if kind == "random" || kind.starts_with("random:") {
             let n: u64 = match kind.strip_prefix("random:") {
                 None => 1,
@@ -89,7 +109,12 @@ pub fn parse_start_specs(text: &str) -> Result<Vec<StartSpec>> {
             if n < 1 {
                 bail!("bad start spec '{item}': need at least one seed");
             }
-            specs.extend((0..n).map(|seed| StartSpec { random: true, gw_index, seed }));
+            specs.extend((0..n).map(|seed| StartSpec {
+                random: true,
+                gw_index,
+                seed,
+                squad: None,
+            }));
         } else {
             return Err(bad());
         }
@@ -1024,4 +1049,20 @@ pub fn summarize(
         comparisons,
         gains: transfer_gain_summary(results),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_specs() {
+        let specs = parse_start_specs("template@1,random:2@20,squad:dir/my team.toml@2").unwrap();
+        let ids: Vec<String> = specs.iter().map(|s| s.start_id(None)).collect();
+        assert_eq!(ids, ["template@1", "random0@20", "random1@20", "squad:my team@2"]);
+        assert_eq!(specs[3].squad.as_deref(), Some(std::path::Path::new("dir/my team.toml")));
+        assert!(parse_start_specs("squad:@2").is_err());
+        assert!(parse_start_specs("squad:a.toml").is_err());
+        assert!(parse_start_specs("template@1,template@1").is_err());
+    }
 }

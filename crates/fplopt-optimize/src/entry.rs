@@ -20,6 +20,10 @@ use fplopt_build::rules::py_float_repr;
 use fplopt_build::scoring::Rules;
 use serde_json::Value;
 
+use fplopt_features::baseline::player_pool;
+use fplopt_store::{AsOfView, DataStore};
+
+use crate::start::{pool_players, season_gw_index, start_deadline};
 use crate::state::{Holding, PoolPlayer, SquadState, TransferRecord, chip_window, next_state};
 
 /// The squad can't be imported or read (a message for the user).
@@ -673,6 +677,64 @@ fn py_repr_strs<S: AsRef<str>>(items: &[S]) -> String {
 }
 
 // --- the backtester's state -----------------------------------------------------------------
+
+/// This season's players in `player_season` as of `view`: (element_id, player_key, web_name)
+/// in row order, deduplicated on element_id keeping the last row.
+pub fn season_elements(view: &AsOfView, season: i64) -> Result<Vec<(i64, i64, String)>> {
+    let table =
+        view.table("player_season", Some(&["player_key", "season", "element_id", "web_name"]))?;
+    let (keys, seasons) = (table.opt_i64("player_key")?, table.opt_i64("season")?);
+    let (elements, web) = (table.opt_i64("element_id")?, table.opt_str("web_name")?);
+    let rows: Vec<usize> = (0..table.height()).filter(|&i| seasons[i] == Some(season)).collect();
+    let mut last: HashMap<Option<i64>, usize> = HashMap::new();
+    for &i in &rows {
+        last.insert(elements[i], i);
+    }
+    Ok(rows
+        .into_iter()
+        .filter(|i| last.get(&elements[*i]) == Some(i))
+        .filter_map(|i| {
+            let (e, k) = (elements[i]?, keys[i]?);
+            Some((e, k, web[i].clone().unwrap_or_else(|| "None".to_owned())))
+        })
+        .collect())
+}
+
+/// A squad file alone (no import; module docs) as the state at the deadline of `gw_index` of
+/// `season`; the file gives bank, free_transfers and players (by element_id or web_name).
+/// For backtests started from a real squad (start kind `squad:FILE@G`, Rust only).
+pub fn squad_file_state(
+    store: &DataStore,
+    season: i64,
+    gw_index: i64,
+    path: &Path,
+    rules: &Rules,
+) -> Result<SquadState> {
+    let index = season_gw_index(store, season)?;
+    let Some(gw) = index.iter().find(|(_, i)| **i == gw_index).map(|(g, _)| *g) else {
+        return entry_error(format!("{} has no gw_index {gw_index}", season_label(season)));
+    };
+    let view = store.as_of(start_deadline(store, season, gw_index)?);
+    let elements = season_elements(&view, season)?;
+    let mut resolve = |name: &str| -> Result<i64> {
+        let folded = name.to_lowercase();
+        let hits: Vec<i64> =
+            elements.iter().filter(|(_, _, n)| n.to_lowercase() == folded).map(|e| e.0).collect();
+        match hits.as_slice() {
+            [e] => Ok(*e),
+            _ => entry_error(format!(
+                "squad file: {} players named {} in {}",
+                hits.len(),
+                py_repr_str(name),
+                season_label(season)
+            )),
+        }
+    };
+    let spec = apply_overrides(None, &read_squad_file(path)?, season, gw, &mut resolve)?;
+    let element_keys: HashMap<i64, i64> = elements.iter().map(|(e, k, _)| (*e, *k)).collect();
+    let pool = pool_players(&player_pool(&view)?)?;
+    squad_state(&spec, &pool, &element_keys, rules, &index)
+}
 
 /// The spec as a `SquadState` at GW `spec.gw`: `pool` is the planned GW's player pool,
 /// `element_keys` this season's element_id -> player_key. Checks the squad's size,
