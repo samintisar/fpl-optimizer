@@ -361,6 +361,24 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
     many seasons move, not by size alone.
     - Eval time 274 → 346 s; the live `live prepare` fit grows ~proportionally (minutes is
       ~11 s per cutoff of ~4 min).
+    - **2026-11-01, head walk 05d4b12 vs 6439125 (200 rounds)** (`diag-minutes-400.txt`):
+      each part's log loss on its own rows. Start: −0.38 % h0, −0.15 % h1+, better in all 6
+      seasons. Sixty (P(60+ | start), starters only): +1.85 % h0 / +1.62 % h1+, worse in all
+      6. Sub (P(sub | no start)): +0.36 % / +0.77 %, worse in all 6. Worst in 2017, when the fit
+      has the least data. The gain is all in the start part; the two small parts overfit.
+    - `gbm-parts` (sixty / sub back to 200, start 400): DISCARD. minutes_ll h0 −0.16 % as
+      predicted, but MSE h0 +0.00026 (1–5). The sharper, worse-calibrated 60+ / sub
+      probabilities score better in points. `start-leaves31` (31 leaves in the start part
+      only): DISCARD, MSE h0 +0.00146, 2017–19 +0.0024 to +0.0039, Brier start +0.10 %. The
+      start part is at capacity. **The GBM line is closed**: rounds (3 values), feature
+      fraction, per-part rounds and leaves all tried. Learning rate and min_data_in_leaf stay
+      untried; there's no mechanism for them.
+    - Also in that walk: P(start) by horizon is level-biased high at long horizons in every
+      season (h3+ 0.379 predicted vs 0.372 realized; h1–2 −0.15 to −0.34 pp, h0 ≈ 0). Recal
+      slopes are ~1 (h0 1.02, h1–2 0.99, h3+ 1.03). The likely cause is pool churn
+      (players who leave the club keep their horizon rows). It's h ≥ 1 only, so the judge's
+      h0 rule can't see a fix. Keepers at h3+ still show idea 9's pattern after gbm-400
+      (bands 0.1–0.5 −9 to −13 pp, 0.5–0.8 +11 to +13 pp, 6 of 6 seasons).
 19. **Relative price and end of season: looked at 2026-10-31.** `price-rank` (rank by price
     among same-position club-mates, a minutes lag feature; the most expensive at a
     club-position starts +2.1 pp at P(start) 0.7–0.9, z 4.0, `diag-club-price.txt`):
@@ -378,6 +396,14 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 `diag-finish-price-over.txt`).
 
 ## Needs the user (not the loop's to do)
+
+- **2026-11-01: the loop is out of testable model lines.** Two variants tonight (GBM
+  per-part rounds, start-part leaves; both DISCARD), and the GBM line is now closed (idea 18).
+  What's left is the user's: the crowd inputs in the pinned harness (idea 13; harness hash
+  still b7e2afde); a calibration table on `research` (decision experiments); and an h1–5
+  path in the judge, or a per-position view, for the h ≥ 1 / keeper fixes (ideas 9, 10).
+  The keeper h3+ miscalibration is still the largest clean signal left in the minutes model
+  (6 of 6 seasons). Until one of those changes, the nightly run is mostly the weekly monitor.
 
 - **New keep on `research`** (2026-10-31, idea 18): `gbm-400` (bee446a), 400 boosting
   rounds in each minutes part. MSE h0 −0.00539, all 6 develop seasons. Promotion checks:
