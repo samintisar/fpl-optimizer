@@ -47,7 +47,10 @@ import time
 from multiprocessing import Pool
 from pathlib import Path
 
-import pandas as pd
+# Before numpy loads: this process computes Python's v1 xP too (`python_xp_cache`).
+os.environ["OPENBLAS_CORETYPE"] = "Haswell"
+
+import pandas as pd  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
