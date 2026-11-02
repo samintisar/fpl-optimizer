@@ -1640,8 +1640,12 @@ target/release/fplopt-rs backtest compare \
 
 Filled in by Task 0 and later tasks.
 
-- Research commit: _(Task 0)_
-- Breaking synthetic tests and verdicts: _(Task 0, Tasks 4 and 7)_
+- **Start ahead of the gates (user, 2026-11-02):** the user said "start" while the switch's gates were still open (batch 7 v1 backtests and chip study, shadow week). Tasks 0–10 run now on `feat/v1r`; nothing touches the server or `rust-migration` itself. Merge `rust-migration` into `feat/v1r` whenever it moves.
+- Research commit: **dcacbcb** (`research`, 2026-11-01 run; local-only branch in `C:/Users/samin/Documents/GitHub/fpl-autoresearch`). All nine keeps are ancestors, and no kept `try:` commit after them touches models/features.
+- Breaking synthetic tests at the pin (`pytest` on the model and history tests: 4 failed, 126 passed):
+  - `test_models_availability.py::test_flags_move_p_start_and_teams_stay_normalized` (horizon_shrink): a small synthetic club's P(start) sums to 11.67 at a far horizon fixture, above the test's 11.5 bound. The shrink pulls toward 0.5 and the bounded normalization can't bring a thin pool back to 11. Real clubs sum to exactly 11 (ledger: `diag-shrink-sums.txt`). **Verdict: fixture artifact, keep stays.** The Rust v1 test is unchanged; any v1r version of it needs a realistic pool size.
+  - `test_models_shares.py::test_planted_shares_are_recovered` (position_par): the planted DEF has npxG but no goals, so the position par pulls its share down (the same artifact as the ledger's finishing-12). **Verdict: fixture artifact, keep stays.** A v1r version would plant goals that match npxG.
+  - `test_models_assemble.py::test_v1_is_deterministic_and_registered` and `::test_the_calibration_table_matches_the_default_settings`: research's calibration table was fitted for the old params, so calibrated v1 refuses it. Not a keep problem: Task 12 fits v1r's own table.
 - Parity gate result: _(Task 11)_
 - Calibration reproduction: _(Task 12)_
 - `live prepare` timing: _(Task 13)_
