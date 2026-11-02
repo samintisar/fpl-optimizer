@@ -105,6 +105,7 @@ impl V1Params {
                 sixty: rounds.clone(),
                 sub: rounds,
                 elo_features: true,
+                horizon_shrink: 0.92,
                 ..base.minutes.clone()
             },
             ..base

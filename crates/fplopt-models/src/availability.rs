@@ -22,7 +22,7 @@ use regex::Regex;
 use crate::gbm::float_column;
 use crate::minutes::{
     Minutes, MinutesFit, MinutesParams, booster_features, conditionals, finish_minutes,
-    history_frame, part, season_weights,
+    history_frame, horizon_start, part, season_weights,
 };
 use crate::optim::{Mat, trust_exact};
 use crate::util::{expit, logit, np_clip, np_sum, opt_ts};
@@ -248,12 +248,11 @@ fn fit_rows(view: &AsOfView, minutes_fit: &MinutesFit, rows: &Table) -> Result<V
         for horizon in 0..=LOOKAHEAD {
             let gwi = base_index + horizon;
             let Some(found) = outcomes.get(&(player, s, gwi)) else { continue };
-            let weight = params.horizon_decay.powf(horizon as f64);
             for &o in found {
                 out.push((
                     (s, base_index, player, gwi, horizon),
                     FitRow {
-                        base: weight * p_model[b] + (1.0 - weight) * long_run,
+                        base: horizon_start(p_model[b], long_run, horizon as f64, params),
                         category: category.clone(),
                         bucket: horizon.min(HORIZON_BUCKETS - 1),
                         start: start[o],

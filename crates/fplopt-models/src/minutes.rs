@@ -47,6 +47,8 @@ pub struct MinutesParams {
     pub ban_residual: bool,
     /// Append `history::ELO_FEATURES` to the lag features (v1r).
     pub elo_features: bool,
+    /// Logit shrink of P(start) by `horizon_shrink ** h` after the decay (1: off; v1r 0.92).
+    pub horizon_shrink: f64,
 }
 
 impl Default for MinutesParams {
@@ -62,8 +64,20 @@ impl Default for MinutesParams {
             max_scale: 1.25,
             ban_residual: false,
             elo_features: false,
+            horizon_shrink: 1.0,
         }
     }
+}
+
+/// P(start) at a horizon: the decay toward `long_run`, then logit x `horizon_shrink ** h`
+/// (post-processing step 1; Python `horizon_start`).
+pub fn horizon_start(p_model: f64, long_run: f64, horizon: f64, params: &MinutesParams) -> f64 {
+    let weight = params.horizon_decay.powf(horizon);
+    let p_start = weight * p_model + (1.0 - weight) * long_run;
+    if params.horizon_shrink == 1.0 {
+        return p_start;
+    }
+    expit(params.horizon_shrink.powf(horizon) * logit(np_clip(p_start, EPS, 1.0 - EPS)))
 }
 
 /// The boosters' features: `LAG_FEATURES`, then `ELO_FEATURES` with `elo_features`.
@@ -475,8 +489,7 @@ pub fn predict_minutes(view: &AsOfView, fit: &MinutesFit) -> Result<Minutes> {
         let starts_long = if rate_long[i].is_nan() { 0.0 } else { rate_long[i] } * n_long[i];
         let long_run = (starts_long + params.long_run_prior * p_model[i])
             / (n_long[i] + params.long_run_prior);
-        let weight = params.horizon_decay.powf(horizon[i]);
-        let blended = weight * p_model[i] + (1.0 - weight) * long_run;
+        let blended = horizon_start(p_model[i], long_run, horizon[i], params);
         let (certain, likely) = (kind[i] == BAN_CERTAIN as f64, kind[i] == BAN_LIKELY as f64);
         p_start.push(if certain {
             fit.ban_start
@@ -532,6 +545,22 @@ mod tests {
     use fplopt_features::history::ELO_FEATURES;
 
     use super::*;
+
+    #[test]
+    fn horizon_start_decays_then_shrinks() {
+        let off = MinutesParams { horizon_decay: 0.5, ..MinutesParams::default() };
+        let on = MinutesParams { horizon_shrink: 0.8, ..off.clone() };
+        for (p, long, h) in [(0.9, 0.6, 0.0), (0.9, 0.6, 1.0), (0.3, 0.5, 3.0)] {
+            let w = 0.5f64.powf(h);
+            let blended = w * p + (1.0 - w) * long;
+            assert_eq!(horizon_start(p, long, h, &off), blended);
+            let z = logit(np_clip(blended, EPS, 1.0 - EPS));
+            let shrunk = expit(0.8f64.powf(h) * z);
+            assert!((horizon_start(p, long, h, &on) - shrunk).abs() < 1e-15);
+        }
+        // h = 0 is not moved by the shrink beyond the clip round trip.
+        assert!((horizon_start(0.9, 0.6, 0.0, &on) - 0.9).abs() < 1e-12);
+    }
 
     #[test]
     fn booster_features_add_elo_only_when_asked() {
