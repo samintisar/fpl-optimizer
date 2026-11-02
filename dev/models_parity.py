@@ -46,18 +46,26 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
+_pre = argparse.ArgumentParser(add_help=False)  # --python-src is read before fplopt is imported
+_pre.add_argument("--python-src", type=Path)
+_known, _ = _pre.parse_known_args()
+if _known.python_src is not None:
+    sys.path.insert(0, str(_known.python_src.resolve()))
 
+import fplopt  # noqa: E402
 from fplopt.backtest.evaluate import family_variants, log_experiment  # noqa: E402
 from fplopt.features.history import training_frame  # noqa: E402
 from fplopt.features.leakcheck import sample_deadlines  # noqa: E402
 from fplopt.features.store import DataStore  # noqa: E402
 from fplopt.models import MODELS, availability, components, minutes, shares, team  # noqa: E402
+from fplopt.models.assemble import V1Params, fit_v1, predict_v1  # noqa: E402
 
 FAMILY = "rust parity"
 QUIET = {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_ADMIN_CHAT_ID": "", "HEALTHCHECK_PING_URL": ""}
 KEYS = ["player_key", "horizon"]
 TOLERANCE = {"v1": ["--rtol", "0", "--atol", "0.01"]}  # others: the parity check's 1e-9
 FIT_RTOL = 1e-6
+NO_CALIBRATE = False  # --no-calibrate: v1 fitted and predicted with calibration off
 
 
 def _values(fit, skip=("cutoff", "params")) -> dict:
@@ -126,7 +134,11 @@ def _v1(view):
     """The model itself: fitted at the refit cutoff (gate 1: every component's values),
     predicted at the deadline (gate 2: the xP frame)."""
     model = MODELS["v1"]
-    fit = model.fit(view.earlier(model.cutoff(view)))
+    cutoff = model.cutoff(view)
+    if NO_CALIBRATE:
+        fit = fit_v1(view.earlier(cutoff), dataclasses.replace(V1Params(), calibrate=False))
+    else:
+        fit = model.fit(view.earlier(cutoff))
     values = {
         "team": _values(fit.team),
         "minutes": _minutes_values(fit.minutes),
@@ -134,7 +146,7 @@ def _v1(view):
         "shares": _values(fit.shares, ("cutoff", "params", "coverage")),
         "components": _components_values(fit.components),
     }
-    return model.predict(view, fit), values
+    return (predict_v1 if NO_CALIBRATE else model.predict)(view, fit), values
 
 
 # name -> (frame and fitted values at the view, the frame's key)
@@ -189,7 +201,9 @@ def plan_one(text: str) -> list[str]:
     return block
 
 
-def compare_plans(binary: Path, work: Path, picked: list, data: Path) -> dict[str, str]:
+def compare_plans(
+    binary: Path, work: Path, picked: list, data: Path, rust_name: str = "v1"
+) -> dict[str, str]:
     """Per deadline: '' if plan #1 is the same on both v1 frames, else what differs."""
     gameweeks = pd.read_parquet(
         data / "gameweek.parquet", columns=["season", "gw", "deadline_time"]
@@ -199,7 +213,8 @@ def compare_plans(binary: Path, work: Path, picked: list, data: Path) -> dict[st
         row = gameweeks[gameweeks["deadline_time"] == deadline].iloc[0]
         plans = {}
         for who in ("python", "rust"):
-            frame = work / who / f"{i:02d}" / "v1.parquet"
+            name = rust_name if who == "rust" else "v1"
+            frame = work / who / f"{i:02d}" / f"{name}.parquet"
             command = [
                 str(binary), "optimize", "plan", "--season", str(int(row["season"])),
                 "--gw", str(int(row["gw"])), "--xp", "v1", "--xp-file", str(frame),
@@ -238,10 +253,26 @@ def deadlines(data: Path, n_random: int) -> list[pd.Timestamp]:
 
 
 def main() -> int:
+    global NO_CALIBRATE
+    print(f"fplopt imported from {fplopt.__file__}", flush=True)
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data", type=Path, default=REPO / "data", help="data/ (read only)")
     parser.add_argument("--bin", type=Path, default=REPO / "target" / "release" / "fplopt-rs")
+    parser.add_argument(
+        "--python-src",
+        type=Path,
+        help="import fplopt from this src/ (e.g. a research checkout); read before the imports",
+    )
     parser.add_argument("--models", default="rolling,ep_next,ep_next_fade")
+    parser.add_argument(
+        "--rust-model",
+        action="append",
+        default=[],
+        help="PY=RUST: compare Python model PY with Rust model RUST (e.g. v1=v1r)",
+    )
+    parser.add_argument(
+        "--no-calibrate", action="store_true", help="v1: fit and predict without calibration"
+    )
     parser.add_argument("--n-random", type=int, default=10)
     parser.add_argument("--seasons", help="every deadline of these seasons (e.g. 2025,2026)")
     parser.add_argument(
@@ -253,7 +284,14 @@ def main() -> int:
     binary = args.bin if args.bin.exists() else args.bin.with_suffix(".exe")
     if not binary.exists():
         parser.error(f"no Rust binary at {args.bin} (cargo build --release -p fplopt-cli)")
+    NO_CALIBRATE = args.no_calibrate
     models = [m.strip() for m in args.models.split(",") if m.strip()]
+    rust_names = {m: m for m in models}  # Python name -> the name Rust dumps it under
+    for pair in args.rust_model:
+        py_name, _, rs_name = pair.partition("=")
+        if py_name not in rust_names or not rs_name:
+            parser.error(f"--rust-model {pair!r}: want PY=RUST with PY among --models")
+        rust_names[py_name] = rs_name
     unknown = [m for m in models if m not in MODELS and m not in COMPONENTS]
     if unknown:
         parser.error(f"unknown models {unknown} (known: {', '.join([*MODELS, *COMPONENTS])})")
@@ -293,7 +331,7 @@ def main() -> int:
 
     started = time.monotonic()
     env = {**os.environ, **QUIET, "FPLOPT_DATA_DIR": str(data)}
-    command = [str(binary), "models", "dump", "--models", ",".join(models)]
+    command = [str(binary), "models", "dump", "--models", ",".join(rust_names[m] for m in models)]
     command += ["--deadlines", str(listing), "--out", str(work / "rust")]
     with open(work / "rust.log", "w", encoding="utf-8") as log:
         rust = subprocess.run(command, cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -308,7 +346,7 @@ def main() -> int:
         for name in models:
             label = f"{i:02d} {deadline} {name}"
             py_file = work / "python" / f"{i:02d}" / f"{name}.parquet"
-            rs_file = work / "rust" / f"{i:02d}" / f"{name}.parquet"
+            rs_file = work / "rust" / f"{i:02d}" / f"{rust_names[name]}.parquet"
             if not (py_file.exists() and rs_file.exists()):
                 results[label] = False
                 problems.append(f"{label}: missing ({'python' if rs_file.exists() else 'rust'})")
@@ -349,7 +387,7 @@ def main() -> int:
     plan_results: dict[str, str] = {}
     if args.plans and "v1" in models:
         started = time.monotonic()
-        plan_results = compare_plans(binary, work, picked, data)
+        plan_results = compare_plans(binary, work, picked, data, rust_names["v1"])
         timings["plans_s"] = time.monotonic() - started
         for label, difference in plan_results.items():
             results[f"{label} plan #1"] = not difference
