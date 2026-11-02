@@ -41,7 +41,9 @@ const PRICE_SCALE: f64 = 10.0;
 const PRICE_ITERATIONS: usize = 30;
 const PRICE_RIDGE: f64 = 1.0;
 const RATE_EPS: f64 = 1e-9;
-const PAR_PRIOR: f64 = 25.0; // pseudo-npxG at 1 behind each position's finishing par
+/// Pseudo-npxG at 1 behind each position's finishing par, and the npxG a position needs
+/// (over its own-npxG rows) for a par by price.
+const PAR_PRIOR: f64 = 25.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SharesParams {
@@ -687,18 +689,37 @@ fn price_curve(
         if element_type == position as f64 {
             let c = curve.iter().find(|t| t.0 == position).map_or(0.0, |t| t.1);
             let z = (price - center) / PRICE_SCALE;
-            return (c * z * z).exp();
+            return (c * (z * z)).exp(); // Python's c * z**2
         }
     }
     1.0
 }
 
-/// A position's finishing par, 1 for an unknown or missing position.
+/// A position's finishing par, 1 for an unknown or missing position (a NaN element_type
+/// matches no entry).
 fn position_finishing_par(table: &[(i64, f64)], element_type: f64) -> f64 {
-    if element_type.is_nan() {
+    table.iter().find(|t| t.0 as f64 == element_type).map_or(1.0, |t| t.1)
+}
+
+/// A pool player's finishing par (Python `marcel_shares`): 1 without `position_par`; else
+/// his position's par, replaced with `price_par` (and a non-empty `price_finishing`) by the
+/// par by price, × the curve with `price_par_quadratic` (and a non-empty curve), unless
+/// that is NaN (a position without a par by price, or no price).
+fn finishing_par_for(fit: &SharesFit, element_type: f64, price: f64) -> f64 {
+    let params = &fit.params;
+    if !params.position_par {
         return 1.0;
     }
-    table.iter().find(|t| t.0 as f64 == element_type).map_or(1.0, |t| t.1)
+    let par = position_finishing_par(&fit.position_finishing, element_type);
+    if !params.price_par || fit.price_finishing.is_empty() {
+        return par;
+    }
+    let mut by_price = price_prior(&fit.price_finishing, element_type, price);
+    if params.price_par_quadratic && !fit.price_finishing_curve.is_empty() {
+        by_price *=
+            price_curve(&fit.price_finishing, &fit.price_finishing_curve, element_type, price);
+    }
+    if by_price.is_nan() { par } else { by_price }
 }
 
 fn position_prior(table: &[(i64, f64)], element_type: f64) -> f64 {
@@ -806,24 +827,7 @@ fn marcel_shares(
         let finishing = match params.finishing_prior {
             None => 1.0,
             Some(k) => {
-                let mut par = 1.0;
-                if params.position_par {
-                    par = position_finishing_par(&fit.position_finishing, element[i]);
-                    if params.price_par && !fit.price_finishing.is_empty() {
-                        let mut by_price = price_prior(&fit.price_finishing, element[i], prices[i]);
-                        if params.price_par_quadratic && !fit.price_finishing_curve.is_empty() {
-                            by_price *= price_curve(
-                                &fit.price_finishing,
-                                &fit.price_finishing_curve,
-                                element[i],
-                                prices[i],
-                            );
-                        }
-                        if !by_price.is_nan() {
-                            par = by_price;
-                        }
-                    }
-                }
+                let par = finishing_par_for(fit, element[i], prices[i]);
                 (v(|s| &s.fin_goals) + k * par) / (v(|s| &s.fin_xg) + k)
             }
         };
@@ -874,6 +878,69 @@ fn taker_q(rows: &[Row], teams: &[TeamFixture], takers: &HashMap<i64, Vec<(Micro
     shrunk_ratio(pd_sum(&attempts), pd_sum(&team_attempts), DEFAULT_TAKER_Q, TAKER_PRIOR_ATTEMPTS)
 }
 
+/// Per (player, season) of `group`: Kahan sums of `values(i)` for row i, NaN skipped
+/// (pandas' groupby sum), sorted by key (groupby + reset_index), each with his first price
+/// (NaN without one: the left merge).
+fn season_table<const N: usize>(
+    group: &[&ShareRow],
+    values: impl Fn(usize) -> [f64; N],
+    first_price: &HashMap<(i64, i64), f64>,
+) -> Vec<(f64, [f64; N])> {
+    let mut seasons: BTreeMap<(i64, i64), [Kahan; N]> = BTreeMap::new();
+    for (i, s) in group.iter().enumerate() {
+        let e = seasons
+            .entry((s.row.player_key, s.row.season))
+            .or_insert_with(|| std::array::from_fn(|_| Kahan::default()));
+        for (k, v) in values(i).into_iter().enumerate() {
+            if !v.is_nan() {
+                e[k].add(v);
+            }
+        }
+    }
+    seasons
+        .iter()
+        .map(|(key, s)| {
+            let price = first_price.get(key).copied().unwrap_or(f64::NAN);
+            (price, std::array::from_fn(|k| s[k].value()))
+        })
+        .collect()
+}
+
+/// One position's finishing par over its rows with their own npxG (`position_par`): (np
+/// goals clipped at 0 per row / npxG shrunk toward 1, with `price_par` the par by price
+/// (a, b, center), with `price_par_quadratic` its curve c).
+fn finishing_par(
+    group: &[&ShareRow],
+    first_price: &HashMap<(i64, i64), f64>,
+    params: &SharesParams,
+) -> (f64, Option<(f64, f64, f64)>, Option<f64>) {
+    let own: Vec<&ShareRow> = group.iter().copied().filter(|s| !s.fb_goals).collect();
+    let np_goals: Vec<f64> = own
+        .iter()
+        .map(|s| np_maximum(nan_to_num(s.row.goals_scored) - nan_to_num(s.row.pen_goals), 0.0))
+        .collect();
+    let own_xg: Vec<f64> = own.iter().map(|s| s.x_goals).collect();
+    let par = shrunk_ratio(np_sum(&np_goals), pd_sum(&own_xg), 1.0, PAR_PRIOR);
+    if !params.price_par {
+        return (par, None, None);
+    }
+    let table: Vec<(f64, f64, f64)> = season_table(&own, |k| [np_goals[k], own_xg[k]], first_price)
+        .into_iter()
+        .map(|(price, [fin, fin_xg])| (price, fin, fin_xg))
+        .collect();
+    if pd_sum(&table.iter().map(|t| t.2).collect::<Vec<_>>()) >= PAR_PRIOR {
+        if params.price_par_quadratic {
+            let (a, b, center, c) = price_model_quadratic(&table);
+            (par, Some((a, b, center)), Some(c))
+        } else {
+            (par, Some(price_model(&table)), None)
+        }
+    } else {
+        // Positions with < PAR_PRIOR npxG (keepers in practice) keep the position par.
+        (par, None, None)
+    }
+}
+
 /// League-level parameters from every row visible in `view`.
 pub fn fit_shares(view: &AsOfView, params: &SharesParams) -> Result<SharesFit> {
     let (season, _) = view.gameweek_for_deadline()?;
@@ -916,53 +983,6 @@ pub fn fit_shares(view: &AsOfView, params: &SharesParams) -> Result<SharesFit> {
     let (mut position_finishing, mut price_finishing, mut price_finishing_curve) =
         (Vec::new(), Vec::new(), Vec::new());
     for (position, group) in by_position {
-        // His first price of the season (the position's rows, any minutes).
-        let mut first_price: HashMap<(i64, i64), f64> = HashMap::new();
-        for r in rows.iter().filter(|r| r.element_type == position as f64 && !r.price.is_nan()) {
-            first_price.entry((r.player_key, r.season)).or_insert(r.price);
-        }
-        if params.position_par {
-            // Rows with his own npxG: np goals (clipped at 0 per row) / npxG.
-            let own: Vec<&&ShareRow> = group.iter().filter(|s| !s.fb_goals).collect();
-            let np_goals: Vec<f64> = own
-                .iter()
-                .map(|s| {
-                    np_maximum(nan_to_num(s.row.goals_scored) - nan_to_num(s.row.pen_goals), 0.0)
-                })
-                .collect();
-            let own_xg: Vec<f64> = own.iter().map(|s| s.x_goals).collect();
-            position_finishing
-                .push((position, shrunk_ratio(np_sum(&np_goals), pd_sum(&own_xg), 1.0, PAR_PRIOR)));
-            if params.price_par {
-                // Per (player, season): Kahan sums, sorted by key, then his first price.
-                let mut by_season: BTreeMap<(i64, i64), [Kahan; 2]> = BTreeMap::new();
-                for (k, s) in own.iter().enumerate() {
-                    let e = by_season.entry((s.row.player_key, s.row.season)).or_default();
-                    e[0].add(np_goals[k]);
-                    if !own_xg[k].is_nan() {
-                        e[1].add(own_xg[k]);
-                    }
-                }
-                let table: Vec<(f64, f64, f64)> = by_season
-                    .iter()
-                    .map(|(key, v)| {
-                        let price = first_price.get(key).copied().unwrap_or(f64::NAN);
-                        (price, v[0].value(), v[1].value())
-                    })
-                    .collect();
-                // Keepers: no par by price.
-                if pd_sum(&table.iter().map(|t| t.2).collect::<Vec<_>>()) >= PAR_PRIOR {
-                    if params.price_par_quadratic {
-                        let (a, b, center, c) = price_model_quadratic(&table);
-                        price_finishing.push((position, a, b, center));
-                        price_finishing_curve.push((position, c));
-                    } else {
-                        let (a, b, center) = price_model(&table);
-                        price_finishing.push((position, a, b, center));
-                    }
-                }
-            }
-        }
         let wg: Vec<f64> =
             group.iter().map(|s| if s.fb_goals { params.goals_weight } else { 1.0 }).collect();
         let wa: Vec<f64> =
@@ -973,23 +993,22 @@ pub fn fit_shares(view: &AsOfView, params: &SharesParams) -> Result<SharesFit> {
         let da: Vec<f64> = (0..group.len()).map(|i| group[i].d * wa[i]).collect();
         position_goal.push((position, ratio(&xg, &dg, 0.0)));
         position_assist.push((position, ratio(&xa, &da, 0.0)));
-        // Per (player, season): Kahan sums, sorted by key (groupby + reset_index).
-        let mut seasons: BTreeMap<(i64, i64), [Kahan; 4]> = BTreeMap::new();
-        for (i, s) in group.iter().enumerate() {
-            let e = seasons.entry((s.row.player_key, s.row.season)).or_default();
-            for (k, v) in [xg[i], dg[i], xa[i], da[i]].into_iter().enumerate() {
-                if !v.is_nan() {
-                    e[k].add(v);
-                }
+        // His first price of the season (the position's rows, any minutes).
+        let mut first_price: HashMap<(i64, i64), f64> = HashMap::new();
+        for r in rows.iter().filter(|r| r.element_type == position as f64 && !r.price.is_nan()) {
+            first_price.entry((r.player_key, r.season)).or_insert(r.price);
+        }
+        if params.position_par {
+            let (par, by_price, curve) = finishing_par(&group, &first_price, params);
+            position_finishing.push((position, par));
+            if let Some((a, b, center)) = by_price {
+                price_finishing.push((position, a, b, center));
+            }
+            if let Some(c) = curve {
+                price_finishing_curve.push((position, c));
             }
         }
-        let table: Vec<(f64, [f64; 4])> = seasons
-            .iter()
-            .map(|(key, s)| {
-                let price = first_price.get(key).copied().unwrap_or(f64::NAN);
-                (price, [s[0].value(), s[1].value(), s[2].value(), s[3].value()])
-            })
-            .collect();
+        let table = season_table(&group, |i| [xg[i], dg[i], xa[i], da[i]], &first_price);
         let goal = price_model(&table.iter().map(|(p, v)| (*p, v[0], v[1])).collect::<Vec<_>>());
         let assist = price_model(&table.iter().map(|(p, v)| (*p, v[2], v[3])).collect::<Vec<_>>());
         price_goal.push((position, goal.0, goal.1, goal.2));
@@ -1471,13 +1490,14 @@ mod tests {
                             _ => 9,
                         };
                         let scored = element_type > 1 && (g + player + s) % every == 0;
-                        let goals = if scored { 1.0 } else { 0.0 };
+                        let fallback = player == 14 && g % 4 == 0;
+                        // Understat's penalty goal on a row FPL scores 0: np goals < 0.
+                        let inconsistent = player == 23 && s == 2023 && g == 5;
+                        let goals = if scored && !inconsistent { 1.0 } else { 0.0 };
                         let mut pens = 0.0;
                         if player == 15 && g == 3 {
                             pens = goals; // a penalty goal: np goals 0
                         }
-                        let fallback = player == 14 && g % 4 == 0;
-                        let inconsistent = player == 23 && s == 2023 && g == 5;
                         pm.player.push(player);
                         pm.season.push(s);
                         pm.fixture.push(fixture);
@@ -1495,9 +1515,6 @@ mod tests {
                             pm.us_npxg.push(None);
                             pm.us_xa.push(None);
                         } else if inconsistent {
-                            // Understat's penalty goal on a row FPL scores 0: np goals < 0.
-                            pm.goals.pop();
-                            pm.goals.push(0.0);
                             pm.us_goals.push(Some(1.0));
                             pm.us_npg.push(Some(0.0));
                             pm.us_npxg.push(Some(npxg));
@@ -1509,7 +1526,7 @@ mod tests {
                             pm.us_xa.push(Some(0.1));
                         }
                         pm.available.push(kickoff + 2 * HOUR);
-                        team_goals += *pm.goals.last().unwrap();
+                        team_goals += goals;
                         gw_player.push(player);
                         gw_s.push(s);
                         gw_g.push(g);
@@ -1608,6 +1625,56 @@ mod tests {
         assert!(fit.price_finishing_curve.is_empty());
     }
 
+    /// The synthetic store's player_match rows by hand, in the fit's order (player, season,
+    /// GW): (player, element_type, np goals before the clip, own npxG or None (fallback)).
+    fn hand_rows() -> Vec<(i64, i64, f64, Option<f64>)> {
+        let store = synthetic_store();
+        let t = store.as_of(deadline(2023, 10)).table("player_match", None).unwrap();
+        let (player, season, gw) =
+            (t.i64("player_key").unwrap(), t.i64("season").unwrap(), t.i64("gw").unwrap());
+        let goals = t.opt_f64("goals_scored").unwrap();
+        let (us_goals, us_npg) = (t.opt_f64("us_goals").unwrap(), t.opt_f64("us_npg").unwrap());
+        let us_npxg = t.opt_f64("us_npxg").unwrap();
+        let mut order: Vec<usize> = (0..t.height()).collect();
+        order.sort_by_key(|&i| (player[i], season[i], gw[i]));
+        order
+            .into_iter()
+            .map(|i| {
+                let element_type = [0, 1, 2, 3, 3, 4][(player[i] % 10) as usize];
+                let pens = match (us_goals[i], us_npg[i]) {
+                    (Some(g), Some(n)) => g - n,
+                    _ => 0.0,
+                };
+                (player[i], element_type, goals[i].unwrap() - pens, us_npxg[i])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn position_par_pins_mid_and_fwd() {
+        let params = SharesParams { position_par: true, ..SharesParams::default() };
+        let fit = synthetic_fit(&params);
+        let hand = hand_rows();
+        let par = |position: i64, clip: bool, with_fallback: bool| {
+            let rows: Vec<_> = hand
+                .iter()
+                .filter(|r| r.1 == position && (with_fallback || r.3.is_some()))
+                .collect();
+            let goals: Vec<f64> =
+                rows.iter().map(|r| if clip { r.2.max(0.0) } else { r.2 }).collect();
+            let xg: Vec<f64> = rows.iter().map(|r| r.3.unwrap_or(f64::NAN)).collect();
+            (np_sum(&goals) + PAR_PRIOR) / (pd_sum(&xg) + PAR_PRIOR)
+        };
+        assert_eq!(fit.position_finishing[2], (3, par(3, true, false)));
+        assert_eq!(fit.position_finishing[3], (4, par(4, true, false)));
+        // Player 23's row (a penalty goal on 0 goals) is clipped to 0, not -1.
+        assert!(hand.iter().any(|r| r.0 == 23 && r.2 == -1.0));
+        assert_ne!(fit.position_finishing[2].1, par(3, false, false));
+        // Player 14's fallback rows (one with a goal) are left out.
+        assert!(hand.iter().any(|r| r.0 == 14 && r.3.is_none() && r.2 > 0.0));
+        assert_ne!(fit.position_finishing[2].1, par(3, true, true));
+    }
+
     #[test]
     fn position_par_is_np_goals_over_npxg_shrunk_to_one() {
         let params = SharesParams { position_par: true, ..SharesParams::default() };
@@ -1661,13 +1728,17 @@ mod tests {
         let (matches, teams, _) = rows(&view, Some(&on), None).unwrap();
         let shares =
             share_rows(&matches, &teams, (on.ratio_goals, on.ratio_assists, on.ratio_team));
-        // A MID (price par, with the curve), a FWD (position par: under PAR_PRIOR), a
-        // player of no known position (par 1).
+        // MIDs (price par, with the curve; 23 has the clipped row, 14 the fallback rows), a
+        // FWD (position par: under PAR_PRIOR), a player of no known position (par 1).
+        let players = [13_i64, 24, 15, 11, 23, 14];
         let pool = Table::new()
-            .with("player_key", Column::I64(vec![13, 24, 15, 11]))
-            .with("team_key", Column::I64(vec![1, 2, 1, 1]))
-            .with("element_type", Column::OptI64(vec![Some(3), Some(3), Some(4), None]))
-            .with("price", Column::F64(vec![70.0, 110.0, 130.0, 50.0]));
+            .with("player_key", Column::I64(players.to_vec()))
+            .with("team_key", Column::I64(vec![1, 2, 1, 1, 2, 1]))
+            .with(
+                "element_type",
+                Column::OptI64(vec![Some(3), Some(3), Some(4), None, Some(3), Some(3)]),
+            )
+            .with("price", Column::F64(vec![70.0, 110.0, 130.0, 50.0, 100.0, 100.0]));
         let g_on = marcel_shares(&shares, &pool, &on, 2023).unwrap();
         let g_off = marcel_shares(&shares, &pool, &off, 2023).unwrap();
         let k = 25.0;
@@ -1676,23 +1747,37 @@ mod tests {
         let c = on.price_finishing_curve[0].1;
         let mid_par = |price: f64| {
             let z = (price - center) / PRICE_SCALE;
-            (a + b * z).exp() * (c * z * z).exp()
+            (a + b * z).exp() * (c * (z * z)).exp()
         };
-        let pars = [mid_par(70.0), mid_par(110.0), on.position_finishing[3].1, 1.0];
-        for (i, &player) in [13_i64, 24, 15, 11].iter().enumerate() {
-            let own: Vec<&ShareRow> =
-                shares.iter().filter(|s| s.row.player_key == player && !s.fb_goals).collect();
-            let goals: f64 = own
-                .iter()
-                .map(|s| (nan_to_num(s.row.goals_scored) - nan_to_num(s.row.pen_goals)).max(0.0))
-                .sum();
+        let pars = [
+            mid_par(70.0),
+            mid_par(110.0),
+            on.position_finishing[3].1,
+            1.0,
+            mid_par(100.0),
+            mid_par(100.0),
+        ];
+        // His np goals over his own-npxG rows, clipped per row, from the store by hand.
+        let hand = hand_rows();
+        let goals = |player: i64, clip: bool| -> f64 {
+            hand.iter()
+                .filter(|r| r.0 == player && r.3.is_some())
+                .map(|r| if clip { r.2.max(0.0) } else { r.2 })
+                .sum()
+        };
+        for (i, &player) in players.iter().enumerate() {
+            let g = goals(player, true);
             // (G + k·par) / (X + k) over (G + k) / (X + k): X cancels.
-            let want = (goals + k * pars[i]) / (goals + k);
+            let want = (g + k * pars[i]) / (g + k);
             let got = g_on[i].g / g_off[i].g;
             assert!((got - want).abs() < 1e-12, "player {player}: {got} vs {want}");
         }
         assert_eq!(g_on[3].g, g_off[3].g);
         assert!(pars[0] != pars[1] && pars[2] != 1.0);
+        // The clip and the fallback rows matter for 23 and 14.
+        assert_ne!(goals(23, true), goals(23, false));
+        let all_14: f64 = hand.iter().filter(|r| r.0 == 14).map(|r| r.2.max(0.0)).sum();
+        assert_ne!(goals(14, true), all_14);
     }
 
     #[test]
@@ -1760,7 +1845,7 @@ mod tests {
         let table = [(2_i64, -1.0, 0.1, 6.0)];
         let curve = [(2_i64, 0.5)];
         let z = (8.0 - 6.0) / PRICE_SCALE;
-        assert_eq!(price_curve(&table, &curve, 2.0, 8.0), (0.5 * z * z).exp());
+        assert_eq!(price_curve(&table, &curve, 2.0, 8.0), (0.5 * (z * z)).exp());
         assert_eq!(price_curve(&table, &[], 2.0, 8.0), 1.0);
         assert_eq!(price_curve(&table, &curve, 3.0, 8.0), 1.0);
     }
