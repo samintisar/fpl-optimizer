@@ -1554,7 +1554,7 @@ target/release/fplopt-rs models calibrate fit --model v1 --walk results/calibrat
 
 Pass: every entry's breakpoints equal `calibration_table.json`'s after the 6-digit rounding (allow a difference of one unit in the 6th digit at ≤ 1% of breakpoints, from rounding ties; anything more is a port bug). Log the run (family `rust parity`, name `calibrate v1`).
 
-- [ ] **Step 8: Fit v1r's table** (same command, `--model v1r --out results/calibrate-v1r-rs`, then `fit --model v1r --groups 1+ --write`). Same parts and groups as v1, fixed here, not chosen by score (spec section 1). Commit the JSON and the `V1R_TABLE_TEXT` change.
+- [ ] **Step 8: Fit v1r's table** (same command, `--model v1r --out results/calibrate-v1r-rs`, then `fit --model v1r --groups 1+ --write`). Same parts and groups as v1, fixed here, not chosen by score (spec section 1). Set `calibrate: true` in `V1Params::v1r()` (Task 1's review left it `false` until this table exists, so no run is logged as `v1r` uncalibrated by accident) and update that test. Commit the JSON, the `V1R_TABLE_TEXT` change and the flag.
 
 - [ ] **Step 9:** `cargo test --workspace` → PASS. Commit: `git commit -am "feat(models): Rust calibration fitter (p_start); v1r's table"`
 
