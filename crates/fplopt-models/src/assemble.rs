@@ -702,4 +702,34 @@ mod tests {
         }
         assert_eq!(V1Params::default().minutes.start.num_boost_round, 200);
     }
+
+    /// v1r is v1 plus exactly the research keeps at dcacbcb (the plan's Pins), nothing else:
+    /// the whole struct is compared, so a stray change to any other setting fails here.
+    #[test]
+    fn v1r_is_v1_plus_exactly_the_keeps() {
+        let v1 = V1Params::default();
+        let rounds = GbmParams { num_boost_round: 400, ..GbmParams::default() };
+        let expected = V1Params {
+            model: "v1r",
+            calibrate: false, // until Task 12's table
+            category_slopes: true,
+            minutes: MinutesParams {
+                start: rounds.clone(),
+                sixty: rounds.clone(),
+                sub: rounds,
+                elo_features: true,
+                horizon_shrink: 0.92,
+                ..v1.minutes.clone()
+            },
+            shares: SharesParams {
+                position_par: true,
+                price_par: true,
+                price_par_quadratic: true,
+                price_prior_quadratic: true,
+                ..v1.shares.clone()
+            },
+            ..v1
+        };
+        assert_eq!(V1Params::v1r(), expected);
+    }
 }
