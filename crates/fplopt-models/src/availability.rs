@@ -9,6 +9,8 @@
 //! - The mapping logit p' = slope · logit p + γ[category, min(h, 3)], fitted walk-forward on
 //!   every past deadline's flags against the training rows' starts (out-of-fold P(start) as
 //!   the base), log loss with a Gaussian prior on the offsets, `optim::trust_exact`.
+//!   With `category_slopes`, one slope per category (a Gaussian prior around 1, sd
+//!   `SLOPE_SD`); a back category uses its plain one's at prediction if the fit never saw it.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -37,6 +39,7 @@ const HORIZON_BUCKETS: i64 = 4;
 const LOOKAHEAD: i64 = 5;
 const MIN_ROWS: usize = 500;
 const OFFSET_SD: f64 = 4.0;
+const SLOPE_SD: f64 = 1.0; // `category_slopes`: prior sd of each category's slope around 1
 const PAST_DAYS: i64 = 60;
 const YEAR_DAYS: i64 = 366;
 const DAY: i64 = 86_400_000_000;
@@ -57,6 +60,17 @@ pub struct AvailabilityFit {
     pub n_rows: usize,
     pub back_split: bool,
     pub back_slopes: Vec<(String, i64, f64)>,
+    /// With `category_slopes`, each seen category's slope (Python `slopes`); empty otherwise.
+    pub slopes: Vec<(String, f64)>,
+}
+
+/// The slope a category uses: its own, its plain category's for a back category, else the
+/// shared slope (Python `adjust_minutes`).
+fn slope_for(fit: &AvailabilityFit, category: &str) -> f64 {
+    let find = |c: &str| fit.slopes.iter().find(|(k, _)| k == c).map(|(_, s)| *s);
+    find(category)
+        .or_else(|| category.strip_suffix(BACK_SUFFIX).and_then(find))
+        .unwrap_or(fit.slope)
 }
 
 /// The CATEGORIES label ('' = none) for a status and chance of playing.
@@ -283,12 +297,14 @@ fn logaddexp0(x: f64) -> f64 {
     }
 }
 
-/// Fit the flag mapping walk-forward on the view (`rows`: its training frame).
+/// Fit the flag mapping walk-forward on the view (`rows`: its training frame;
+/// `category_slopes`: one slope per category instead of a shared one).
 pub fn fit_availability(
     view: &AsOfView,
     minutes_fit: &MinutesFit,
     rows: Option<&Table>,
     back_split: bool,
+    category_slopes: bool,
 ) -> Result<AvailabilityFit> {
     let built;
     let rows = match rows {
@@ -298,18 +314,40 @@ pub fn fit_availability(
             &built
         }
     };
-    let mut fit_rows = fit_rows(view, minutes_fit, rows)?;
-    let params = &minutes_fit.params;
+    let fit_rows = fit_rows(view, minutes_fit, rows)?;
+    let carried = Carried {
+        minutes_sub: minutes_fit.minutes_sub,
+        max_shift: minutes_fit.params.max_shift,
+        max_scale: minutes_fit.params.max_scale,
+    };
+    fit_mapping(fit_rows, &carried, back_split, category_slopes)
+}
+
+/// The minutes fit's settings an `AvailabilityFit` carries.
+struct Carried {
+    minutes_sub: f64,
+    max_shift: f64,
+    max_scale: f64,
+}
+
+/// The optimization part of `fit_availability`, on its fit rows.
+fn fit_mapping(
+    mut fit_rows: Vec<FitRow>,
+    carried: &Carried,
+    back_split: bool,
+    category_slopes: bool,
+) -> Result<AvailabilityFit> {
     if fit_rows.len() < MIN_ROWS {
         return Ok(AvailabilityFit {
             slope: 1.0,
             offsets: Vec::new(),
-            minutes_sub: minutes_fit.minutes_sub,
-            max_shift: params.max_shift,
-            max_scale: params.max_scale,
+            minutes_sub: carried.minutes_sub,
+            max_shift: carried.max_shift,
+            max_scale: carried.max_scale,
             n_rows: fit_rows.len(),
             back_split,
             back_slopes: Vec::new(),
+            slopes: Vec::new(),
         });
     }
     let mut categories: Vec<String> = CATEGORIES.iter().map(|c| c.to_string()).collect();
@@ -352,15 +390,23 @@ pub fn fit_availability(
         position[k] = j;
     }
     let bcell: Vec<usize> = cell.iter().map(|&c| position[c]).collect();
-    let n_theta = 1 + n_cells + n_back;
+    // The slopes come first in θ: one shared, or one per category (a cell's category is
+    // cell / HORIZON_BUCKETS, the product's order).
+    let n_s = if category_slopes { categories.len() } else { 1 };
+    let cell_slope: Vec<usize> = (0..n_cells)
+        .map(|k| if category_slopes { k / HORIZON_BUCKETS as usize } else { 0 })
+        .collect();
+    let sidx: Vec<usize> = cell.iter().map(|&c| cell_slope[c]).collect();
+    let n_theta = n_s + n_cells + n_back;
     let n = y.len() as f64;
     let sd2 = OFFSET_SD * OFFSET_SD;
+    let slope_sd2 = SLOPE_SD * SLOPE_SD;
     let eta_of = |theta: &[f64]| -> Vec<f64> {
         (0..y.len())
             .map(|i| {
-                let mut eta = theta[0] * z[i] + theta[1 + cell[i]];
+                let mut eta = theta[sidx[i]] * z[i] + theta[n_s + cell[i]];
                 if n_back > 0 {
-                    eta += theta[1 + n_cells + bcell[i]] * x[i];
+                    eta += theta[n_s + n_cells + bcell[i]] * x[i];
                 }
                 eta
             })
@@ -373,23 +419,38 @@ pub fn fit_availability(
         }
         out
     };
+    // The shared slope's sums are numpy sums (np_sum, as before); per category a bincount.
+    let per_slope = |weights: &dyn Fn(usize) -> f64| -> Vec<f64> {
+        if n_s == 1 {
+            vec![np_sum(&(0..y.len()).map(weights).collect::<Vec<_>>())]
+        } else {
+            bincount(&sidx, weights, n_s)
+        }
+    };
     let loss = |theta: &[f64]| -> (f64, Vec<f64>) {
         let eta = eta_of(theta);
         let p: Vec<f64> = eta.iter().map(|&e| expit(e)).collect();
         let terms: Vec<f64> = (0..y.len()).map(|i| logaddexp0(eta[i]) - y[i] * eta[i]).collect();
-        let squares: Vec<f64> = theta[1..].iter().map(|t| t * t).collect();
-        let value = np_sum(&terms) + 0.5 * np_sum(&squares) / sd2;
+        let squares: Vec<f64> = theta[n_s..].iter().map(|t| t * t).collect();
+        let mut value = np_sum(&terms) + 0.5 * np_sum(&squares) / sd2;
         let residual: Vec<f64> = (0..y.len()).map(|i| p[i] - y[i]).collect();
         let mut grad = vec![0.0; n_theta];
-        grad[0] = np_sum(&(0..y.len()).map(|i| residual[i] * z[i]).collect::<Vec<_>>());
+        grad[..n_s].copy_from_slice(&per_slope(&|i| residual[i] * z[i]));
         let by_cell = bincount(&cell, &|i| residual[i], n_cells);
-        grad[1..1 + n_cells].copy_from_slice(&by_cell);
+        grad[n_s..n_s + n_cells].copy_from_slice(&by_cell);
         if n_back > 0 {
             let by_back = bincount(&bcell, &|i| residual[i] * x[i], n_back);
-            grad[1 + n_cells..].copy_from_slice(&by_back);
+            grad[n_s + n_cells..].copy_from_slice(&by_back);
         }
-        for j in 1..n_theta {
+        for j in n_s..n_theta {
             grad[j] += theta[j] / sd2;
+        }
+        if category_slopes {
+            let squares: Vec<f64> = theta[..n_s].iter().map(|t| (t - 1.0) * (t - 1.0)).collect();
+            value += 0.5 * np_sum(&squares) / slope_sd2;
+            for j in 0..n_s {
+                grad[j] += (theta[j] - 1.0) / slope_sd2;
+            }
         }
         (value / n, grad.iter().map(|g| g / n).collect())
     };
@@ -397,33 +458,43 @@ pub fn fit_availability(
         let p: Vec<f64> = eta_of(theta).iter().map(|&e| expit(e)).collect();
         let w: Vec<f64> = p.iter().map(|p| p * (1.0 - p)).collect();
         let mut out = Mat::zeros(n_theta, n_theta);
-        out.set(0, 0, np_sum(&(0..y.len()).map(|i| w[i] * z[i] * z[i]).collect::<Vec<_>>()));
+        for (j, v) in per_slope(&|i| w[i] * z[i] * z[i]).into_iter().enumerate() {
+            out.set(j, j, v);
+        }
         let cross = bincount(&cell, &|i| w[i] * z[i], n_cells);
         let diagonal = bincount(&cell, &|i| w[i], n_cells);
+        // Assignments, as Python's `out[cell_slope, offset_index] = cross` (each offset index
+        // appears once).
         for k in 0..n_cells {
-            out.set(0, 1 + k, cross[k]);
-            out.set(1 + k, 0, cross[k]);
-            out.set(1 + k, 1 + k, diagonal[k]);
+            out.set(cell_slope[k], n_s + k, cross[k]);
+            out.set(n_s + k, cell_slope[k], cross[k]);
+            out.set(n_s + k, n_s + k, diagonal[k]);
         }
         if n_back > 0 {
-            let b0 = 1 + n_cells;
+            let b0 = n_s + n_cells;
             let zx = bincount(&bcell, &|i| w[i] * z[i] * x[i], n_back);
             let joint_codes: Vec<usize> =
                 (0..y.len()).map(|i| cell[i] * n_back + bcell[i]).collect();
             let joint = bincount(&joint_codes, &|i| w[i] * x[i], n_cells * n_back);
             let xx = bincount(&bcell, &|i| w[i] * x[i] * x[i], n_back);
             for j in 0..n_back {
-                out.set(0, b0 + j, zx[j]);
-                out.set(b0 + j, 0, zx[j]);
+                let s = cell_slope[back_cells[j]];
+                out.set(s, b0 + j, zx[j]);
+                out.set(b0 + j, s, zx[j]);
                 for k in 0..n_cells {
-                    out.set(1 + k, b0 + j, joint[k * n_back + j]);
-                    out.set(b0 + j, 1 + k, joint[k * n_back + j]);
+                    out.set(n_s + k, b0 + j, joint[k * n_back + j]);
+                    out.set(b0 + j, n_s + k, joint[k * n_back + j]);
                 }
                 out.set(b0 + j, b0 + j, xx[j]);
             }
         }
-        for j in 1..n_theta {
+        for j in n_s..n_theta {
             out.add(j, j, 1.0 / sd2);
+        }
+        if category_slopes {
+            for j in 0..n_s {
+                out.add(j, j, 1.0 / slope_sd2);
+            }
         }
         for v in out.data.iter_mut() {
             *v /= n;
@@ -431,29 +502,41 @@ pub fn fit_availability(
         out
     };
     let mut start = vec![0.0; n_theta];
-    start[0] = 1.0;
+    start[..n_s].fill(1.0);
     let theta = trust_exact(loss, hessian, start, 1e-9, None)?.x;
     let mut counts = vec![0usize; n_cells];
     for &c in &cell {
         counts[c] += 1;
     }
+    let mut slope_counts = vec![0usize; n_s];
+    for &j in &sidx {
+        slope_counts[j] += 1;
+    }
     Ok(AvailabilityFit {
-        slope: theta[0],
+        slope: if category_slopes { 1.0 } else { theta[0] },
         offsets: (0..n_cells)
             .filter(|&k| counts[k] > 0)
-            .map(|k| (cells[k].0.clone(), cells[k].1, theta[1 + k]))
+            .map(|k| (cells[k].0.clone(), cells[k].1, theta[n_s + k]))
             .collect(),
-        minutes_sub: minutes_fit.minutes_sub,
-        max_shift: params.max_shift,
-        max_scale: params.max_scale,
+        minutes_sub: carried.minutes_sub,
+        max_shift: carried.max_shift,
+        max_scale: carried.max_scale,
         n_rows: fit_rows.len(),
         back_split,
         back_slopes: back_cells
             .iter()
             .enumerate()
             .filter(|&(_, &k)| counts[k] > 0)
-            .map(|(j, &k)| (cells[k].0.clone(), cells[k].1, theta[1 + n_cells + j]))
+            .map(|(j, &k)| (cells[k].0.clone(), cells[k].1, theta[n_s + n_cells + j]))
             .collect(),
+        slopes: if category_slopes {
+            (0..n_s)
+                .filter(|&j| slope_counts[j] > 0)
+                .map(|j| (categories[j].clone(), theta[j]))
+                .collect()
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -518,8 +601,9 @@ pub fn adjust_minutes(
         let csub = cond.csub[i];
         let banned = cond.banned[i];
         let mapped = back.is_none() && offset.is_some() && p > 0.0 && !banned;
+        let slope = slope_for(fit, &category);
         let adjusted =
-            expit(fit.slope * logit(np_clip(p, EPS, 1.0 - EPS)) + offset.unwrap_or(0.0) + beta);
+            expit(slope * logit(np_clip(p, EPS, 1.0 - EPS)) + offset.unwrap_or(0.0) + beta);
         let ratio = if p > 0.0 { adjusted / p } else { 1.0 };
         let mut new_p = if mapped { adjusted } else { p };
         let mut new_csub = if mapped { csub * crate::util::np_minimum(ratio, 1.0) } else { csub };
@@ -539,7 +623,7 @@ impl AvailabilityFit {
         let cells = |v: &[(String, i64, f64)]| -> Vec<serde_json::Value> {
             v.iter().map(|(c, b, x)| serde_json::json!([c, b, x])).collect()
         };
-        serde_json::json!({
+        let mut out = serde_json::json!({
             "slope": self.slope,
             "offsets": cells(&self.offsets),
             "minutes_sub": self.minutes_sub,
@@ -548,6 +632,201 @@ impl AvailabilityFit {
             "n_rows": self.n_rows,
             "back_split": self.back_split,
             "back_slopes": cells(&self.back_slopes),
-        })
+        });
+        // Only with `category_slopes`, so v1's fit JSON keeps its keys.
+        if !self.slopes.is_empty() {
+            out["slopes"] = serde_json::json!(
+                self.slopes.iter().map(|(c, s)| serde_json::json!([c, s])).collect::<Vec<_>>()
+            );
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    const CARRIED: Carried = Carried { minutes_sub: 25.0, max_shift: 0.5, max_scale: 1.5 };
+
+    /// A deterministic uniform draw in [0, 1) (64-bit LCG, top 53 bits).
+    fn uniform(state: &mut u64) -> f64 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (*state >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// 6000 synthetic fit rows: `a` (half, 80% back from an absence: `a_back` keeps its
+    /// cells), `a100` (its back rows too few: merged), `d75`, `d50`, `i`; starts drawn from a
+    /// per-category slope on the base's logit plus a horizon offset.
+    fn synthetic_rows() -> Vec<FitRow> {
+        let mut state = 7u64;
+        (0..6000)
+            .map(|i| {
+                let u = uniform(&mut state);
+                let (category, slope, offset) = match u {
+                    u if u < 0.5 => ("a", 1.1, 0.2),
+                    u if u < 0.7 => ("a100", 0.9, 0.3),
+                    u if u < 0.8 => ("d75", 0.7, -0.4),
+                    u if u < 0.9 => ("d50", 0.6, -1.0),
+                    _ => ("i", 0.4, -2.5),
+                };
+                let base = 0.05 + 0.9 * uniform(&mut state);
+                let bucket = (i % 4) as i64;
+                let absent_run = if uniform(&mut state) < 0.8 { 1.0 } else { 0.0 };
+                let start_rate_l10 = uniform(&mut state);
+                let eta = slope * logit(base) + offset - 0.1 * bucket as f64
+                    + absent_run * (start_rate_l10 - 0.5);
+                let start = if uniform(&mut state) < expit(eta) { 1.0 } else { 0.0 };
+                FitRow {
+                    base,
+                    category: category.to_string(),
+                    bucket,
+                    start,
+                    absent_run,
+                    start_rate_l10,
+                }
+            })
+            .collect()
+    }
+
+    fn identity_fit() -> AvailabilityFit {
+        AvailabilityFit {
+            slope: 1.0,
+            offsets: Vec::new(),
+            minutes_sub: CARRIED.minutes_sub,
+            max_shift: CARRIED.max_shift,
+            max_scale: CARRIED.max_scale,
+            n_rows: 0,
+            back_split: false,
+            back_slopes: Vec::new(),
+            slopes: Vec::new(),
+        }
+    }
+
+    fn cells(v: &[(&str, i64, f64)]) -> Vec<(String, i64, f64)> {
+        v.iter().map(|(c, b, x)| (c.to_string(), *b, *x)).collect()
+    }
+
+    /// The shared-slope fit on the synthetic rows, recorded before `category_slopes` existed.
+    #[test]
+    fn shared_slope_fit_is_unchanged() {
+        let fit = fit_mapping(synthetic_rows(), &CARRIED, true, false).unwrap();
+        assert_eq!(fit.slope, 0.9459744052097245);
+        assert_eq!(
+            fit.offsets,
+            cells(&[
+                ("a", 0, 0.1649484373009503),
+                ("a", 1, -0.09059659755906703),
+                ("a", 2, -0.02002707684973299),
+                ("a", 3, -0.157492639843249),
+                ("a100", 0, 0.3803512615703158),
+                ("a100", 1, 0.15210283677726458),
+                ("a100", 2, -0.01988843318464118),
+                ("a100", 3, 0.15481065611155675),
+                ("d50", 0, -0.9722874611469743),
+                ("d50", 1, -1.2923273586534567),
+                ("d50", 2, -1.213093370446729),
+                ("d50", 3, -1.2458837969621697),
+                ("d75", 0, -0.24697800660979868),
+                ("d75", 1, -0.40395709176451444),
+                ("d75", 2, -0.4513148544171166),
+                ("d75", 3, -0.8242693072635527),
+                ("i", 0, -2.2407271799713833),
+                ("i", 1, -2.7360831871059577),
+                ("i", 2, -3.084612095767751),
+                ("i", 3, -2.9672959917592077),
+                ("a_back", 0, 0.2016153603935348),
+                ("a_back", 1, 0.2190704135678721),
+                ("a_back", 2, -0.134861509383363),
+                ("a_back", 3, -0.37887865559997386),
+            ])
+        );
+        assert_eq!(
+            fit.back_slopes,
+            cells(&[
+                ("a_back", 0, 1.0302162754422977),
+                ("a_back", 1, 0.4540067344299013),
+                ("a_back", 2, 0.9126070906778803),
+                ("a_back", 3, 0.9139223237878391),
+            ])
+        );
+        assert!(fit.slopes.is_empty());
+
+        let fit = fit_mapping(synthetic_rows(), &CARRIED, false, false).unwrap();
+        assert_eq!(fit.slope, 0.9387090509896416);
+        assert_eq!(
+            fit.offsets,
+            cells(&[
+                ("a", 0, 0.18743939672447246),
+                ("a", 1, 0.15171971297293105),
+                ("a", 2, -0.10182310943405913),
+                ("a", 3, -0.3417042555636646),
+                ("a100", 0, 0.37984365449891666),
+                ("a100", 1, 0.15194706756354742),
+                ("a100", 2, -0.01998214088830841),
+                ("a100", 3, 0.15437879071278857),
+                ("d50", 0, -0.9690158265365397),
+                ("d50", 1, -1.2887063123536566),
+                ("d50", 2, -1.2095162698926931),
+                ("d50", 3, -1.2422517884697393),
+                ("d75", 0, -0.24696296954591707),
+                ("d75", 1, -0.4023741127164286),
+                ("d75", 2, -0.44939420969691246),
+                ("d75", 3, -0.8209921713120373),
+                ("i", 0, -2.234917063730278),
+                ("i", 1, -2.7287290478957225),
+                ("i", 2, -3.077344389746442),
+                ("i", 3, -2.959866626845373),
+            ])
+        );
+        assert!(fit.back_slopes.is_empty());
+        assert!(fit.slopes.is_empty());
+    }
+
+    #[test]
+    fn shared_slope_is_unchanged_without_category_slopes() {
+        let fit = fit_mapping(synthetic_rows(), &CARRIED, true, false).unwrap();
+        assert!(fit.slopes.is_empty());
+        assert!(fit.to_json().get("slopes").is_none());
+    }
+
+    #[test]
+    fn category_slopes_one_per_seen_category() {
+        let fit = fit_mapping(synthetic_rows(), &CARRIED, true, true).unwrap();
+        assert!(fit.n_rows >= MIN_ROWS);
+        assert_eq!(fit.slope, 1.0);
+        let seen: HashSet<&str> = fit.offsets.iter().map(|(c, _, _)| c.as_str()).collect();
+        let names: Vec<&str> = fit.slopes.iter().map(|(c, _)| c.as_str()).collect();
+        // Every category with rows, in `categories` order (back categories last); the
+        // merged `a100_back` and the unused `d25`, `s`, `u`, `n` have none.
+        assert_eq!(names, ["a", "a100", "d50", "d75", "i", "a_back"]);
+        for (category, slope) in &fit.slopes {
+            assert!(seen.contains(category.as_str()));
+            assert!(slope.is_finite());
+        }
+        // The flagged categories' slopes sit below the plain one's (drawn 1.1 vs 0.4).
+        let slope = |c: &str| fit.slopes.iter().find(|(k, _)| k == c).unwrap().1;
+        assert!(slope("i") < slope("a"));
+        assert_eq!(fit.to_json()["slopes"][0][0], "a");
+        // Too few rows: the identity, without slopes.
+        let rows: Vec<FitRow> = synthetic_rows().into_iter().take(MIN_ROWS - 1).collect();
+        let identity = fit_mapping(rows, &CARRIED, true, true).unwrap();
+        assert!(identity.slopes.is_empty() && identity.offsets.is_empty());
+    }
+
+    #[test]
+    fn slope_lookup_falls_back_to_plain_then_shared() {
+        let fit = AvailabilityFit {
+            slope: 0.7,
+            slopes: vec![("a".into(), 0.95), ("d50".into(), 0.6)],
+            ..identity_fit()
+        };
+        assert_eq!(slope_for(&fit, "a"), 0.95);
+        assert_eq!(slope_for(&fit, "a_back"), 0.95);
+        assert_eq!(slope_for(&fit, "i"), 0.7);
+        let shared = AvailabilityFit { slope: 0.7, ..identity_fit() };
+        assert_eq!(slope_for(&shared, "a"), 0.7);
     }
 }

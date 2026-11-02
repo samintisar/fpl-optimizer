@@ -64,7 +64,7 @@ pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Valu
             let params = minutes::MinutesParams::default();
             let history = minutes::history_frame(view, &params)?;
             let fit = minutes::fit_minutes(view, &params, Some(&history))?;
-            let layer = availability::fit_availability(view, &fit, Some(&history), true)?;
+            let layer = availability::fit_availability(view, &fit, Some(&history), true, false)?;
             let adjusted =
                 availability::adjust_minutes(view, &minutes::predict_minutes(view, &fit)?, &layer)?;
             Ok((adjusted.to_table(), layer.to_json()))
@@ -75,7 +75,7 @@ pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Valu
             let params = minutes::MinutesParams::default();
             let history = minutes::history_frame(view, &params)?;
             let fit = minutes::fit_minutes(view, &params, Some(&history))?;
-            let layer = availability::fit_availability(view, &fit, Some(&history), true)?;
+            let layer = availability::fit_availability(view, &fit, Some(&history), true, false)?;
             let adjusted =
                 availability::adjust_minutes(view, &minutes::predict_minutes(view, &fit)?, &layer)?;
             let shares_fit = shares::fit_shares(view, &shares::SharesParams::default())?;
@@ -88,7 +88,7 @@ pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Valu
             let params = minutes::MinutesParams::default();
             let history = minutes::history_frame(view, &params)?;
             let fit = minutes::fit_minutes(view, &params, Some(&history))?;
-            let layer = availability::fit_availability(view, &fit, Some(&history), true)?;
+            let layer = availability::fit_availability(view, &fit, Some(&history), true, false)?;
             let adjusted =
                 availability::adjust_minutes(view, &minutes::predict_minutes(view, &fit)?, &layer)?;
             let shares_fit = shares::fit_shares(view, &shares::SharesParams::default())?;

@@ -73,6 +73,8 @@ pub struct V1Params {
     pub shares: SharesParams,
     pub components: ComponentsParams,
     pub back_split: bool,
+    /// One flag-layer slope per category instead of a shared one (`availability`).
+    pub category_slopes: bool,
     pub calibrate: bool,
 }
 
@@ -85,6 +87,7 @@ impl Default for V1Params {
             shares: SharesParams::default(),
             components: ComponentsParams::default(),
             back_split: true,
+            category_slopes: false,
             calibrate: true,
         }
     }
@@ -108,6 +111,7 @@ impl V1Params {
                 horizon_shrink: 0.92,
                 ..base.minutes.clone()
             },
+            category_slopes: true,
             ..base
         }
     }
@@ -136,7 +140,13 @@ pub fn fit_v1(view: &AsOfView, params: &V1Params) -> Result<V1Fit> {
     let team = fit_team(view, &params.team)?;
     let history = history_frame(view, &params.minutes)?;
     let minutes = fit_minutes(view, &params.minutes, Some(&history))?;
-    let availability = fit_availability(view, &minutes, Some(&history), params.back_split)?;
+    let availability = fit_availability(
+        view,
+        &minutes,
+        Some(&history),
+        params.back_split,
+        params.category_slopes,
+    )?;
     let shares = fit_shares(view, &params.shares)?;
     let components = fit_components(view, &params.components)?;
     Ok(V1Fit { params: params.clone(), team, minutes, availability, shares, components })
@@ -661,6 +671,9 @@ mod tests {
         assert_eq!(V1Params::v1r().model, "v1r");
         // v1r has no table yet, so it runs uncalibrated (Task 12 turns calibration on).
         assert!(!V1Params::v1r().calibrate);
+        // One flag-layer slope per category in v1r only.
+        assert!(V1Params::v1r().category_slopes);
+        assert!(!V1Params::default().category_slopes);
         assert!(crate::calibration::calibration_for("v1r", 2023).unwrap().is_none());
         assert!(crate::calibration::calibration_for("v1", 2023).unwrap().is_some());
         // A name outside the family is an error, not "no table".
