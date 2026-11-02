@@ -112,6 +112,12 @@ impl V1Params {
                 ..base.minutes.clone()
             },
             category_slopes: true,
+            shares: SharesParams {
+                position_par: true,
+                price_par: true,
+                price_par_quadratic: true,
+                ..base.shares.clone()
+            },
             ..base
         }
     }

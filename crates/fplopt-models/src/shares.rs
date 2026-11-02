@@ -41,6 +41,7 @@ const PRICE_SCALE: f64 = 10.0;
 const PRICE_ITERATIONS: usize = 30;
 const PRICE_RIDGE: f64 = 1.0;
 const RATE_EPS: f64 = 1e-9;
+const PAR_PRIOR: f64 = 25.0; // pseudo-npxG at 1 behind each position's finishing par
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SharesParams {
@@ -53,6 +54,12 @@ pub struct SharesParams {
     pub conversion_prior: f64,
     pub taker_prior: f64,
     pub finishing_prior: Option<f64>,
+    /// Finishing par per position (np goals / npxG of the position) instead of 1.
+    pub position_par: bool,
+    /// With position_par: the par by position and price (`price_finishing`).
+    pub price_par: bool,
+    /// With price_par: a z² term in that regression (`price_finishing_curve`).
+    pub price_par_quadratic: bool,
 }
 
 impl Default for SharesParams {
@@ -67,6 +74,9 @@ impl Default for SharesParams {
             conversion_prior: 20.0,
             taker_prior: 1.0,
             finishing_prior: Some(25.0),
+            position_par: false,
+            price_par: false,
+            price_par_quadratic: false,
         }
     }
 }
@@ -93,6 +103,12 @@ pub struct SharesFit {
     pub own_goal_fraction: f64,
     pub taker_q: f64,
     pub n_rows: usize,
+    /// With position_par: (element_type, np goals / npxG shrunk toward 1).
+    pub position_finishing: Vec<(i64, f64)>,
+    /// With price_par: np goals / npxG by position and price, (element_type, a, b, center).
+    pub price_finishing: Vec<(i64, f64, f64, f64)>,
+    /// With price_par_quadratic: (element_type, c), the par × exp(c·z²).
+    pub price_finishing_curve: Vec<(i64, f64)>,
 }
 
 // --- inputs ---------------------------------------------------------------------------------
@@ -586,7 +602,6 @@ fn price_prior(table: &[(i64, f64, f64, f64)], element_type: f64, price: f64) ->
 
 /// `_price_model(..., quadratic=True)`: (a, b, center, c), a c·z² term in the exponent,
 /// ridged like b (and not a). Sequential sums, as `price_model`.
-#[cfg_attr(not(test), allow(dead_code))]
 fn price_model_quadratic(seasons: &[(f64, f64, f64)]) -> (f64, f64, f64, f64) {
     let rows: Vec<&(f64, f64, f64)> =
         seasons.iter().filter(|(p, _, d)| *d > 0.0 && !p.is_nan()).collect();
@@ -632,7 +647,6 @@ fn price_model_quadratic(seasons: &[(f64, f64, f64)]) -> (f64, f64, f64, f64) {
 
 /// `np.linalg.solve` of a 3 × 3 system (LU with partial pivoting, as LAPACK's getrf/getrs).
 /// The pivot is the first row with the largest |value| (`idamax`), not the last.
-#[cfg_attr(not(test), allow(dead_code))]
 fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> [f64; 3] {
     let (mut a, mut b) = (a, b);
     for col in 0..3 {
@@ -663,7 +677,6 @@ fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> [f64; 3] {
 
 /// exp(c·z²) for a row (z from the position's center in `table`), 1 without a curve
 /// (Python `_price_curve`).
-#[cfg_attr(not(test), allow(dead_code))]
 fn price_curve(
     table: &[(i64, f64, f64, f64)],
     curve: &[(i64, f64)],
@@ -678,6 +691,14 @@ fn price_curve(
         }
     }
     1.0
+}
+
+/// A position's finishing par, 1 for an unknown or missing position.
+fn position_finishing_par(table: &[(i64, f64)], element_type: f64) -> f64 {
+    if element_type.is_nan() {
+        return 1.0;
+    }
+    table.iter().find(|t| t.0 as f64 == element_type).map_or(1.0, |t| t.1)
 }
 
 fn position_prior(table: &[(i64, f64)], element_type: f64) -> f64 {
@@ -784,7 +805,27 @@ fn marcel_shares(
         }
         let finishing = match params.finishing_prior {
             None => 1.0,
-            Some(k) => (v(|s| &s.fin_goals) + k) / (v(|s| &s.fin_xg) + k),
+            Some(k) => {
+                let mut par = 1.0;
+                if params.position_par {
+                    par = position_finishing_par(&fit.position_finishing, element[i]);
+                    if params.price_par && !fit.price_finishing.is_empty() {
+                        let mut by_price = price_prior(&fit.price_finishing, element[i], prices[i]);
+                        if params.price_par_quadratic && !fit.price_finishing_curve.is_empty() {
+                            by_price *= price_curve(
+                                &fit.price_finishing,
+                                &fit.price_finishing_curve,
+                                element[i],
+                                prices[i],
+                            );
+                        }
+                        if !by_price.is_nan() {
+                            par = by_price;
+                        }
+                    }
+                }
+                (v(|s| &s.fin_goals) + k * par) / (v(|s| &s.fin_xg) + k)
+            }
         };
         out.push(Player {
             player_key: keys[i],
@@ -872,7 +913,56 @@ pub fn fit_shares(view: &AsOfView, params: &SharesParams) -> Result<SharesFit> {
     }
     let (mut position_goal, mut position_assist) = (Vec::new(), Vec::new());
     let (mut price_goal, mut price_assist) = (Vec::new(), Vec::new());
+    let (mut position_finishing, mut price_finishing, mut price_finishing_curve) =
+        (Vec::new(), Vec::new(), Vec::new());
     for (position, group) in by_position {
+        // His first price of the season (the position's rows, any minutes).
+        let mut first_price: HashMap<(i64, i64), f64> = HashMap::new();
+        for r in rows.iter().filter(|r| r.element_type == position as f64 && !r.price.is_nan()) {
+            first_price.entry((r.player_key, r.season)).or_insert(r.price);
+        }
+        if params.position_par {
+            // Rows with his own npxG: np goals (clipped at 0 per row) / npxG.
+            let own: Vec<&&ShareRow> = group.iter().filter(|s| !s.fb_goals).collect();
+            let np_goals: Vec<f64> = own
+                .iter()
+                .map(|s| {
+                    np_maximum(nan_to_num(s.row.goals_scored) - nan_to_num(s.row.pen_goals), 0.0)
+                })
+                .collect();
+            let own_xg: Vec<f64> = own.iter().map(|s| s.x_goals).collect();
+            position_finishing
+                .push((position, shrunk_ratio(np_sum(&np_goals), pd_sum(&own_xg), 1.0, PAR_PRIOR)));
+            if params.price_par {
+                // Per (player, season): Kahan sums, sorted by key, then his first price.
+                let mut by_season: BTreeMap<(i64, i64), [Kahan; 2]> = BTreeMap::new();
+                for (k, s) in own.iter().enumerate() {
+                    let e = by_season.entry((s.row.player_key, s.row.season)).or_default();
+                    e[0].add(np_goals[k]);
+                    if !own_xg[k].is_nan() {
+                        e[1].add(own_xg[k]);
+                    }
+                }
+                let table: Vec<(f64, f64, f64)> = by_season
+                    .iter()
+                    .map(|(key, v)| {
+                        let price = first_price.get(key).copied().unwrap_or(f64::NAN);
+                        (price, v[0].value(), v[1].value())
+                    })
+                    .collect();
+                // Keepers: no par by price.
+                if pd_sum(&table.iter().map(|t| t.2).collect::<Vec<_>>()) >= PAR_PRIOR {
+                    if params.price_par_quadratic {
+                        let (a, b, center, c) = price_model_quadratic(&table);
+                        price_finishing.push((position, a, b, center));
+                        price_finishing_curve.push((position, c));
+                    } else {
+                        let (a, b, center) = price_model(&table);
+                        price_finishing.push((position, a, b, center));
+                    }
+                }
+            }
+        }
         let wg: Vec<f64> =
             group.iter().map(|s| if s.fb_goals { params.goals_weight } else { 1.0 }).collect();
         let wa: Vec<f64> =
@@ -883,11 +973,6 @@ pub fn fit_shares(view: &AsOfView, params: &SharesParams) -> Result<SharesFit> {
         let da: Vec<f64> = (0..group.len()).map(|i| group[i].d * wa[i]).collect();
         position_goal.push((position, ratio(&xg, &dg, 0.0)));
         position_assist.push((position, ratio(&xa, &da, 0.0)));
-        // His first price of the season (the position's rows, any minutes).
-        let mut first_price: HashMap<(i64, i64), f64> = HashMap::new();
-        for r in rows.iter().filter(|r| r.element_type == position as f64 && !r.price.is_nan()) {
-            first_price.entry((r.player_key, r.season)).or_insert(r.price);
-        }
         // Per (player, season): Kahan sums, sorted by key (groupby + reset_index).
         let mut seasons: BTreeMap<(i64, i64), [Kahan; 4]> = BTreeMap::new();
         for (i, s) in group.iter().enumerate() {
@@ -985,6 +1070,9 @@ pub fn fit_shares(view: &AsOfView, params: &SharesParams) -> Result<SharesFit> {
         own_goal_fraction,
         taker_q,
         n_rows: shares.len(),
+        position_finishing,
+        price_finishing,
+        price_finishing_curve,
     })
 }
 
@@ -1253,7 +1341,7 @@ pub fn predict_shares(
 
 impl SharesFit {
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut out = serde_json::json!({
             "k_goals": self.k_goals,
             "k_assists": self.k_assists,
             "pen_pi": [self.pen_pi.0, self.pen_pi.1],
@@ -1272,13 +1360,340 @@ impl SharesFit {
             "own_goal_fraction": self.own_goal_fraction,
             "taker_q": self.taker_q,
             "n_rows": self.n_rows,
-        })
+        });
+        // v1r's finishing par only: v1's fit JSON keeps its keys.
+        let map = out.as_object_mut().expect("an object");
+        if !self.position_finishing.is_empty() {
+            let v = self.position_finishing.iter().map(|(p, v)| serde_json::json!([p, v]));
+            map.insert("position_finishing".into(), v.collect());
+        }
+        if !self.price_finishing.is_empty() {
+            let v = self.price_finishing.iter().map(|(p, a, b, c)| serde_json::json!([p, a, b, c]));
+            map.insert("price_finishing".into(), v.collect());
+        }
+        if !self.price_finishing_curve.is_empty() {
+            let v = self.price_finishing_curve.iter().map(|(p, c)| serde_json::json!([p, c]));
+            map.insert("price_finishing_curve".into(), v.collect());
+        }
+        out
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use fplopt_store::DataStore;
+
     use super::*;
+
+    const DAY: Micros = 86_400_000_000;
+    const HOUR: Micros = 3_600_000_000;
+
+    fn deadline(season: i64, gw: i64) -> Micros {
+        ((season - 2022) * 20 + gw) * 7 * DAY
+    }
+
+    /// Two clubs meeting once a GW over 2022/23 GW1–9 and 2023/24 GW1–9 (the view is
+    /// 2023/24 GW10's deadline), 5 players a club: a keeper (no goals, ≤ 0.02 npxG), a
+    /// defender (0.1 npxG a match), two midfielders (0.4, 0.5) and a forward (0.6), priced
+    /// £4.5–£13.5m, goals rising with price. Only the midfielders reach PAR_PRIOR npxG as a
+    /// position (the forwards' ~22 do not). Understat columns only (no FPL xG), except a few
+    /// fallback rows without npxG; one row with a penalty goal and one whose penalty goals
+    /// exceed his goals (np goals clipped at 0).
+    fn synthetic_store() -> DataStore {
+        // (player offset, element_type, npxG a match, price in £0.1m)
+        let roster: [(i64, i64, f64, i64); 5] =
+            [(1, 1, 0.0, 45), (2, 2, 0.1, 50), (3, 3, 0.4, 60), (4, 3, 0.5, 95), (5, 4, 0.6, 120)];
+        let seasons = [2022_i64, 2023];
+        let mut gw_season = Vec::new();
+        let mut gw_gw = Vec::new();
+        for &s in &seasons {
+            for g in 1..=10 {
+                gw_season.push(s);
+                gw_gw.push(g);
+            }
+        }
+        let n_gw = gw_gw.len();
+        let gameweek = Table::new()
+            .with("season", Column::I64(gw_season.clone()))
+            .with("gw", Column::I64(gw_gw.clone()))
+            .with(
+                "deadline_time",
+                Column::Ts((0..n_gw).map(|i| deadline(gw_season[i], gw_gw[i])).collect()),
+            )
+            .with("available_at", Column::Ts(vec![0; n_gw]));
+        #[derive(Default)]
+        struct Pm {
+            player: Vec<i64>,
+            season: Vec<i64>,
+            fixture: Vec<i64>,
+            gw: Vec<i64>,
+            team: Vec<i64>,
+            kickoff: Vec<Micros>,
+            minutes: Vec<f64>,
+            goals: Vec<f64>,
+            assists: Vec<f64>,
+            missed: Vec<f64>,
+            own: Vec<f64>,
+            us_goals: Vec<Option<f64>>,
+            us_npg: Vec<Option<f64>>,
+            us_npxg: Vec<Option<f64>>,
+            us_xa: Vec<Option<f64>>,
+            available: Vec<Micros>,
+        }
+        let mut pm = Pm::default();
+        let (mut tm_fixture, mut tm_team, mut tm_season, mut tm_goals, mut tm_avail) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut gw_player, mut gw_s, mut gw_g, mut gw_type, mut gw_value, mut gw_avail) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut ps_player, mut ps_season, mut ps_type, mut ps_avail) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for &s in &seasons {
+            for team in [1_i64, 2] {
+                for &(offset, element_type, _, _) in &roster {
+                    ps_player.push(team * 10 + offset);
+                    ps_season.push(s);
+                    ps_type.push(element_type);
+                    ps_avail.push(deadline(s, 1) - DAY);
+                }
+            }
+            for g in 1..=9 {
+                let fixture = (s - 2000) * 100 + g;
+                let kickoff = deadline(s, g) + DAY;
+                for team in [1_i64, 2] {
+                    let mut team_goals = 0.0;
+                    for &(offset, element_type, npxg, price) in &roster {
+                        let player = team * 10 + offset;
+                        // Goals rise with price: one every `every` matches.
+                        let every = match price {
+                            p if p >= 120 => 2,
+                            p if p >= 95 => 3,
+                            p if p >= 60 => 4,
+                            _ => 9,
+                        };
+                        let scored = element_type > 1 && (g + player + s) % every == 0;
+                        let goals = if scored { 1.0 } else { 0.0 };
+                        let mut pens = 0.0;
+                        if player == 15 && g == 3 {
+                            pens = goals; // a penalty goal: np goals 0
+                        }
+                        let fallback = player == 14 && g % 4 == 0;
+                        let inconsistent = player == 23 && s == 2023 && g == 5;
+                        pm.player.push(player);
+                        pm.season.push(s);
+                        pm.fixture.push(fixture);
+                        pm.gw.push(g);
+                        pm.team.push(team);
+                        pm.kickoff.push(kickoff);
+                        pm.minutes.push(90.0);
+                        pm.goals.push(goals);
+                        pm.assists.push(if (g + player) % 5 == 0 { 1.0 } else { 0.0 });
+                        pm.missed.push(0.0);
+                        pm.own.push(0.0);
+                        if fallback {
+                            pm.us_goals.push(None);
+                            pm.us_npg.push(None);
+                            pm.us_npxg.push(None);
+                            pm.us_xa.push(None);
+                        } else if inconsistent {
+                            // Understat's penalty goal on a row FPL scores 0: np goals < 0.
+                            pm.goals.pop();
+                            pm.goals.push(0.0);
+                            pm.us_goals.push(Some(1.0));
+                            pm.us_npg.push(Some(0.0));
+                            pm.us_npxg.push(Some(npxg));
+                            pm.us_xa.push(Some(0.1));
+                        } else {
+                            pm.us_goals.push(Some(goals));
+                            pm.us_npg.push(Some(goals - pens));
+                            pm.us_npxg.push(Some(npxg + 0.01 * ((g + offset) % 3) as f64));
+                            pm.us_xa.push(Some(0.1));
+                        }
+                        pm.available.push(kickoff + 2 * HOUR);
+                        team_goals += *pm.goals.last().unwrap();
+                        gw_player.push(player);
+                        gw_s.push(s);
+                        gw_g.push(g);
+                        gw_type.push(element_type);
+                        // Club 2's players cost £1.0m more; 2023/24 prices start £0.5m higher and drift.
+                        gw_value.push(price + 10 * (team - 1) + if s == 2023 { 4 + g } else { 0 });
+                        gw_avail.push(deadline(s, g) - HOUR);
+                    }
+                    tm_fixture.push(fixture);
+                    tm_team.push(team);
+                    tm_season.push(s);
+                    tm_goals.push(team_goals);
+                    tm_avail.push(kickoff + 2 * HOUR);
+                }
+            }
+        }
+        let n = pm.player.len();
+        let player_match = Table::new()
+            .with("player_key", Column::I64(pm.player))
+            .with("season", Column::I64(pm.season))
+            .with("fixture_key", Column::I64(pm.fixture))
+            .with("gw", Column::I64(pm.gw))
+            .with("team_key", Column::I64(pm.team))
+            .with("kickoff_time", Column::Ts(pm.kickoff))
+            .with("minutes", Column::F64(pm.minutes))
+            .with("goals_scored", Column::F64(pm.goals))
+            .with("assists", Column::F64(pm.assists))
+            .with("penalties_missed", Column::F64(pm.missed))
+            .with("own_goals", Column::F64(pm.own))
+            .with("fpl_xg", Column::OptF64(vec![None; n]))
+            .with("fpl_xa", Column::OptF64(vec![None; n]))
+            .with("us_goals", Column::OptF64(pm.us_goals))
+            .with("us_npg", Column::OptF64(pm.us_npg))
+            .with("us_npxg", Column::OptF64(pm.us_npxg))
+            .with("us_xa", Column::OptF64(pm.us_xa))
+            .with("available_at", Column::Ts(pm.available));
+        let m = tm_fixture.len();
+        let team_match = Table::new()
+            .with("fixture_key", Column::I64(tm_fixture))
+            .with("team_key", Column::I64(tm_team))
+            .with("season", Column::I64(tm_season))
+            .with("goals_for", Column::F64(tm_goals))
+            .with("us_xg", Column::OptF64(vec![None; m]))
+            .with("us_npxg", Column::OptF64(vec![None; m]))
+            .with("available_at", Column::Ts(tm_avail));
+        let player_gw = Table::new()
+            .with("player_key", Column::I64(gw_player))
+            .with("season", Column::I64(gw_s))
+            .with("gw", Column::I64(gw_g))
+            .with("element_type", Column::I64(gw_type))
+            .with("value", Column::I64(gw_value))
+            .with("available_at", Column::Ts(gw_avail));
+        let player_season = Table::new()
+            .with("player_key", Column::I64(ps_player))
+            .with("season", Column::I64(ps_season))
+            .with("element_type", Column::I64(ps_type))
+            .with("available_at", Column::Ts(ps_avail));
+        let player_snapshot = Table::new()
+            .with("snapshot_at", Column::Ts(Vec::new()))
+            .with("player_key", Column::I64(Vec::new()))
+            .with("team_key", Column::I64(Vec::new()))
+            .with("penalties_order", Column::I64(Vec::new()))
+            .with("available_at", Column::Ts(Vec::new()));
+        DataStore::from_tables(HashMap::from([
+            ("gameweek".to_string(), gameweek),
+            ("player_match".to_string(), player_match),
+            ("team_match".to_string(), team_match),
+            ("player_gw".to_string(), player_gw),
+            ("player_season".to_string(), player_season),
+            ("player_snapshot".to_string(), player_snapshot),
+        ]))
+        .unwrap()
+    }
+
+    fn synthetic_fit(params: &SharesParams) -> SharesFit {
+        let store = synthetic_store();
+        fit_shares(&store.as_of(deadline(2023, 10)), params).unwrap()
+    }
+
+    /// `fit_shares(default)` on the synthetic store, captured before the finishing par
+    /// (Task 7): the default fit must not move.
+    const DEFAULT_FIT_JSON: &str = r#"{"assist_fraction":0.8372093023255814,"conversion":0.8,"k_assists":1.0,"k_goals":1.0,"n_rows":180,"own_goal_fraction":0.0,"pen_pi":[0.5,0.2],"pen_rate":0.11363636363636363,"position_assist":[[1,0.05866807610993658],[2,0.05866807610993658],[3,0.057411464037970046],[4,0.05866807610993658]],"position_goal":[[1,0.005866807610993658],[2,0.06453488372093025],[3,0.2679985635181418],[4,0.35787526427061317]],"price_assist":[[1,-2.8358807177977043,-0.012101880125482887,52.56860024665258],[2,-2.8358807177977043,-0.012101880125482887,57.56860024665258],[3,-2.857628501589468,-0.008309210755804593,84.55903158086893],[4,-2.8358807177977043,-0.012101880125482887,127.56860024665258]],"price_goal":[[1,-5.1384453645476755,-0.00223680391983561,52.56860024665258],[2,-2.7405725581536506,-0.012666179679650419,57.56860024665258],[3,-1.3216839216641056,0.053744539938101604,84.55903158086893],[4,-1.0276315361728658,-0.02050297796911163,127.56860024665258]],"ratio_assists":0.4888888888888888,"ratio_goals":1.3652380952380954,"ratio_team":1.427027027027027,"taker_q":0.85,"team_output":1.7045045045045046,"team_pen":[[1,0.10227272727272728,0.8095238095238095],[2,0.09496753246753246,0.8095238095238095]]}"#;
+
+    #[test]
+    fn default_fit_is_unchanged_by_the_finishing_par() {
+        let fit = synthetic_fit(&SharesParams::default());
+        let want: serde_json::Value = serde_json::from_str(DEFAULT_FIT_JSON).unwrap();
+        assert_eq!(fit.to_json(), want);
+    }
+
+    #[test]
+    fn finishing_par_fields_empty_by_default() {
+        let fit = synthetic_fit(&SharesParams::default());
+        assert!(fit.position_finishing.is_empty());
+        assert!(fit.price_finishing.is_empty());
+        assert!(fit.price_finishing_curve.is_empty());
+    }
+
+    #[test]
+    fn position_par_is_np_goals_over_npxg_shrunk_to_one() {
+        let params = SharesParams { position_par: true, ..SharesParams::default() };
+        let fit = synthetic_fit(&params);
+        // Every position has rows; keepers: no goals, a little npxG -> par just under 1.
+        assert_eq!(fit.position_finishing.iter().map(|t| t.0).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert!(fit.position_finishing[0].1 < 1.0 && fit.position_finishing[0].1 > 0.95);
+        for (_, par) in &fit.position_finishing {
+            assert!(*par > 0.0 && par.is_finite());
+        }
+        assert!(fit.price_finishing.is_empty(), "price_par off");
+        assert!(fit.to_json().get("position_finishing").is_some());
+        assert!(fit.to_json().get("price_finishing").is_none());
+    }
+
+    #[test]
+    fn price_par_curve_only_when_quadratic() {
+        let linear =
+            SharesParams { position_par: true, price_par: true, ..SharesParams::default() };
+        let quad = SharesParams { price_par_quadratic: true, ..linear.clone() };
+        let l = synthetic_fit(&linear);
+        let q = synthetic_fit(&quad);
+        assert!(l.price_finishing_curve.is_empty());
+        // Only MID reaches PAR_PRIOR npxG (GK, DEF and FWD keep the position par).
+        let positions = |t: &[(i64, f64, f64, f64)]| t.iter().map(|r| r.0).collect::<Vec<_>>();
+        assert_eq!(positions(&l.price_finishing), [3]);
+        assert_eq!(positions(&q.price_finishing), [3]);
+        assert_eq!(q.price_finishing_curve.iter().map(|t| t.0).collect::<Vec<_>>(), [3]);
+        // Same center either way; the quadratic fit moves a and b.
+        for (a, b) in l.price_finishing.iter().zip(&q.price_finishing) {
+            assert_eq!(a.3, b.3);
+        }
+        assert_ne!(l.price_finishing, q.price_finishing);
+        // The goal / assist price priors don't depend on the flags.
+        let base = synthetic_fit(&SharesParams::default());
+        assert_eq!((&q.price_goal, &q.price_assist), (&base.price_goal, &base.price_assist));
+    }
+
+    #[test]
+    fn marcel_finishing_uses_the_par() {
+        let store = synthetic_store();
+        let view = store.as_of(deadline(2023, 10));
+        let params = SharesParams {
+            position_par: true,
+            price_par: true,
+            price_par_quadratic: true,
+            ..SharesParams::default()
+        };
+        let on = fit_shares(&view, &params).unwrap();
+        let off = SharesFit { params: SharesParams::default(), ..on.clone() };
+        let (matches, teams, _) = rows(&view, Some(&on), None).unwrap();
+        let shares =
+            share_rows(&matches, &teams, (on.ratio_goals, on.ratio_assists, on.ratio_team));
+        // A MID (price par, with the curve), a FWD (position par: under PAR_PRIOR), a
+        // player of no known position (par 1).
+        let pool = Table::new()
+            .with("player_key", Column::I64(vec![13, 24, 15, 11]))
+            .with("team_key", Column::I64(vec![1, 2, 1, 1]))
+            .with("element_type", Column::OptI64(vec![Some(3), Some(3), Some(4), None]))
+            .with("price", Column::F64(vec![70.0, 110.0, 130.0, 50.0]));
+        let g_on = marcel_shares(&shares, &pool, &on, 2023).unwrap();
+        let g_off = marcel_shares(&shares, &pool, &off, 2023).unwrap();
+        let k = 25.0;
+        let (a, b, center) =
+            (on.price_finishing[0].1, on.price_finishing[0].2, on.price_finishing[0].3);
+        let c = on.price_finishing_curve[0].1;
+        let mid_par = |price: f64| {
+            let z = (price - center) / PRICE_SCALE;
+            (a + b * z).exp() * (c * z * z).exp()
+        };
+        let pars = [mid_par(70.0), mid_par(110.0), on.position_finishing[3].1, 1.0];
+        for (i, &player) in [13_i64, 24, 15, 11].iter().enumerate() {
+            let own: Vec<&ShareRow> =
+                shares.iter().filter(|s| s.row.player_key == player && !s.fb_goals).collect();
+            let goals: f64 = own
+                .iter()
+                .map(|s| (nan_to_num(s.row.goals_scored) - nan_to_num(s.row.pen_goals)).max(0.0))
+                .sum();
+            // (G + k·par) / (X + k) over (G + k) / (X + k): X cancels.
+            let want = (goals + k * pars[i]) / (goals + k);
+            let got = g_on[i].g / g_off[i].g;
+            assert!((got - want).abs() < 1e-12, "player {player}: {got} vs {want}");
+        }
+        assert_eq!(g_on[3].g, g_off[3].g);
+        assert!(pars[0] != pars[1] && pars[2] != 1.0);
+    }
 
     #[test]
     fn quadratic_price_model_recovers_a_convex_curve() {
