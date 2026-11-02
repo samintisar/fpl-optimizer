@@ -52,6 +52,8 @@ static RETURN_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 /// The fitted mapping.
 #[derive(Clone, Debug)]
 pub struct AvailabilityFit {
+    /// The shared slope; with `category_slopes`, 1.0: the fallback for a category without
+    /// its own slope.
     pub slope: f64,
     pub offsets: Vec<(String, i64, f64)>,
     pub minutes_sub: f64,
@@ -330,6 +332,222 @@ struct Carried {
     max_scale: f64,
 }
 
+/// `np.bincount(codes, weights, minlength=len)`: sequential sums.
+fn bincount(codes: &[usize], weights: &dyn Fn(usize) -> f64, len: usize) -> Vec<f64> {
+    let mut out = vec![0.0; len];
+    for (i, &c) in codes.iter().enumerate() {
+        out[c] += weights(i);
+    }
+    out
+}
+
+/// The flag mapping's objective on the fit rows: per-row log loss with the Gaussian priors,
+/// its gradient and Hessian, all divided by the row count. θ = [slopes (one shared, or one
+/// per category), offsets per cell, back slopes].
+struct Objective {
+    category_slopes: bool,
+    categories: Vec<String>,
+    cells: Vec<(String, i64)>,
+    back_cells: Vec<usize>,
+    y: Vec<f64>,
+    z: Vec<f64>,
+    x: Vec<f64>,
+    cell: Vec<usize>,
+    bcell: Vec<usize>,
+    sidx: Vec<usize>,
+    cell_slope: Vec<usize>,
+    n_s: usize,
+    n_cells: usize,
+    n_back: usize,
+}
+
+impl Objective {
+    /// Relabels the rows' back categories (`back_split`) and indexes their cells.
+    fn new(fit_rows: &mut [FitRow], back_split: bool, category_slopes: bool) -> Objective {
+        let mut categories: Vec<String> = CATEGORIES.iter().map(|c| c.to_string()).collect();
+        let mut backs: Vec<String> = Vec::new();
+        let mut x = vec![0.0; fit_rows.len()];
+        if back_split {
+            for (k, row) in fit_rows.iter_mut().enumerate() {
+                let (label, cov) = back_label(&row.category, row.absent_run, row.start_rate_l10);
+                row.category = label;
+                x[k] = cov;
+            }
+            for name in BACK_CATEGORIES {
+                let back = format!("{name}{BACK_SUFFIX}");
+                let thin = fit_rows.iter().filter(|r| r.category == back).count();
+                if thin < MIN_BACK_ROWS {
+                    for (k, row) in fit_rows.iter_mut().enumerate() {
+                        if row.category == back {
+                            row.category = name.to_string();
+                            x[k] = 0.0;
+                        }
+                    }
+                }
+            }
+            backs = BACK_CATEGORIES.iter().map(|c| format!("{c}{BACK_SUFFIX}")).collect();
+            categories.extend(backs.iter().cloned());
+        }
+        let cells: Vec<(String, i64)> = categories
+            .iter()
+            .flat_map(|c| (0..HORIZON_BUCKETS).map(move |b| (c.clone(), b)))
+            .collect();
+        let cell_index: HashMap<(String, i64), usize> =
+            cells.iter().enumerate().map(|(k, c)| (c.clone(), k)).collect();
+        let cell: Vec<usize> =
+            fit_rows.iter().map(|r| cell_index[&(r.category.clone(), r.bucket)]).collect();
+        let z: Vec<f64> = fit_rows.iter().map(|r| logit(np_clip(r.base, EPS, 1.0 - EPS))).collect();
+        let y: Vec<f64> = fit_rows.iter().map(|r| r.start).collect();
+        let n_cells = cells.len();
+        let back_cells: Vec<usize> =
+            (0..n_cells).filter(|&k| backs.contains(&cells[k].0)).collect();
+        let n_back = back_cells.len();
+        let mut position = vec![0usize; n_cells];
+        for (j, &k) in back_cells.iter().enumerate() {
+            position[k] = j;
+        }
+        let bcell: Vec<usize> = cell.iter().map(|&c| position[c]).collect();
+        // The slopes come first in θ: one shared, or one per category (a cell's category is
+        // cell / HORIZON_BUCKETS, the product's order).
+        let n_s = if category_slopes { categories.len() } else { 1 };
+        let cell_slope: Vec<usize> = (0..n_cells)
+            .map(|k| if category_slopes { k / HORIZON_BUCKETS as usize } else { 0 })
+            .collect();
+        let sidx: Vec<usize> = cell.iter().map(|&c| cell_slope[c]).collect();
+        Objective {
+            category_slopes,
+            categories,
+            cells,
+            back_cells,
+            y,
+            z,
+            x,
+            cell,
+            bcell,
+            sidx,
+            cell_slope,
+            n_s,
+            n_cells,
+            n_back,
+        }
+    }
+
+    fn n_theta(&self) -> usize {
+        self.n_s + self.n_cells + self.n_back
+    }
+
+    fn eta_of(&self, theta: &[f64]) -> Vec<f64> {
+        let (n_s, n_cells) = (self.n_s, self.n_cells);
+        (0..self.y.len())
+            .map(|i| {
+                let mut eta = theta[self.sidx[i]] * self.z[i] + theta[n_s + self.cell[i]];
+                if self.n_back > 0 {
+                    eta += theta[n_s + n_cells + self.bcell[i]] * self.x[i];
+                }
+                eta
+            })
+            .collect()
+    }
+
+    /// The shared slope's sums are numpy sums (np_sum, as before); per category a bincount.
+    fn per_slope(&self, weights: &dyn Fn(usize) -> f64) -> Vec<f64> {
+        if self.n_s == 1 {
+            vec![np_sum(&(0..self.y.len()).map(weights).collect::<Vec<_>>())]
+        } else {
+            bincount(&self.sidx, weights, self.n_s)
+        }
+    }
+
+    fn loss(&self, theta: &[f64]) -> (f64, Vec<f64>) {
+        let (y, z, x) = (&self.y, &self.z, &self.x);
+        let (n_s, n_cells, n_back) = (self.n_s, self.n_cells, self.n_back);
+        let n_theta = self.n_theta();
+        let n = y.len() as f64;
+        let sd2 = OFFSET_SD * OFFSET_SD;
+        let slope_sd2 = SLOPE_SD * SLOPE_SD;
+        let eta = self.eta_of(theta);
+        let p: Vec<f64> = eta.iter().map(|&e| expit(e)).collect();
+        let terms: Vec<f64> = (0..y.len()).map(|i| logaddexp0(eta[i]) - y[i] * eta[i]).collect();
+        let squares: Vec<f64> = theta[n_s..].iter().map(|t| t * t).collect();
+        let mut value = np_sum(&terms) + 0.5 * np_sum(&squares) / sd2;
+        let residual: Vec<f64> = (0..y.len()).map(|i| p[i] - y[i]).collect();
+        let mut grad = vec![0.0; n_theta];
+        grad[..n_s].copy_from_slice(&self.per_slope(&|i| residual[i] * z[i]));
+        let by_cell = bincount(&self.cell, &|i| residual[i], n_cells);
+        grad[n_s..n_s + n_cells].copy_from_slice(&by_cell);
+        if n_back > 0 {
+            let by_back = bincount(&self.bcell, &|i| residual[i] * x[i], n_back);
+            grad[n_s + n_cells..].copy_from_slice(&by_back);
+        }
+        for j in n_s..n_theta {
+            grad[j] += theta[j] / sd2;
+        }
+        if self.category_slopes {
+            let squares: Vec<f64> = theta[..n_s].iter().map(|t| (t - 1.0) * (t - 1.0)).collect();
+            value += 0.5 * np_sum(&squares) / slope_sd2;
+            for j in 0..n_s {
+                grad[j] += (theta[j] - 1.0) / slope_sd2;
+            }
+        }
+        (value / n, grad.iter().map(|g| g / n).collect())
+    }
+
+    fn hessian(&self, theta: &[f64]) -> Mat {
+        let (y, z, x) = (&self.y, &self.z, &self.x);
+        let (n_s, n_cells, n_back) = (self.n_s, self.n_cells, self.n_back);
+        let (cell, bcell, cell_slope) = (&self.cell, &self.bcell, &self.cell_slope);
+        let n_theta = self.n_theta();
+        let n = y.len() as f64;
+        let sd2 = OFFSET_SD * OFFSET_SD;
+        let slope_sd2 = SLOPE_SD * SLOPE_SD;
+        let p: Vec<f64> = self.eta_of(theta).iter().map(|&e| expit(e)).collect();
+        let w: Vec<f64> = p.iter().map(|p| p * (1.0 - p)).collect();
+        let mut out = Mat::zeros(n_theta, n_theta);
+        for (j, v) in self.per_slope(&|i| w[i] * z[i] * z[i]).into_iter().enumerate() {
+            out.set(j, j, v);
+        }
+        let cross = bincount(cell, &|i| w[i] * z[i], n_cells);
+        let diagonal = bincount(cell, &|i| w[i], n_cells);
+        // Assignments, as Python's `out[cell_slope, offset_index] = cross` (each offset index
+        // appears once).
+        for k in 0..n_cells {
+            out.set(cell_slope[k], n_s + k, cross[k]);
+            out.set(n_s + k, cell_slope[k], cross[k]);
+            out.set(n_s + k, n_s + k, diagonal[k]);
+        }
+        if n_back > 0 {
+            let b0 = n_s + n_cells;
+            let zx = bincount(bcell, &|i| w[i] * z[i] * x[i], n_back);
+            let joint_codes: Vec<usize> =
+                (0..y.len()).map(|i| cell[i] * n_back + bcell[i]).collect();
+            let joint = bincount(&joint_codes, &|i| w[i] * x[i], n_cells * n_back);
+            let xx = bincount(bcell, &|i| w[i] * x[i] * x[i], n_back);
+            for j in 0..n_back {
+                let s = cell_slope[self.back_cells[j]];
+                out.set(s, b0 + j, zx[j]);
+                out.set(b0 + j, s, zx[j]);
+                for k in 0..n_cells {
+                    out.set(n_s + k, b0 + j, joint[k * n_back + j]);
+                    out.set(b0 + j, n_s + k, joint[k * n_back + j]);
+                }
+                out.set(b0 + j, b0 + j, xx[j]);
+            }
+        }
+        for j in n_s..n_theta {
+            out.add(j, j, 1.0 / sd2);
+        }
+        if self.category_slopes {
+            for j in 0..n_s {
+                out.add(j, j, 1.0 / slope_sd2);
+            }
+        }
+        for v in out.data.iter_mut() {
+            *v /= n;
+        }
+        out
+    }
+}
+
 /// The optimization part of `fit_availability`, on its fit rows.
 fn fit_mapping(
     mut fit_rows: Vec<FitRow>,
@@ -350,166 +568,33 @@ fn fit_mapping(
             slopes: Vec::new(),
         });
     }
-    let mut categories: Vec<String> = CATEGORIES.iter().map(|c| c.to_string()).collect();
-    let mut backs: Vec<String> = Vec::new();
-    let mut x = vec![0.0; fit_rows.len()];
-    if back_split {
-        for (k, row) in fit_rows.iter_mut().enumerate() {
-            let (label, cov) = back_label(&row.category, row.absent_run, row.start_rate_l10);
-            row.category = label;
-            x[k] = cov;
-        }
-        for name in BACK_CATEGORIES {
-            let back = format!("{name}{BACK_SUFFIX}");
-            let thin = fit_rows.iter().filter(|r| r.category == back).count();
-            if thin < MIN_BACK_ROWS {
-                for (k, row) in fit_rows.iter_mut().enumerate() {
-                    if row.category == back {
-                        row.category = name.to_string();
-                        x[k] = 0.0;
-                    }
-                }
-            }
-        }
-        backs = BACK_CATEGORIES.iter().map(|c| format!("{c}{BACK_SUFFIX}")).collect();
-        categories.extend(backs.iter().cloned());
-    }
-    let cells: Vec<(String, i64)> =
-        categories.iter().flat_map(|c| (0..HORIZON_BUCKETS).map(move |b| (c.clone(), b))).collect();
-    let cell_index: HashMap<(String, i64), usize> =
-        cells.iter().enumerate().map(|(k, c)| (c.clone(), k)).collect();
-    let cell: Vec<usize> =
-        fit_rows.iter().map(|r| cell_index[&(r.category.clone(), r.bucket)]).collect();
-    let z: Vec<f64> = fit_rows.iter().map(|r| logit(np_clip(r.base, EPS, 1.0 - EPS))).collect();
-    let y: Vec<f64> = fit_rows.iter().map(|r| r.start).collect();
-    let n_cells = cells.len();
-    let back_cells: Vec<usize> = (0..n_cells).filter(|&k| backs.contains(&cells[k].0)).collect();
-    let n_back = back_cells.len();
-    let mut position = vec![0usize; n_cells];
-    for (j, &k) in back_cells.iter().enumerate() {
-        position[k] = j;
-    }
-    let bcell: Vec<usize> = cell.iter().map(|&c| position[c]).collect();
-    // The slopes come first in θ: one shared, or one per category (a cell's category is
-    // cell / HORIZON_BUCKETS, the product's order).
-    let n_s = if category_slopes { categories.len() } else { 1 };
-    let cell_slope: Vec<usize> = (0..n_cells)
-        .map(|k| if category_slopes { k / HORIZON_BUCKETS as usize } else { 0 })
-        .collect();
-    let sidx: Vec<usize> = cell.iter().map(|&c| cell_slope[c]).collect();
-    let n_theta = n_s + n_cells + n_back;
-    let n = y.len() as f64;
-    let sd2 = OFFSET_SD * OFFSET_SD;
-    let slope_sd2 = SLOPE_SD * SLOPE_SD;
-    let eta_of = |theta: &[f64]| -> Vec<f64> {
-        (0..y.len())
-            .map(|i| {
-                let mut eta = theta[sidx[i]] * z[i] + theta[n_s + cell[i]];
-                if n_back > 0 {
-                    eta += theta[n_s + n_cells + bcell[i]] * x[i];
-                }
-                eta
-            })
-            .collect()
-    };
-    let bincount = |codes: &[usize], weights: &dyn Fn(usize) -> f64, len: usize| -> Vec<f64> {
-        let mut out = vec![0.0; len];
-        for (i, &c) in codes.iter().enumerate() {
-            out[c] += weights(i);
-        }
-        out
-    };
-    // The shared slope's sums are numpy sums (np_sum, as before); per category a bincount.
-    let per_slope = |weights: &dyn Fn(usize) -> f64| -> Vec<f64> {
-        if n_s == 1 {
-            vec![np_sum(&(0..y.len()).map(weights).collect::<Vec<_>>())]
-        } else {
-            bincount(&sidx, weights, n_s)
-        }
-    };
-    let loss = |theta: &[f64]| -> (f64, Vec<f64>) {
-        let eta = eta_of(theta);
-        let p: Vec<f64> = eta.iter().map(|&e| expit(e)).collect();
-        let terms: Vec<f64> = (0..y.len()).map(|i| logaddexp0(eta[i]) - y[i] * eta[i]).collect();
-        let squares: Vec<f64> = theta[n_s..].iter().map(|t| t * t).collect();
-        let mut value = np_sum(&terms) + 0.5 * np_sum(&squares) / sd2;
-        let residual: Vec<f64> = (0..y.len()).map(|i| p[i] - y[i]).collect();
-        let mut grad = vec![0.0; n_theta];
-        grad[..n_s].copy_from_slice(&per_slope(&|i| residual[i] * z[i]));
-        let by_cell = bincount(&cell, &|i| residual[i], n_cells);
-        grad[n_s..n_s + n_cells].copy_from_slice(&by_cell);
-        if n_back > 0 {
-            let by_back = bincount(&bcell, &|i| residual[i] * x[i], n_back);
-            grad[n_s + n_cells..].copy_from_slice(&by_back);
-        }
-        for j in n_s..n_theta {
-            grad[j] += theta[j] / sd2;
-        }
-        if category_slopes {
-            let squares: Vec<f64> = theta[..n_s].iter().map(|t| (t - 1.0) * (t - 1.0)).collect();
-            value += 0.5 * np_sum(&squares) / slope_sd2;
-            for j in 0..n_s {
-                grad[j] += (theta[j] - 1.0) / slope_sd2;
-            }
-        }
-        (value / n, grad.iter().map(|g| g / n).collect())
-    };
-    let hessian = |theta: &[f64]| -> Mat {
-        let p: Vec<f64> = eta_of(theta).iter().map(|&e| expit(e)).collect();
-        let w: Vec<f64> = p.iter().map(|p| p * (1.0 - p)).collect();
-        let mut out = Mat::zeros(n_theta, n_theta);
-        for (j, v) in per_slope(&|i| w[i] * z[i] * z[i]).into_iter().enumerate() {
-            out.set(j, j, v);
-        }
-        let cross = bincount(&cell, &|i| w[i] * z[i], n_cells);
-        let diagonal = bincount(&cell, &|i| w[i], n_cells);
-        // Assignments, as Python's `out[cell_slope, offset_index] = cross` (each offset index
-        // appears once).
-        for k in 0..n_cells {
-            out.set(cell_slope[k], n_s + k, cross[k]);
-            out.set(n_s + k, cell_slope[k], cross[k]);
-            out.set(n_s + k, n_s + k, diagonal[k]);
-        }
-        if n_back > 0 {
-            let b0 = n_s + n_cells;
-            let zx = bincount(&bcell, &|i| w[i] * z[i] * x[i], n_back);
-            let joint_codes: Vec<usize> =
-                (0..y.len()).map(|i| cell[i] * n_back + bcell[i]).collect();
-            let joint = bincount(&joint_codes, &|i| w[i] * x[i], n_cells * n_back);
-            let xx = bincount(&bcell, &|i| w[i] * x[i] * x[i], n_back);
-            for j in 0..n_back {
-                let s = cell_slope[back_cells[j]];
-                out.set(s, b0 + j, zx[j]);
-                out.set(b0 + j, s, zx[j]);
-                for k in 0..n_cells {
-                    out.set(n_s + k, b0 + j, joint[k * n_back + j]);
-                    out.set(b0 + j, n_s + k, joint[k * n_back + j]);
-                }
-                out.set(b0 + j, b0 + j, xx[j]);
-            }
-        }
-        for j in n_s..n_theta {
-            out.add(j, j, 1.0 / sd2);
-        }
-        if category_slopes {
-            for j in 0..n_s {
-                out.add(j, j, 1.0 / slope_sd2);
-            }
-        }
-        for v in out.data.iter_mut() {
-            *v /= n;
-        }
-        out
-    };
-    let mut start = vec![0.0; n_theta];
+    let objective = Objective::new(&mut fit_rows, back_split, category_slopes);
+    let Objective {
+        n_s,
+        n_cells,
+        ref cell,
+        ref sidx,
+        ref back_cells,
+        ref categories,
+        ref cells,
+        ..
+    } = objective;
+    let mut start = vec![0.0; objective.n_theta()];
     start[..n_s].fill(1.0);
-    let theta = trust_exact(loss, hessian, start, 1e-9, None)?.x;
+    let theta = trust_exact(
+        |theta: &[f64]| objective.loss(theta),
+        |theta: &[f64]| objective.hessian(theta),
+        start,
+        1e-9,
+        None,
+    )?
+    .x;
     let mut counts = vec![0usize; n_cells];
-    for &c in &cell {
+    for &c in cell {
         counts[c] += 1;
     }
     let mut slope_counts = vec![0usize; n_s];
-    for &j in &sidx {
+    for &j in sidx {
         slope_counts[j] += 1;
     }
     Ok(AvailabilityFit {
@@ -709,7 +794,8 @@ mod tests {
         v.iter().map(|(c, b, x)| (c.to_string(), *b, *x)).collect()
     }
 
-    /// The shared-slope fit on the synthetic rows, recorded before `category_slopes` existed.
+    /// The shared-slope fit on the synthetic rows, recorded after the `fit_mapping`
+    /// extraction, before `category_slopes`.
     #[test]
     fn shared_slope_fit_is_unchanged() {
         let fit = fit_mapping(synthetic_rows(), &CARRIED, true, false).unwrap();
@@ -783,12 +869,6 @@ mod tests {
         );
         assert!(fit.back_slopes.is_empty());
         assert!(fit.slopes.is_empty());
-    }
-
-    #[test]
-    fn shared_slope_is_unchanged_without_category_slopes() {
-        let fit = fit_mapping(synthetic_rows(), &CARRIED, true, false).unwrap();
-        assert!(fit.slopes.is_empty());
         assert!(fit.to_json().get("slopes").is_none());
     }
 
@@ -806,14 +886,79 @@ mod tests {
             assert!(seen.contains(category.as_str()));
             assert!(slope.is_finite());
         }
-        // The flagged categories' slopes sit below the plain one's (drawn 1.1 vs 0.4).
+        // The fitted slopes recover the drawn ones' order and sit within 0.15 of them (the
+        // back rows were drawn with `a`'s slope; ~600 rows per flagged category, prior
+        // around 1).
         let slope = |c: &str| fit.slopes.iter().find(|(k, _)| k == c).unwrap().1;
-        assert!(slope("i") < slope("a"));
+        let order = ["i", "d50", "d75", "a100", "a"];
+        for pair in order.windows(2) {
+            assert!(slope(pair[0]) < slope(pair[1]), "{pair:?}");
+        }
+        for (category, drawn) in
+            [("i", 0.4), ("d50", 0.6), ("d75", 0.7), ("a100", 0.9), ("a", 1.1), ("a_back", 1.1)]
+        {
+            assert!((slope(category) - drawn).abs() < 0.15, "{category}: {}", slope(category));
+        }
         assert_eq!(fit.to_json()["slopes"][0][0], "a");
         // Too few rows: the identity, without slopes.
         let rows: Vec<FitRow> = synthetic_rows().into_iter().take(MIN_ROWS - 1).collect();
         let identity = fit_mapping(rows, &CARRIED, true, true).unwrap();
         assert!(identity.slopes.is_empty() && identity.offsets.is_empty());
+    }
+
+    /// Gradient against central differences of the loss value, Hessian against central
+    /// differences of the gradient, at a non-trivial θ. The loss is O(1) (per row) and the
+    /// gradient and Hessian O(0.01–1): with step 1e-5 the truncation error is O(h²) ≈ 1e-10
+    /// and the rounding error ≈ ε·|f|/h ≈ 1e-11, so 1e-6 (absolute, or relative above 1)
+    /// leaves four orders of margin while catching any missing or misplaced term.
+    #[test]
+    fn objective_derivatives_match_finite_differences() {
+        const STEP: f64 = 1e-5;
+        const TOL: f64 = 1e-6;
+        for category_slopes in [true, false] {
+            let mut rows = synthetic_rows();
+            let objective = Objective::new(&mut rows, true, category_slopes);
+            let (n_s, n_cells) = (objective.n_s, objective.n_cells);
+            let n_theta = objective.n_theta();
+            assert!(objective.n_back > 0);
+            let theta: Vec<f64> = (0..n_theta)
+                .map(|j| {
+                    let t = ((j * 7) % 11) as f64 / 10.0 - 0.5; // −0.5..0.5
+                    if j < n_s {
+                        1.0 + 0.4 * t // slopes 0.8..1.2
+                    } else if j < n_s + n_cells {
+                        t // offsets ±0.5
+                    } else {
+                        0.6 * t // back slopes ±0.3
+                    }
+                })
+                .collect();
+            let (_, grad) = objective.loss(&theta);
+            let hessian = objective.hessian(&theta);
+            let close = |a: f64, b: f64| (a - b).abs() <= TOL * b.abs().max(1.0);
+            let (mut max_grad, mut max_hess) = (0.0f64, 0.0f64);
+            for j in 0..n_theta {
+                let (mut up, mut down) = (theta.clone(), theta.clone());
+                up[j] += STEP;
+                down[j] -= STEP;
+                let ((f_up, g_up), (f_down, g_down)) = (objective.loss(&up), objective.loss(&down));
+                let fd = (f_up - f_down) / (2.0 * STEP);
+                max_grad = max_grad.max((fd - grad[j]).abs());
+                assert!(close(grad[j], fd), "grad[{j}] {} vs {fd}", grad[j]);
+                for i in 0..n_theta {
+                    let fd = (g_up[i] - g_down[i]) / (2.0 * STEP);
+                    let h = hessian.at(i, j);
+                    max_hess = max_hess.max((fd - h).abs());
+                    assert!(
+                        close(h, fd),
+                        "H[{i},{j}] {h} vs {fd} (category_slopes {category_slopes})"
+                    );
+                }
+            }
+            println!(
+                "category_slopes {category_slopes}: max |FD − grad| {max_grad:e}, max |FD − H| {max_hess:e}"
+            );
+        }
     }
 
     #[test]
