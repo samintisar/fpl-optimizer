@@ -24,7 +24,7 @@ use crate::backtest::{
 };
 use crate::optimize_plan::{exit_code, parse_seasons, usage};
 
-const XP_MODELS: [&str; 4] = ["rolling", "ep_next", "ep_next_fade", "v1"];
+const XP_MODELS: [&str; 5] = ["rolling", "ep_next", "ep_next_fade", "v1", "v1r"];
 const EP_NEXT_FIRST_SEASON: i64 = 2021;
 
 #[derive(Args)]

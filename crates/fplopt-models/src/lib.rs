@@ -32,16 +32,23 @@ pub use baseline::HORIZON;
 pub const MAX_HORIZON: i64 = HORIZON + 1;
 
 /// The registered models (Python's `MODELS`), by name.
-pub const MODELS: &[&str] = &["rolling", "ep_next", "ep_next_fade", "v1"];
+pub const MODELS: &[&str] = &["rolling", "ep_next", "ep_next_fade", "v1", "v1r"];
+
+/// A v1-family model (its frame has `p_play`, `e_minutes`, ...).
+pub fn is_v1_family(name: &str) -> bool {
+    matches!(name, "v1" | "v1r")
+}
 
 /// Model components the parity gate checks on their own, fitted at the view's deadline
 /// (not the refit cutoff): name → (frame, fitted values); `v1` is the model itself (fitted
 /// at the refit cutoff), its xP frame and every component's fitted values.
-pub const COMPONENTS: &[&str] = &["team", "minutes", "availability", "shares", "components", "v1"];
+pub const COMPONENTS: &[&str] =
+    &["team", "minutes", "availability", "shares", "components", "v1", "v1r"];
 
 pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Value)> {
     match name {
         "v1" => assemble::xp_v1_with_fit(view),
+        "v1r" => assemble::xp_v1_family_with_fit("v1r", view),
         "team" => {
             let fit = team::fit_team(view, &team::TeamParams::default())?;
             Ok((team::team_lambdas(view, &fit)?, fit.to_json()))
@@ -103,6 +110,7 @@ pub const LEAKAGE_BUILDERS: &[(&str, fplopt_features::FeatureBuilder)] = &[
     ("model:ep_next", baseline::xp_ep_next),
     ("model:ep_next_fade", baseline::xp_ep_next_fade),
     ("model:v1", assemble::xp_v1),
+    ("model:v1r", assemble::xp_v1r),
 ];
 
 /// Tables the models read beyond the features' (`leakcheck::FEATURE_TABLES`).
@@ -115,6 +123,7 @@ pub fn predict(name: &str, view: &AsOfView) -> Result<Table> {
         "ep_next" => baseline::xp_ep_next(view),
         "ep_next_fade" => baseline::xp_ep_next_fade(view),
         "v1" => assemble::xp_v1(view),
+        "v1r" => assemble::xp_v1r(view),
         other => bail!("unknown xP model {other:?} (known: {})", MODELS.join(", ")),
     }
 }

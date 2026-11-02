@@ -15,6 +15,22 @@ pub static TABLE: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../calibration_table.json")).expect("calibration_table.json")
 });
 
+/// v1r's table (`fplopt-rs models calibrate fit --model v1r --write`); None until fitted.
+const V1R_TABLE_TEXT: Option<&str> = None;
+
+pub static V1R_TABLE: LazyLock<Option<Value>> = LazyLock::new(|| {
+    V1R_TABLE_TEXT.map(|t| serde_json::from_str(t).expect("calibration_table_v1r.json"))
+});
+
+/// The table of `model`, None if it has none.
+pub fn table_for(model: &str) -> Option<&'static Value> {
+    match model {
+        "v1" => Some(&TABLE),
+        "v1r" => V1R_TABLE.as_ref(),
+        _ => None,
+    }
+}
+
 /// A non-decreasing map given by breakpoints.
 #[derive(Clone, Debug, Default)]
 pub struct Isotonic {
@@ -107,8 +123,9 @@ fn maps(value: &Value) -> Result<Vec<(i64, Isotonic)>> {
 
 /// The calibration applied in `season`: the table's entry for it, the last entry for a
 /// later season, None before the first.
-pub fn calibration_for(season: i64) -> Result<Option<Calibration>> {
-    let table = TABLE["table"].as_array().context("calibration table: no 'table'")?;
+pub fn calibration_for(model: &str, season: i64) -> Result<Option<Calibration>> {
+    let Some(table) = table_for(model) else { return Ok(None) };
+    let table = table["table"].as_array().context("calibration table: no 'table'")?;
     let mut chosen = None;
     for entry in table {
         if entry[0].as_i64().context("calibration table: a season")? <= season {
@@ -156,7 +173,7 @@ mod tests {
         assert!((interp(0.3, &x, &y) - 0.55).abs() < 1e-15);
         let map = Isotonic { x: x.to_vec(), y: y.to_vec() };
         assert_eq!(map.apply(0.0), 0.0);
-        assert!(calibration_for(2016).unwrap().is_none());
-        assert!(calibration_for(2026).unwrap().unwrap().p_start.is_some());
+        assert!(calibration_for("v1", 2016).unwrap().is_none());
+        assert!(calibration_for("v1", 2026).unwrap().unwrap().p_start.is_some());
     }
 }

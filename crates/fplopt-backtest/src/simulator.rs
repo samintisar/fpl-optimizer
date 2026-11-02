@@ -66,7 +66,7 @@ impl<K: Eq + Hash, V> OnceMap<K, V> {
 pub struct Caches {
     disk: Option<DiskCache>,
     xp: OnceMap<(String, Micros), Xp>,
-    fits: OnceMap<Micros, V1Fit>,
+    fits: OnceMap<(String, Micros), V1Fit>,
     pools: OnceMap<Micros, Vec<PoolPlayer>>,
     outcomes: OnceMap<(i64, i64, String), GwOutcomes>,
 }
@@ -92,10 +92,10 @@ impl Caches {
             let hit = cached.is_some();
             let table = if let Some(t) = cached {
                 t
-            } else if model == "v1" {
+            } else if fplopt_models::is_v1_family(model) {
                 let cutoff = refit_deadline(view, REFIT_EVERY)?;
-                let fit = self.fits.get_or_compute(cutoff, || {
-                    fit_v1(&view.earlier(cutoff)?, &V1Params::default())
+                let fit = self.fits.get_or_compute((model.to_owned(), cutoff), || {
+                    fit_v1(&view.earlier(cutoff)?, &V1Params::for_model(model)?)
                 })?;
                 predict_v1(view, &fit)?
             } else {

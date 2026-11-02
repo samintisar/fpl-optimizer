@@ -64,6 +64,8 @@ pub const GW_SUMS: [&str; 4] = ["e_minutes", "e_goals", "e_assists", "e_bonus"];
 /// v1's settings: the module defaults, with the minutes model's ban residual.
 #[derive(Clone, Debug, PartialEq)]
 pub struct V1Params {
+    /// The model name: picks the calibration table (`calibration::calibration_for`).
+    pub model: &'static str,
     pub team: TeamParams,
     pub minutes: MinutesParams,
     pub shares: SharesParams,
@@ -75,12 +77,30 @@ pub struct V1Params {
 impl Default for V1Params {
     fn default() -> Self {
         V1Params {
+            model: "v1",
             team: TeamParams::default(),
             minutes: MinutesParams { ban_residual: true, ..MinutesParams::default() },
             shares: SharesParams::default(),
             components: ComponentsParams::default(),
             back_split: true,
             calibrate: true,
+        }
+    }
+}
+
+impl V1Params {
+    /// `v1` with the research loop's keeps on (spec 2026-11-02-v1r-promotion). Each task of
+    /// the plan turns one on here.
+    pub fn v1r() -> Self {
+        V1Params { model: "v1r", ..V1Params::default() }
+    }
+
+    /// The params a model name stands for.
+    pub fn for_model(name: &str) -> Result<Self> {
+        match name {
+            "v1" => Ok(V1Params::default()),
+            "v1r" => Ok(V1Params::v1r()),
+            other => bail!("not a v1-family model: {other:?}"),
         }
     }
 }
@@ -385,9 +405,13 @@ fn calibrate_xp(frame: &mut [Fixture], calibration: Option<&Calibration>) {
 /// season's table entry unless `calibrate` is off).
 pub fn predict_fixtures(view: &AsOfView, fit: &V1Fit) -> Result<Vec<Fixture>> {
     let (season, _) = view.gameweek_for_deadline()?;
-    let calibration = if fit.params.calibrate { calibration_for(season)? } else { None };
-    if calibration.is_some() && fit.params != V1Params::default() {
-        bail!("the v1 calibration table was fitted for the default V1Params; use calibrate=false");
+    let params = &fit.params;
+    let calibration = if params.calibrate { calibration_for(params.model, season)? } else { None };
+    if calibration.is_some() && *params != V1Params::for_model(params.model)? {
+        bail!(
+            "the {} calibration table was fitted for that model's default params; use calibrate=false",
+            params.model
+        );
     }
     let mut frame = fixture_components(view, fit)?;
     calibrate_inputs(&mut frame, calibration.as_ref());
@@ -561,11 +585,21 @@ pub fn predict_v1(view: &AsOfView, fit: &V1Fit) -> Result<Table> {
     gw_frame(view, &predict_fixtures(view, fit)?)
 }
 
-/// `MODELS["v1"](view)`: fit at the refit cutoff, predict at the view.
-pub fn xp_v1(view: &AsOfView) -> Result<Table> {
+/// `MODELS[name](view)` for the v1 family: fit at the refit cutoff, predict at the view.
+pub fn xp_v1_family(name: &str, view: &AsOfView) -> Result<Table> {
     let cutoff = refit_deadline(view, REFIT_EVERY)?;
-    let fit = fit_v1(&view.earlier(cutoff)?, &V1Params::default())?;
+    let fit = fit_v1(&view.earlier(cutoff)?, &V1Params::for_model(name)?)?;
     predict_v1(view, &fit)
+}
+
+/// `MODELS["v1"](view)`.
+pub fn xp_v1(view: &AsOfView) -> Result<Table> {
+    xp_v1_family("v1", view)
+}
+
+/// `MODELS["v1r"](view)`.
+pub fn xp_v1r(view: &AsOfView) -> Result<Table> {
+    xp_v1_family("v1r", view)
 }
 
 impl V1Fit {
@@ -581,9 +615,30 @@ impl V1Fit {
     }
 }
 
-/// `xp_v1` with the fit's values (the parity gate's gate 1).
-pub fn xp_v1_with_fit(view: &AsOfView) -> Result<(Table, serde_json::Value)> {
+/// `xp_v1_family` with the fit's values (the parity gate's gate 1).
+pub fn xp_v1_family_with_fit(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Value)> {
     let cutoff = refit_deadline(view, REFIT_EVERY)?;
-    let fit = fit_v1(&view.earlier(cutoff)?, &V1Params::default())?;
+    let fit = fit_v1(&view.earlier(cutoff)?, &V1Params::for_model(name)?)?;
     Ok((predict_v1(view, &fit)?, fit.to_json()?))
+}
+
+/// `xp_v1` with the fit's values.
+pub fn xp_v1_with_fit(view: &AsOfView) -> Result<(Table, serde_json::Value)> {
+    xp_v1_family_with_fit("v1", view)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1r_is_registered_and_v1_is_unchanged() {
+        assert!(crate::MODELS.contains(&"v1r"));
+        assert!(crate::COMPONENTS.contains(&"v1r"));
+        assert_eq!(V1Params::default().model, "v1");
+        assert_eq!(V1Params::v1r().model, "v1r");
+        // No v1r table yet: a calibrated v1r is refused, an uncalibrated one is fine.
+        assert!(crate::calibration::calibration_for("v1r", 2023).unwrap().is_none());
+        assert!(crate::calibration::calibration_for("v1", 2023).unwrap().is_some());
+    }
 }
