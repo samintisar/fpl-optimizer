@@ -23,6 +23,7 @@ use crate::components::{
     ComponentsFit, ComponentsParams, fit_components, negbin_tail, predict_components,
 };
 use crate::fitted::{REFIT_EVERY, refit_deadline};
+use crate::gbm::GbmParams;
 use crate::minutes::{MinutesFit, MinutesParams, conditionals, fit_minutes, predict_minutes};
 use crate::shares::{SharesFit, SharesParams, fit_shares, predict_shares};
 use crate::team::{TeamFit, TeamParams, fit_team, team_lambdas};
@@ -92,8 +93,20 @@ impl V1Params {
     /// `v1` with the research loop's keeps on (spec 2026-11-02-v1r-promotion). Each task of
     /// the plan turns one on here.
     pub fn v1r() -> Self {
-        // Uncalibrated until Task 12 fits `calibration_table_v1r.json` and turns this on.
-        V1Params { model: "v1r", calibrate: false, ..V1Params::default() }
+        let base = V1Params::default();
+        let rounds = GbmParams { num_boost_round: 400, ..GbmParams::default() };
+        V1Params {
+            model: "v1r",
+            // Uncalibrated until Task 12 fits `calibration_table_v1r.json` and turns this on.
+            calibrate: false,
+            minutes: MinutesParams {
+                start: rounds.clone(),
+                sixty: rounds.clone(),
+                sub: rounds,
+                ..base.minutes.clone()
+            },
+            ..base
+        }
     }
 
     /// The params a model name stands for.
@@ -656,5 +669,14 @@ mod tests {
         assert_eq!(V1Params::for_model("v1").unwrap(), V1Params::default());
         assert_eq!(V1Params::for_model("v1r").unwrap(), V1Params::v1r());
         assert!(V1Params::for_model("nope").is_err());
+    }
+
+    #[test]
+    fn v1r_minutes_parts_have_400_rounds() {
+        let p = V1Params::v1r();
+        for part in [&p.minutes.start, &p.minutes.sixty, &p.minutes.sub] {
+            assert_eq!(part.num_boost_round, 400);
+        }
+        assert_eq!(V1Params::default().minutes.start.num_boost_round, 200);
     }
 }
