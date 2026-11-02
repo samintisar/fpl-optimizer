@@ -34,21 +34,24 @@ pub const MAX_HORIZON: i64 = HORIZON + 1;
 /// The registered models (Python's `MODELS`), by name.
 pub const MODELS: &[&str] = &["rolling", "ep_next", "ep_next_fade", "v1", "v1r"];
 
-/// A v1-family model (its frame has `p_play`, `e_minutes`, ...).
+/// The v1 family: models whose frame has `p_play`, `e_minutes`, ... (one list for everyone).
+pub const V1_FAMILY: &[&str] = &["v1", "v1r"];
+
+/// Whether `name` is a v1-family model.
 pub fn is_v1_family(name: &str) -> bool {
-    matches!(name, "v1" | "v1r")
+    V1_FAMILY.contains(&name)
 }
 
 /// Model components the parity gate checks on their own, fitted at the view's deadline
-/// (not the refit cutoff): name → (frame, fitted values); `v1` is the model itself (fitted
-/// at the refit cutoff), its xP frame and every component's fitted values.
+/// (not the refit cutoff): name → (frame, fitted values); `v1` and `v1r` are the models themselves
+/// (fitted at the refit cutoff), their xP frames and every component's fitted values.
 pub const COMPONENTS: &[&str] =
     &["team", "minutes", "availability", "shares", "components", "v1", "v1r"];
 
 pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Value)> {
     match name {
         "v1" => assemble::xp_v1_with_fit(view),
-        "v1r" => assemble::xp_v1_family_with_fit("v1r", view),
+        "v1r" => assemble::xp_v1r_with_fit(view),
         "team" => {
             let fit = team::fit_team(view, &team::TeamParams::default())?;
             Ok((team::team_lambdas(view, &fit)?, fit.to_json()))

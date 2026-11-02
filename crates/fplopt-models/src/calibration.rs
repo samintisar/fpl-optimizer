@@ -7,7 +7,7 @@
 
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 /// The V1Params fingerprint the table was fitted with (`CALIBRATION_PARAMS`).
@@ -22,12 +22,12 @@ pub static V1R_TABLE: LazyLock<Option<Value>> = LazyLock::new(|| {
     V1R_TABLE_TEXT.map(|t| serde_json::from_str(t).expect("calibration_table_v1r.json"))
 });
 
-/// The table of `model`, None if it has none.
-pub fn table_for(model: &str) -> Option<&'static Value> {
+/// The table of `model`: None if a v1-family model has none (yet), an error for any other name.
+pub fn table_for(model: &str) -> Result<Option<&'static Value>> {
     match model {
-        "v1" => Some(&TABLE),
-        "v1r" => V1R_TABLE.as_ref(),
-        _ => None,
+        "v1" => Ok(Some(&TABLE)),
+        "v1r" => Ok(V1R_TABLE.as_ref()),
+        other => bail!("not a v1-family model: {other:?}"),
     }
 }
 
@@ -124,7 +124,7 @@ fn maps(value: &Value) -> Result<Vec<(i64, Isotonic)>> {
 /// The calibration applied in `season`: the table's entry for it, the last entry for a
 /// later season, None before the first.
 pub fn calibration_for(model: &str, season: i64) -> Result<Option<Calibration>> {
-    let Some(table) = table_for(model) else { return Ok(None) };
+    let Some(table) = table_for(model)? else { return Ok(None) };
     let table = table["table"].as_array().context("calibration table: no 'table'")?;
     let mut chosen = None;
     for entry in table {

@@ -92,7 +92,8 @@ impl V1Params {
     /// `v1` with the research loop's keeps on (spec 2026-11-02-v1r-promotion). Each task of
     /// the plan turns one on here.
     pub fn v1r() -> Self {
-        V1Params { model: "v1r", ..V1Params::default() }
+        // Uncalibrated until Task 12 fits `calibration_table_v1r.json` and turns this on.
+        V1Params { model: "v1r", calibrate: false, ..V1Params::default() }
     }
 
     /// The params a model name stands for.
@@ -627,6 +628,11 @@ pub fn xp_v1_with_fit(view: &AsOfView) -> Result<(Table, serde_json::Value)> {
     xp_v1_family_with_fit("v1", view)
 }
 
+/// `xp_v1r` with the fit's values.
+pub fn xp_v1r_with_fit(view: &AsOfView) -> Result<(Table, serde_json::Value)> {
+    xp_v1_family_with_fit("v1r", view)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,8 +643,18 @@ mod tests {
         assert!(crate::COMPONENTS.contains(&"v1r"));
         assert_eq!(V1Params::default().model, "v1");
         assert_eq!(V1Params::v1r().model, "v1r");
-        // No v1r table yet: a calibrated v1r is refused, an uncalibrated one is fine.
+        // v1r has no table yet, so it runs uncalibrated (Task 12 turns calibration on).
+        assert!(!V1Params::v1r().calibrate);
         assert!(crate::calibration::calibration_for("v1r", 2023).unwrap().is_none());
         assert!(crate::calibration::calibration_for("v1", 2023).unwrap().is_some());
+        // A name outside the family is an error, not "no table".
+        assert!(crate::calibration::calibration_for("nope", 2023).is_err());
+    }
+
+    #[test]
+    fn for_model_maps_names_to_params() {
+        assert_eq!(V1Params::for_model("v1").unwrap(), V1Params::default());
+        assert_eq!(V1Params::for_model("v1r").unwrap(), V1Params::v1r());
+        assert!(V1Params::for_model("nope").is_err());
     }
 }

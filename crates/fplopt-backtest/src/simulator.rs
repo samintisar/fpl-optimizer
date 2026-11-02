@@ -81,7 +81,7 @@ impl Caches {
         self.pools.get_or_compute(view.deadline(), || pool_players(&player_pool(view)?))
     }
 
-    /// The model's xP frame at the view (v1: predicted with the memoized fit at its refit
+    /// The model's xP frame at the view (v1 family: predicted with the memoized fit at its refit
     /// cutoff, the same as calling the model).
     pub fn xp(&self, model: &str, view: &AsOfView) -> Result<Arc<Xp>> {
         self.xp.get_or_compute((model.to_owned(), view.deadline()), || {
