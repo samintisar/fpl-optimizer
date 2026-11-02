@@ -59,6 +59,7 @@ from fplopt.features.leakcheck import sample_deadlines  # noqa: E402
 from fplopt.features.store import DataStore  # noqa: E402
 from fplopt.models import MODELS, availability, components, minutes, shares, team  # noqa: E402
 from fplopt.models.assemble import V1Params, fit_v1, predict_v1  # noqa: E402
+from fplopt.seasons import HOLDOUT_SEASONS  # noqa: E402
 
 FAMILY = "rust parity"
 QUIET = {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_ADMIN_CHAT_ID": "", "HEALTHCHECK_PING_URL": ""}
@@ -204,13 +205,18 @@ def plan_one(text: str) -> list[str]:
 def compare_plans(
     binary: Path, work: Path, picked: list, data: Path, rust_name: str = "v1"
 ) -> dict[str, str]:
-    """Per deadline: '' if plan #1 is the same on both v1 frames, else what differs."""
+    """Per deadline: '' if plan #1 is the same on both v1 frames, else what differs. A solve
+    without a plan #1 is a difference, never a match (two identical errors used to pass), and
+    holdout-season deadlines are left out: `optimize plan` refuses them."""
     gameweeks = pd.read_parquet(
         data / "gameweek.parquet", columns=["season", "gw", "deadline_time"]
     )
+    env = {**os.environ, **QUIET, "FPLOPT_DATA_DIR": str(data)}
     out = {}
     for i, deadline in enumerate(picked):
         row = gameweeks[gameweeks["deadline_time"] == deadline].iloc[0]
+        if int(row["season"]) in HOLDOUT_SEASONS:
+            continue
         plans = {}
         for who in ("python", "rust"):
             name = rust_name if who == "rust" else "v1"
@@ -220,10 +226,11 @@ def compare_plans(
                 "--gw", str(int(row["gw"])), "--xp", "v1", "--xp-file", str(frame),
                 "--start", "template", "--no-chips",
             ]  # fmt: skip
-            done = subprocess.run(command, cwd=REPO, capture_output=True, text=True)
+            done = subprocess.run(command, cwd=REPO, env=env, capture_output=True, text=True)
             (work / who / f"{i:02d}" / "plan.txt").write_text(done.stdout + done.stderr)
             plans[who] = plan_one(done.stdout + done.stderr)
-        same = plans["python"] == plans["rust"]
+        solved = all(p and p[0] != "(no plan #1)" for p in plans.values())
+        same = solved and plans["python"] == plans["rust"]
         out[f"{i:02d} {deadline}"] = "" if same else f"{plans['python'][:2]} vs {plans['rust'][:2]}"
     return out
 
@@ -394,7 +401,12 @@ def main() -> int:
             if difference:
                 problems.append(f"{label} plan #1: {difference}")
         same = sum(not d for d in plan_results.values())
-        print(f"plan #1 (template): {same}/{len(plan_results)} the same", flush=True)
+        skipped = len(picked) - len(plan_results)
+        print(
+            f"plan #1 (template): {same}/{len(plan_results)} the same"
+            f" ({skipped} holdout-season deadlines not solvable, left out)",
+            flush=True,
+        )
     passed = not problems and all(results.values())
     print(f"\n{'PASS' if passed else 'FAIL'}: {sum(results.values())}/{len(results)} frames")
     for problem in problems[:40]:
