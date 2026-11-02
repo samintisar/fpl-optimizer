@@ -1203,8 +1203,9 @@ const ELO_HOME_ADVANTAGE: f64 = 60.0;
 pub const ELO_FEATURES: &[&str] = &["win_expectancy", "club_rating"];
 
 /// Per played (team_key, fixture_key) in `team_rating`: (expected_score, rating_before) of
-/// the side before the match (Python `_match_expectancy`: rows with a null fixture_key or
-/// expected_score dropped, a duplicate keeps the last row).
+/// the side before the match (research 1ff8914 `_match_expectancy`, 6e09a1c adds
+/// `rating_before`: rows with a null fixture_key or expected_score dropped, a duplicate
+/// keeps the last row).
 pub fn match_elo(view: &AsOfView) -> Result<HashMap<(i64, i64), (f64, f64)>> {
     let ratings = view.table(
         "team_rating",
@@ -1224,7 +1225,8 @@ pub fn match_elo(view: &AsOfView) -> Result<HashMap<(i64, i64), (f64, f64)>> {
 
 /// Per horizon (team_key, fixture_key): (win_expectancy, club_rating) from both clubs'
 /// newest `rating_after` before the deadline (by event_time, the last row winning; NaN
-/// without one; Python `_horizon_fixtures`). Blank GWs (no fixture) have no row, as there.
+/// without one; research 1ff8914 / 6e09a1c `_horizon_fixtures`). Blank GWs (no fixture)
+/// have no row, as there.
 pub fn horizon_elo(view: &AsOfView) -> Result<HashMap<(i64, i64), (f64, f64)>> {
     let ratings = view.table("team_rating", Some(&["team_key", "event_time", "rating_after"]))?;
     let team = ratings.i64("team_key")?;
@@ -1466,10 +1468,11 @@ mod tests {
         7 * gw * DAY
     }
 
-    /// Four clubs, two league fixtures a GW (kickoff a day after the deadline), and a
+    /// Four rated clubs, two league fixtures a GW (kickoff a day after the deadline), and a
     /// `team_rating` row per side of every fixture, visible two hours after kickoff. Plus a
-    /// rating row without a fixture, one without an expected score, and a later duplicate of
-    /// (club 1, its GW2 fixture) with other values.
+    /// rating row without a fixture, one without an expected score, one without a
+    /// rating_before, a later duplicate of (club 1, its GW2 fixture) with other values, and
+    /// clubs 5 and 6 (never rated) meeting in GW7 (fixture 72).
     fn synthetic_store() -> DataStore {
         let gws: Vec<i64> = (1..=GWS).collect();
         let gameweek = Table::new()
@@ -1490,6 +1493,11 @@ mod tests {
                 away.push(a);
             }
         }
+        fixture.push(72);
+        gw.push(7);
+        kickoff.push(deadline_of_gw(7) + DAY);
+        home.push(5);
+        away.push(6);
         let n = fixture.len();
         let schedule = Table::new()
             .with("fixture_key", Column::I64(fixture.clone()))
@@ -1511,12 +1519,15 @@ mod tests {
         let mut rating_fixture: Vec<Option<i64>> = Vec::new();
         let mut event = Vec::new();
         let mut available = Vec::new();
-        let mut before = Vec::new();
+        let mut before: Vec<Option<f64>> = Vec::new();
         let mut after = Vec::new();
         let mut score: Vec<Option<f64>> = Vec::new();
         let mut elo: HashMap<i64, f64> = (1..=4).map(|t| (t, 1400.0 + 50.0 * t as f64)).collect();
         for i in 0..n {
             let (h, a) = (home[i], away[i]);
+            if !elo.contains_key(&h) {
+                continue; // clubs 5 and 6 have no ratings
+            }
             let edge = elo[&h] - elo[&a] + 60.0;
             let expected = 1.0 / (1.0 + 10f64.powf(-edge / 400.0));
             for (t, s, delta) in [(h, expected, 7.0 + i as f64), (a, 1.0 - expected, -3.0)] {
@@ -1524,33 +1535,34 @@ mod tests {
                 rating_fixture.push(Some(fixture[i]));
                 event.push(kickoff[i]);
                 available.push(kickoff[i] + 2 * HOUR);
-                before.push(elo[&t]);
+                before.push(Some(elo[&t]));
                 after.push(elo[&t] + delta);
                 score.push(Some(s));
                 elo.insert(t, elo[&t] + delta);
             }
         }
-        // A rating row without a fixture (a season reset) and one without an expected score.
-        team.extend([2, 3]);
-        rating_fixture.extend([None, Some(999)]);
-        event.extend([DAY, DAY]);
-        available.extend([DAY, DAY]);
-        before.extend([1500.0, 1500.0]);
-        after.extend([1500.0, 1500.0]);
-        score.extend([Some(0.5), None]);
+        // Rating rows without a fixture (a season reset), without an expected score, and
+        // without a rating_before.
+        team.extend([2, 3, 4]);
+        rating_fixture.extend([None, Some(999), Some(998)]);
+        event.extend([DAY, DAY, DAY]);
+        available.extend([DAY, DAY, DAY]);
+        before.extend([Some(1500.0), Some(1500.0), None]);
+        after.extend([1500.0, 1500.0, 1500.0]);
+        score.extend([Some(0.5), None, Some(0.4)]);
         // A later duplicate of club 1's GW2 fixture: the last row wins.
         team.push(1);
-        rating_fixture.push(Some(21));
+        rating_fixture.push(Some(20));
         event.push(deadline_of_gw(2) + DAY);
         available.push(deadline_of_gw(2) + DAY + 3 * HOUR);
-        before.push(1234.0);
+        before.push(Some(1234.0));
         after.push(1240.0);
         score.push(Some(0.25));
         let team_rating = Table::new()
             .with("team_key", Column::I64(team))
             .with("fixture_key", Column::OptI64(rating_fixture))
             .with("event_time", Column::Ts(event))
-            .with("rating_before", Column::F64(before))
+            .with("rating_before", Column::OptF64(before))
             .with("rating_after", Column::F64(after))
             .with("expected_score", Column::OptF64(score))
             .with("available_at", Column::Ts(available));
@@ -1568,26 +1580,18 @@ mod tests {
         let store = synthetic_store();
         let view = store.as_of(deadline_of_gw(GWS));
         let elo = match_elo(&view).unwrap();
-        let ratings = view
-            .table(
-                "team_rating",
-                Some(&["team_key", "fixture_key", "expected_score", "rating_before"]),
-            )
-            .unwrap();
-        let (team, fixture) =
-            (ratings.i64("team_key").unwrap(), ratings.opt_i64("fixture_key").unwrap());
-        let (score, before) =
-            (ratings.opt_f64("expected_score").unwrap(), ratings.f64("rating_before").unwrap());
-        // Python: drop null fixture_key / expected_score rows, then keep the last duplicate.
-        let mut expected: HashMap<(i64, i64), (f64, f64)> = HashMap::new();
-        for i in 0..ratings.height() {
-            let (Some(f), Some(s)) = (fixture[i], score[i]) else { continue };
-            expected.insert((team[i], f), (s, before[i]));
-        }
-        assert!(expected.len() > 10);
-        assert_eq!(elo, expected);
-        assert_eq!(elo[&(1, 21)], (0.25, 1234.0));
+        // An ordinary side: club 2 away at club 1 in GW1, ratings 1500 vs 1450.
+        let (we, rating) = elo[&(2, 10)];
+        assert!((we - 0.4856128158340013).abs() < 1e-12);
+        assert_eq!(rating, 1500.0);
+        // A duplicate keeps the last row.
+        assert_eq!(elo[&(1, 20)], (0.25, 1234.0));
+        // A null expected_score drops the row; a null rating_before is NaN.
         assert!(!elo.contains_key(&(3, 999)));
+        assert_eq!(elo[&(4, 998)].0, 0.4);
+        assert!(elo[&(4, 998)].1.is_nan());
+        // The null-fixture row adds nothing: GW1–7 visible, 2 fixtures × 2 sides each, + 998.
+        assert_eq!(elo.len(), 7 * 2 * 2 + 1);
     }
 
     #[test]
@@ -1597,7 +1601,10 @@ mod tests {
         let elo = horizon_elo(&view).unwrap();
         assert!(!elo.is_empty());
         let mut by_fixture: HashMap<i64, f64> = HashMap::new();
-        for (&(_, fixture), &(we, _)) in &elo {
+        for (&(team, fixture), &(we, _)) in &elo {
+            if team > 4 {
+                continue; // unrated clubs: NaN (horizon_elo_is_nan_without_ratings)
+            }
             assert!(we > 0.0 && we < 1.0);
             *by_fixture.entry(fixture).or_default() += we;
         }
@@ -1632,7 +1639,17 @@ mod tests {
         assert_eq!(elo[&(3, 60)], (we, home));
         let we = 1.0 / (1.0 + 10f64.powf(-(away - home - 60.0) / 400.0));
         assert_eq!(elo[&(1, 60)], (we, away));
-        // The horizon runs from GW6 to the last GW (8): 3 GWs × 4 sides.
-        assert_eq!(elo.len(), 12);
+        // The horizon runs from GW6 to the last GW (8): 3 GWs × 4 sides, + fixture 72's two.
+        assert_eq!(elo.len(), 14);
+    }
+
+    #[test]
+    fn horizon_elo_is_nan_without_ratings() {
+        let store = synthetic_store();
+        let elo = horizon_elo(&store.as_of(deadline_of_gw(6))).unwrap();
+        for side in [(5, 72), (6, 72)] {
+            let (we, rating) = elo[&side];
+            assert!(we.is_nan() && rating.is_nan());
+        }
     }
 }

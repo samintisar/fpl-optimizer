@@ -2,9 +2,10 @@
 //! post-processing.
 //!
 //! **Parts** (each a `gbm::train` fit on `history::training_frame` rows, features
-//! `LAG_FEATURES`, then `ELO_FEATURES` with `elo_features`): P(start), P(60+ | start), P(sub appearance | no start); expected minutes
-//! from three weighted-mean constants. Training rows: every visible row outside a ban,
-//! weighted `season_decay ** age`; a part with fewer than `MIN_ROWS` rows (or one label value)
+//! `booster_features`: `LAG_FEATURES`, then `ELO_FEATURES` with `elo_features`): P(start),
+//! P(60+ | start), P(sub appearance | no start); expected minutes from three weighted-mean
+//! constants. Training rows: every visible row outside a ban, weighted
+//! `season_decay ** age`; a part with fewer than `MIN_ROWS` rows (or one label value)
 //! predicts its weighted label mean.
 //!
 //! **Post-processing**: horizon decay toward the long-run start rate; suspensions (p_start =
@@ -66,7 +67,7 @@ impl Default for MinutesParams {
 }
 
 /// The boosters' features: `LAG_FEATURES`, then `ELO_FEATURES` with `elo_features`.
-pub fn lag_features(params: &MinutesParams) -> Vec<&'static str> {
+pub fn booster_features(params: &MinutesParams) -> Vec<&'static str> {
     let mut out = LAG_FEATURES.to_vec();
     if params.elo_features {
         out.extend_from_slice(ELO_FEATURES);
@@ -87,9 +88,7 @@ fn with_elo(
     let elo = elo()?;
     let (team, fixture) = (table.i64("team_key")?, table.i64("fixture_key")?);
     let get = |i: usize| elo.get(&(team[i], fixture[i])).copied().unwrap_or((f64::NAN, f64::NAN));
-    let n = table.height();
-    let we: Vec<f64> = (0..n).map(|i| get(i).0).collect();
-    let rating: Vec<f64> = (0..n).map(|i| get(i).1).collect();
+    let (we, rating): (Vec<f64>, Vec<f64>) = (0..table.height()).map(get).unzip();
     Ok(table.with("win_expectancy", floats(we)).with("club_rating", floats(rating)))
 }
 
@@ -228,7 +227,7 @@ pub fn fit_minutes(
     let (short_m, short_w) = pick(&started_minutes, &sw, &|i| sixty[i] != 1.0);
     let sub = float_column(&benched, "sub")?;
     let (sub_m, sub_w) = pick(&float_column(&benched, "minutes")?, &bw, &|i| sub[i] == 1.0);
-    let features = lag_features(params);
+    let features = booster_features(params);
     Ok(MinutesFit {
         start: part(&rows, &weight, "start", &params.start, &features)?,
         sixty: part(&started, &sw, "sixty", &params.sixty, &features)?,
@@ -535,11 +534,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn elo_features_only_when_asked() {
+    fn booster_features_add_elo_only_when_asked() {
         let off = MinutesParams::default();
         let on = MinutesParams { elo_features: true, ..MinutesParams::default() };
-        assert_eq!(lag_features(&off), LAG_FEATURES.to_vec());
-        let with = lag_features(&on);
+        assert_eq!(booster_features(&off), LAG_FEATURES.to_vec());
+        let with = booster_features(&on);
         assert_eq!(&with[..LAG_FEATURES.len()], LAG_FEATURES);
         assert_eq!(&with[LAG_FEATURES.len()..], ELO_FEATURES);
     }
