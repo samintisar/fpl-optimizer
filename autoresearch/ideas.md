@@ -252,6 +252,14 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
       DISCARD on the min gain, idea 12.
     - DEF goal spread (2026-10-29): over-dispersed when pooled, small within a season;
       closed, idea 16.
+    - **Still there at the gbm-400 head** (2026-11-02, walk 05d4b12 h0, `diag-regulars.txt`,
+      `diag-fwd-starters.txt`): FWD starters at P(start) 0.7–0.85 lose 0.134 pts per row in
+      goals (5 of 6 seasons), 0.85–0.95 −0.066. Premium FWDs at 0.95+ gain +0.128 (n 246).
+      FWD starters' goals at their realized minutes are 0.94 of expected overall, 0.88 at
+      0.7–0.85 (2017–22: 0.94 0.91 0.85 0.80 0.77 1.05). No clean price pattern within the
+      band (£7.5–9.5m 0.84, ≥ £9.5m 0.82 at 0.7–0.85). It's the same over-trusted FWD
+      finishing as above, and the fix (a per-position `finishing_prior`) is still the user's
+      call.
 12. **Minutes given the appearance** (model; new 2026-10-27, one variant DISCARD on the min
     gain). Develop P(start) is calibrated in every band (head walk d228f87 h0,
     `diag-low-minutes.txt`), but E[minutes] is over-predicted for low-p_start players at
@@ -261,6 +269,13 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
     78.5–87.1. `sub-minutes` (m_sub linear in the row's P(start)): MSE h0 −0.00011, 5 of 6
     seasons better, components unchanged (commit 5b645bc on the server hub). The start
     half is smaller still. Don't retry without a points-level reason.
+    - 2026-11-02, head walk 05d4b12 h0 (`diag-fwd-starters.txt`), the start half: MID / FWD
+      starters play less than `m_start` at low P(start) (MID ≤ 0.5 82.7 vs 76.9, 0.5–0.7 84.4
+      vs 80.2, 0.7–0.85 85.3 vs 82.8; FWD 82.9 vs 75.0, 84.5 vs 78.8, 85.5 vs 82.3). DEF and GK
+      are within 1–2 minutes. It is not a points lead. MID goals per 90 at the *realized*
+      minutes are 1.03–1.04 of expected in those bands, so the minutes excess cancels a rate
+      deficit and MID goals are right in points. Fixing m_start would help FWDs and hurt MIDs.
+      Not tested.
 13. **The crowd: ownership and deadline transfers** (model; new 2026-10-28, **blocked on
     the harness**, see *Needs the user*; re-checked 2026-10-29 after the harness hash
     changed: still the same KeyErrors). No model reads FPL managers' choices. Within a
@@ -396,6 +411,22 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 `diag-finish-price-over.txt`).
 
 ## Needs the user (not the loop's to do)
+
+- **2026-11-02: no experiments tonight.** GW9 wasn't checked yet (`last_checked_gw` 8), so
+  there was no monitor. Three new slices of the gbm-400 head walk (05d4b12, h0, 2017–22)
+  found nothing testable with a mechanism:
+  - `diag-newcomers.txt`: promoted clubs, new to the club, new to the league and season
+    phase are all within ±0.08 pts, and the largest cell is < 0.25 bp of SSE.
+  - `diag-regulars.txt`: regulars (P(start) > 0.7) are under-predicted +0.03 to +0.05 pts,
+    and the largest piece is the clean sheet (+0.02 to +0.035; DEF +0.05 to +0.06). That's
+    idea 6's CS-while-on, tried twice. Starting keepers are +0.16 (ideas 9–10).
+  - `diag-fwd-starters.txt`: FWD rotation starters' goals (idea 11, finishing) and the start
+    minutes (idea 12).
+
+  Every cell left is ≤ ~3 bp of total SSE (≤ 0.001 MSE if fully removed). The remaining
+  gains need new information in the minutes model: the crowd in the harness (idea 13).
+  The other open items are still yours: the calibration table for decision experiments,
+  the per-position finishing prior (idea 11), and the h1–5 / keeper path (ideas 9, 10).
 
 - **2026-11-01: the loop is out of testable model lines.** Two variants tonight (GBM
   per-part rounds, start-part leaves; both DISCARD), and the GBM line is now closed (idea 18).
