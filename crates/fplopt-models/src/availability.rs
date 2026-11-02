@@ -15,13 +15,14 @@ use std::sync::LazyLock;
 
 use anyhow::Result;
 use chrono::{DateTime, Datelike, NaiveDate};
-use fplopt_features::history::{prediction_frame, training_frame};
+use fplopt_features::history::prediction_frame;
 use fplopt_store::{AsOfView, Micros, Table};
 use regex::Regex;
 
 use crate::gbm::float_column;
 use crate::minutes::{
-    Minutes, MinutesFit, MinutesParams, conditionals, finish_minutes, part, season_weights,
+    Minutes, MinutesFit, MinutesParams, conditionals, finish_minutes, history_frame, lag_features,
+    part, season_weights,
 };
 use crate::optim::{Mat, trust_exact};
 use crate::util::{expit, logit, np_clip, np_sum, opt_ts};
@@ -164,7 +165,7 @@ fn out_of_fold_start(rows: &Table, season: i64, params: &MinutesParams) -> Resul
         let train: Vec<usize> =
             (0..rows.height()).filter(|&i| odd[i] != fold && banned[i] == 0.0).collect();
         let w: Vec<f64> = train.iter().map(|&i| weight[i]).collect();
-        let fitted = part(&rows.take(&train), &w, "start", &params.start)?;
+        let fitted = part(&rows.take(&train), &w, "start", &params.start, &lag_features(params))?;
         let target: Vec<usize> = (0..rows.height()).filter(|&i| odd[i] == fold).collect();
         let predicted = fitted.predict(&rows.take(&target))?;
         for (k, &i) in target.iter().enumerate() {
@@ -293,7 +294,7 @@ pub fn fit_availability(
     let rows = match rows {
         Some(rows) => rows,
         None => {
-            built = training_frame(view)?;
+            built = history_frame(view, &minutes_fit.params)?;
             &built
         }
     };

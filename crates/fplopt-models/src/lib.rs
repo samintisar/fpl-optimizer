@@ -61,8 +61,8 @@ pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Valu
             Ok((minutes::predict_minutes(view, &fit)?.to_table(), fit.to_json()?))
         }
         "availability" => {
-            let history = fplopt_features::history::training_frame(view)?;
             let params = minutes::MinutesParams::default();
+            let history = minutes::history_frame(view, &params)?;
             let fit = minutes::fit_minutes(view, &params, Some(&history))?;
             let layer = availability::fit_availability(view, &fit, Some(&history), true)?;
             let adjusted =
@@ -72,8 +72,8 @@ pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Valu
         "shares" => {
             let team_fit = team::fit_team(view, &team::TeamParams::default())?;
             let lambdas = team::team_lambdas(view, &team_fit)?;
-            let history = fplopt_features::history::training_frame(view)?;
             let params = minutes::MinutesParams::default();
+            let history = minutes::history_frame(view, &params)?;
             let fit = minutes::fit_minutes(view, &params, Some(&history))?;
             let layer = availability::fit_availability(view, &fit, Some(&history), true)?;
             let adjusted =
@@ -85,8 +85,8 @@ pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Valu
         "components" => {
             let team_fit = team::fit_team(view, &team::TeamParams::default())?;
             let lambdas = team::team_lambdas(view, &team_fit)?;
-            let history = fplopt_features::history::training_frame(view)?;
             let params = minutes::MinutesParams::default();
+            let history = minutes::history_frame(view, &params)?;
             let fit = minutes::fit_minutes(view, &params, Some(&history))?;
             let layer = availability::fit_availability(view, &fit, Some(&history), true)?;
             let adjusted =

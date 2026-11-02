@@ -1195,6 +1195,69 @@ fn horizon_fixtures(view: &AsOfView, season: i64) -> Result<Vec<HorizonFixture>>
     Ok(out)
 }
 
+/// fplopt.build.elo's home advantage (`win_expectancy` at prediction).
+const ELO_HOME_ADVANTAGE: f64 = 60.0;
+
+/// The Elo lag features the v1r minutes model adds after `LAG_FEATURES` (research keeps
+/// 1ff8914, 6e09a1c): his club's expected score in the fixture and its own rating before it.
+pub const ELO_FEATURES: &[&str] = &["win_expectancy", "club_rating"];
+
+/// Per played (team_key, fixture_key) in `team_rating`: (expected_score, rating_before) of
+/// the side before the match (Python `_match_expectancy`: rows with a null fixture_key or
+/// expected_score dropped, a duplicate keeps the last row).
+pub fn match_elo(view: &AsOfView) -> Result<HashMap<(i64, i64), (f64, f64)>> {
+    let ratings = view.table(
+        "team_rating",
+        Some(&["team_key", "fixture_key", "expected_score", "rating_before"]),
+    )?;
+    let team = ratings.i64("team_key")?;
+    let fixture = ratings.opt_i64("fixture_key")?;
+    let score = ratings.opt_f64("expected_score")?;
+    let before = ratings.opt_f64("rating_before")?;
+    let mut out = HashMap::new();
+    for i in 0..ratings.height() {
+        let (Some(f), Some(s)) = (fixture[i], score[i]) else { continue };
+        out.insert((team[i], f), (s, before[i].unwrap_or(f64::NAN)));
+    }
+    Ok(out)
+}
+
+/// Per horizon (team_key, fixture_key): (win_expectancy, club_rating) from both clubs'
+/// newest `rating_after` before the deadline (by event_time, the last row winning; NaN
+/// without one; Python `_horizon_fixtures`). Blank GWs (no fixture) have no row, as there.
+pub fn horizon_elo(view: &AsOfView) -> Result<HashMap<(i64, i64), (f64, f64)>> {
+    let ratings = view.table("team_rating", Some(&["team_key", "event_time", "rating_after"]))?;
+    let team = ratings.i64("team_key")?;
+    let time = ratings.opt_i64("event_time")?;
+    let rating = ratings.opt_f64("rating_after")?;
+    let mut order: Vec<usize> = (0..ratings.height()).collect();
+    // sort_values(["team_key", "event_time"], kind="mergesort"): stable, NaT last.
+    order.sort_by_key(|&i| (team[i], time[i].is_none(), time[i]));
+    let mut elo: HashMap<i64, f64> = HashMap::new();
+    for i in order {
+        elo.insert(team[i], rating[i].unwrap_or(f64::NAN));
+    }
+    let upcoming = upcoming_fixtures(view)?;
+    let teams = upcoming.i64("team_key")?;
+    let fixtures = upcoming.opt_i64("fixture_key")?;
+    let opponents = upcoming.opt_i64("opponent_team_key")?;
+    let home = upcoming.opt_bool("is_home")?;
+    let lookup = |t: Option<i64>| t.and_then(|t| elo.get(&t).copied()).unwrap_or(f64::NAN);
+    let mut out = HashMap::new();
+    for i in 0..upcoming.height() {
+        let Some(fixture) = fixtures[i] else { continue };
+        let sign = match home[i] {
+            Some(true) => 1.0,
+            Some(false) => -1.0,
+            None => f64::NAN,
+        };
+        let own = lookup(Some(teams[i]));
+        let edge = own - lookup(opponents[i]) + sign * ELO_HOME_ADVANTAGE;
+        out.insert((teams[i], fixture), (1.0 / (1.0 + 10f64.powf(-edge / 400.0)), own));
+    }
+    Ok(out)
+}
+
 /// One row per pool player and horizon fixture of his club: keys, LAG_FEATURES as of the
 /// deadline and `ban_kind`; sorted by (player_key, horizon, kickoff_time, fixture_key).
 pub fn prediction_frame(view: &AsOfView) -> Result<Table> {
@@ -1387,4 +1450,189 @@ pub fn prediction_frame(view: &AsOfView) -> Result<Table> {
         .collect();
     out.push("ban_kind", floats(ban_kind));
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use fplopt_store::DataStore;
+
+    use super::*;
+
+    const SEASON: i64 = 2023;
+    const GWS: i64 = 8;
+    const HOUR: Micros = 3_600_000_000;
+
+    fn deadline_of_gw(gw: i64) -> Micros {
+        7 * gw * DAY
+    }
+
+    /// Four clubs, two league fixtures a GW (kickoff a day after the deadline), and a
+    /// `team_rating` row per side of every fixture, visible two hours after kickoff. Plus a
+    /// rating row without a fixture, one without an expected score, and a later duplicate of
+    /// (club 1, its GW2 fixture) with other values.
+    fn synthetic_store() -> DataStore {
+        let gws: Vec<i64> = (1..=GWS).collect();
+        let gameweek = Table::new()
+            .with("season", Column::I64(vec![SEASON; gws.len()]))
+            .with("gw", Column::I64(gws.clone()))
+            .with("gw_index", Column::I64(gws.clone()))
+            .with("deadline_time", Column::Ts(gws.iter().map(|&g| deadline_of_gw(g)).collect()))
+            .with("available_at", Column::Ts(vec![0; gws.len()]));
+        let (mut fixture, mut gw, mut kickoff, mut home, mut away) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for g in 1..=GWS {
+            let pairs = if g % 2 == 1 { [(1, 2), (3, 4)] } else { [(3, 1), (4, 2)] };
+            for (k, (h, a)) in pairs.into_iter().enumerate() {
+                fixture.push(g * 10 + k as i64);
+                gw.push(g);
+                kickoff.push(deadline_of_gw(g) + DAY);
+                home.push(h);
+                away.push(a);
+            }
+        }
+        let n = fixture.len();
+        let schedule = Table::new()
+            .with("fixture_key", Column::I64(fixture.clone()))
+            .with("season", Column::I64(vec![SEASON; n]))
+            .with("gw", Column::I64(gw.clone()))
+            .with("gw_index", Column::I64(gw))
+            .with("kickoff_time", Column::Ts(kickoff.clone()))
+            .with("home_team_key", Column::I64(home.clone()))
+            .with("away_team_key", Column::I64(away.clone()))
+            .with("schedule_source", Column::Str(vec!["final".to_string(); n]))
+            .with("available_at", Column::Ts(vec![0; n]));
+        let fixture_snapshot = Table::new()
+            .with("snapshot_at", Column::Ts(Vec::new()))
+            .with("fixture_key", Column::I64(Vec::new()))
+            .with("season", Column::I64(Vec::new()))
+            .with("available_at", Column::Ts(Vec::new()));
+
+        let mut team = Vec::new();
+        let mut rating_fixture: Vec<Option<i64>> = Vec::new();
+        let mut event = Vec::new();
+        let mut available = Vec::new();
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        let mut score: Vec<Option<f64>> = Vec::new();
+        let mut elo: HashMap<i64, f64> = (1..=4).map(|t| (t, 1400.0 + 50.0 * t as f64)).collect();
+        for i in 0..n {
+            let (h, a) = (home[i], away[i]);
+            let edge = elo[&h] - elo[&a] + 60.0;
+            let expected = 1.0 / (1.0 + 10f64.powf(-edge / 400.0));
+            for (t, s, delta) in [(h, expected, 7.0 + i as f64), (a, 1.0 - expected, -3.0)] {
+                team.push(t);
+                rating_fixture.push(Some(fixture[i]));
+                event.push(kickoff[i]);
+                available.push(kickoff[i] + 2 * HOUR);
+                before.push(elo[&t]);
+                after.push(elo[&t] + delta);
+                score.push(Some(s));
+                elo.insert(t, elo[&t] + delta);
+            }
+        }
+        // A rating row without a fixture (a season reset) and one without an expected score.
+        team.extend([2, 3]);
+        rating_fixture.extend([None, Some(999)]);
+        event.extend([DAY, DAY]);
+        available.extend([DAY, DAY]);
+        before.extend([1500.0, 1500.0]);
+        after.extend([1500.0, 1500.0]);
+        score.extend([Some(0.5), None]);
+        // A later duplicate of club 1's GW2 fixture: the last row wins.
+        team.push(1);
+        rating_fixture.push(Some(21));
+        event.push(deadline_of_gw(2) + DAY);
+        available.push(deadline_of_gw(2) + DAY + 3 * HOUR);
+        before.push(1234.0);
+        after.push(1240.0);
+        score.push(Some(0.25));
+        let team_rating = Table::new()
+            .with("team_key", Column::I64(team))
+            .with("fixture_key", Column::OptI64(rating_fixture))
+            .with("event_time", Column::Ts(event))
+            .with("rating_before", Column::F64(before))
+            .with("rating_after", Column::F64(after))
+            .with("expected_score", Column::OptF64(score))
+            .with("available_at", Column::Ts(available));
+        DataStore::from_tables(HashMap::from([
+            ("gameweek".to_string(), gameweek),
+            ("schedule".to_string(), schedule),
+            ("fixture_snapshot".to_string(), fixture_snapshot),
+            ("team_rating".to_string(), team_rating),
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn match_elo_is_the_matchs_rating_row() {
+        let store = synthetic_store();
+        let view = store.as_of(deadline_of_gw(GWS));
+        let elo = match_elo(&view).unwrap();
+        let ratings = view
+            .table(
+                "team_rating",
+                Some(&["team_key", "fixture_key", "expected_score", "rating_before"]),
+            )
+            .unwrap();
+        let (team, fixture) =
+            (ratings.i64("team_key").unwrap(), ratings.opt_i64("fixture_key").unwrap());
+        let (score, before) =
+            (ratings.opt_f64("expected_score").unwrap(), ratings.f64("rating_before").unwrap());
+        // Python: drop null fixture_key / expected_score rows, then keep the last duplicate.
+        let mut expected: HashMap<(i64, i64), (f64, f64)> = HashMap::new();
+        for i in 0..ratings.height() {
+            let (Some(f), Some(s)) = (fixture[i], score[i]) else { continue };
+            expected.insert((team[i], f), (s, before[i]));
+        }
+        assert!(expected.len() > 10);
+        assert_eq!(elo, expected);
+        assert_eq!(elo[&(1, 21)], (0.25, 1234.0));
+        assert!(!elo.contains_key(&(3, 999)));
+    }
+
+    #[test]
+    fn horizon_elo_sides_sum_to_one() {
+        let store = synthetic_store();
+        let view = store.as_of(deadline_of_gw(6));
+        let elo = horizon_elo(&view).unwrap();
+        assert!(!elo.is_empty());
+        let mut by_fixture: HashMap<i64, f64> = HashMap::new();
+        for (&(_, fixture), &(we, _)) in &elo {
+            assert!(we > 0.0 && we < 1.0);
+            *by_fixture.entry(fixture).or_default() += we;
+        }
+        for total in by_fixture.values() {
+            assert!((total - 1.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn horizon_elo_uses_each_clubs_newest_rating() {
+        let store = synthetic_store();
+        let view = store.as_of(deadline_of_gw(6));
+        let ratings =
+            view.table("team_rating", Some(&["team_key", "event_time", "rating_after"])).unwrap();
+        let (team, time, after) = (
+            ratings.i64("team_key").unwrap(),
+            ratings.i64("event_time").unwrap(),
+            ratings.f64("rating_after").unwrap(),
+        );
+        // Python: sort by (team_key, event_time) stably, keep the last row per club.
+        let mut newest: HashMap<i64, (Micros, f64)> = HashMap::new();
+        for i in 0..ratings.height() {
+            let e = newest.entry(team[i]).or_insert((time[i], after[i]));
+            if time[i] >= e.0 {
+                *e = (time[i], after[i]);
+            }
+        }
+        let elo = horizon_elo(&view).unwrap();
+        // GW6 fixture 60: club 3 at home to club 1.
+        let (home, away) = (newest[&3].1, newest[&1].1);
+        let we = 1.0 / (1.0 + 10f64.powf(-(home - away + 60.0) / 400.0));
+        assert_eq!(elo[&(3, 60)], (we, home));
+        let we = 1.0 / (1.0 + 10f64.powf(-(away - home - 60.0) / 400.0));
+        assert_eq!(elo[&(1, 60)], (we, away));
+        // The horizon runs from GW6 to the last GW (8): 3 GWs × 4 sides.
+        assert_eq!(elo.len(), 12);
+    }
 }

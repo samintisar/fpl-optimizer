@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{Result, bail};
 use fplopt_build::scoring::{Rules, backtest_rules, default_config_dir};
 use fplopt_features::baseline::{HORIZON, player_pool, upcoming_fixtures};
-use fplopt_features::history::training_frame;
 use fplopt_features::util::{Kahan, floats};
 use fplopt_store::{AsOfView, Column, Table};
 
@@ -24,7 +23,9 @@ use crate::components::{
 };
 use crate::fitted::{REFIT_EVERY, refit_deadline};
 use crate::gbm::GbmParams;
-use crate::minutes::{MinutesFit, MinutesParams, conditionals, fit_minutes, predict_minutes};
+use crate::minutes::{
+    MinutesFit, MinutesParams, conditionals, fit_minutes, history_frame, predict_minutes,
+};
 use crate::shares::{SharesFit, SharesParams, fit_shares, predict_shares};
 use crate::team::{TeamFit, TeamParams, fit_team, team_lambdas};
 use crate::util::{np_clip, np_maximum, np_minimum, np_sum};
@@ -103,6 +104,7 @@ impl V1Params {
                 start: rounds.clone(),
                 sixty: rounds.clone(),
                 sub: rounds,
+                elo_features: true,
                 ..base.minutes.clone()
             },
             ..base
@@ -131,7 +133,7 @@ pub struct V1Fit {
 /// Every component fit on the rows visible in `view` (the refit cutoff's view).
 pub fn fit_v1(view: &AsOfView, params: &V1Params) -> Result<V1Fit> {
     let team = fit_team(view, &params.team)?;
-    let history = training_frame(view)?;
+    let history = history_frame(view, &params.minutes)?;
     let minutes = fit_minutes(view, &params.minutes, Some(&history))?;
     let availability = fit_availability(view, &minutes, Some(&history), params.back_split)?;
     let shares = fit_shares(view, &params.shares)?;

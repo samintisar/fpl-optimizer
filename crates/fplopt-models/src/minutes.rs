@@ -2,7 +2,7 @@
 //! post-processing.
 //!
 //! **Parts** (each a `gbm::train` fit on `history::training_frame` rows, features
-//! `LAG_FEATURES`): P(start), P(60+ | start), P(sub appearance | no start); expected minutes
+//! `LAG_FEATURES`, then `ELO_FEATURES` with `elo_features`): P(start), P(60+ | start), P(sub appearance | no start); expected minutes
 //! from three weighted-mean constants. Training rows: every visible row outside a ban,
 //! weighted `season_decay ** age`; a part with fewer than `MIN_ROWS` rows (or one label value)
 //! predicts its weighted label mean.
@@ -16,7 +16,10 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use fplopt_features::bans::{BAN_CERTAIN, BAN_LIKELY};
-use fplopt_features::history::{LAG_FEATURES, prediction_frame, training_frame};
+use fplopt_features::history::{
+    ELO_FEATURES, LAG_FEATURES, horizon_elo, match_elo, prediction_frame, training_frame,
+};
+use fplopt_features::util::floats;
 use fplopt_store::{AsOfView, Column, Table};
 
 use crate::gbm::{Gbm, GbmParams, float_column, train};
@@ -41,6 +44,8 @@ pub struct MinutesParams {
     pub max_shift: f64,
     pub max_scale: f64,
     pub ban_residual: bool,
+    /// Append `history::ELO_FEATURES` to the lag features (v1r).
+    pub elo_features: bool,
 }
 
 impl Default for MinutesParams {
@@ -55,8 +60,43 @@ impl Default for MinutesParams {
             max_shift: 1.0,
             max_scale: 1.25,
             ban_residual: false,
+            elo_features: false,
         }
     }
+}
+
+/// The boosters' features: `LAG_FEATURES`, then `ELO_FEATURES` with `elo_features`.
+pub fn lag_features(params: &MinutesParams) -> Vec<&'static str> {
+    let mut out = LAG_FEATURES.to_vec();
+    if params.elo_features {
+        out.extend_from_slice(ELO_FEATURES);
+    }
+    out
+}
+
+/// `table` (rows with team_key, fixture_key) with the Elo columns from `elo` (NaN when a
+/// key is missing); unchanged without `elo_features`.
+fn with_elo(
+    table: Table,
+    params: &MinutesParams,
+    elo: impl FnOnce() -> Result<HashMap<(i64, i64), (f64, f64)>>,
+) -> Result<Table> {
+    if !params.elo_features {
+        return Ok(table);
+    }
+    let elo = elo()?;
+    let (team, fixture) = (table.i64("team_key")?, table.i64("fixture_key")?);
+    let get = |i: usize| elo.get(&(team[i], fixture[i])).copied().unwrap_or((f64::NAN, f64::NAN));
+    let n = table.height();
+    let we: Vec<f64> = (0..n).map(|i| get(i).0).collect();
+    let rating: Vec<f64> = (0..n).map(|i| get(i).1).collect();
+    Ok(table.with("win_expectancy", floats(we)).with("club_rating", floats(rating)))
+}
+
+/// The minutes model's training frame: `training_frame` plus the Elo columns if asked
+/// (shared with the availability fit, like Python's `history`).
+pub fn history_frame(view: &AsOfView, params: &MinutesParams) -> Result<Table> {
+    with_elo(training_frame(view)?, params, || match_elo(view))
 }
 
 /// A fitted part: a booster, or its weighted label mean on too few rows.
@@ -105,13 +145,19 @@ fn nunique(values: &[f64]) -> usize {
 }
 
 /// `_part`: a booster on `rows` (a training frame subset, its weights), or a constant.
-pub(crate) fn part(table: &Table, weight: &[f64], label: &str, params: &GbmParams) -> Result<Part> {
+pub(crate) fn part(
+    table: &Table,
+    weight: &[f64],
+    label: &str,
+    params: &GbmParams,
+    features: &[&'static str],
+) -> Result<Part> {
     let labels = float_column(table, label)?;
     if table.height() < MIN_ROWS || nunique(&labels) < 2 {
         return Ok(Part::Constant(weighted_mean(&labels, weight, DEFAULT_RATE)));
     }
     let with_weight = table.clone().with("weight", Column::F64(weight.to_vec()));
-    Ok(Part::Gbm(train(&with_weight, LAG_FEATURES, label, Some("weight"), params)?))
+    Ok(Part::Gbm(train(&with_weight, features, label, Some("weight"), params)?))
 }
 
 /// `_weighted`: season_decay ** max(season − row season, 0).
@@ -153,7 +199,7 @@ pub fn fit_minutes(
     let all = match rows {
         Some(rows) => rows,
         None => {
-            built = training_frame(view)?;
+            built = history_frame(view, params)?;
             &built
         }
     };
@@ -182,10 +228,11 @@ pub fn fit_minutes(
     let (short_m, short_w) = pick(&started_minutes, &sw, &|i| sixty[i] != 1.0);
     let sub = float_column(&benched, "sub")?;
     let (sub_m, sub_w) = pick(&float_column(&benched, "minutes")?, &bw, &|i| sub[i] == 1.0);
+    let features = lag_features(params);
     Ok(MinutesFit {
-        start: part(&rows, &weight, "start", &params.start)?,
-        sixty: part(&started, &sw, "sixty", &params.sixty)?,
-        sub: part(&benched, &bw, "sub", &params.sub)?,
+        start: part(&rows, &weight, "start", &params.start, &features)?,
+        sixty: part(&started, &sw, "sixty", &params.sixty, &features)?,
+        sub: part(&benched, &bw, "sub", &params.sub, &features)?,
         minutes_sixty: weighted_mean(&long_m, &long_w, 87.0),
         minutes_short: weighted_mean(&short_m, &short_w, 45.0),
         minutes_sub: weighted_mean(&sub_m, &sub_w, 18.0),
@@ -414,7 +461,7 @@ pub(crate) fn keys(frame: &Table) -> Result<Vec<Key>> {
 /// Per pool player and horizon fixture: the minutes frame.
 pub fn predict_minutes(view: &AsOfView, fit: &MinutesFit) -> Result<Minutes> {
     let params = &fit.params;
-    let frame = prediction_frame(view)?;
+    let frame = with_elo(prediction_frame(view)?, params, || horizon_elo(view))?;
     let p_model = fit.start.predict(&frame)?;
     let c60 = fit.sixty.predict(&frame)?;
     let mut csub = fit.sub.predict(&frame)?;
@@ -478,5 +525,38 @@ impl MinutesFit {
             "ban_start_likely": self.ban_start_likely,
             "ban_sub_likely": self.ban_sub_likely,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fplopt_features::history::ELO_FEATURES;
+
+    use super::*;
+
+    #[test]
+    fn elo_features_only_when_asked() {
+        let off = MinutesParams::default();
+        let on = MinutesParams { elo_features: true, ..MinutesParams::default() };
+        assert_eq!(lag_features(&off), LAG_FEATURES.to_vec());
+        let with = lag_features(&on);
+        assert_eq!(&with[..LAG_FEATURES.len()], LAG_FEATURES);
+        assert_eq!(&with[LAG_FEATURES.len()..], ELO_FEATURES);
+    }
+
+    #[test]
+    fn with_elo_appends_the_columns_or_nan() {
+        let table = Table::new()
+            .with("team_key", Column::I64(vec![1, 2]))
+            .with("fixture_key", Column::I64(vec![10, 10]));
+        let elo = HashMap::from([((1, 10), (0.6, 1500.0))]);
+        let off = with_elo(table.clone(), &MinutesParams::default(), || unreachable!()).unwrap();
+        assert_eq!(off, table);
+        let on = MinutesParams { elo_features: true, ..MinutesParams::default() };
+        let out = with_elo(table, &on, || Ok(elo)).unwrap();
+        let we = float_column(&out, "win_expectancy").unwrap();
+        let rating = float_column(&out, "club_rating").unwrap();
+        assert_eq!((we[0], rating[0]), (0.6, 1500.0));
+        assert!(we[1].is_nan() && rating[1].is_nan());
     }
 }
