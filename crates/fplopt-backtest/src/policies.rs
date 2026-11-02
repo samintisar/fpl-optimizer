@@ -25,7 +25,7 @@ use fplopt_optimize::chips::make_scenario;
 use fplopt_optimize::model::{SolveError, solve_plan};
 use fplopt_optimize::plans::{GwPlan, Plan};
 use fplopt_optimize::state::best_xi;
-use fplopt_optimize::{OptimizerParams, PlanInput, Search, XpFrame, optimize};
+use fplopt_optimize::{OptimizerParams, PlanInput, Search, XpFrame, optimize, py_sum};
 use fplopt_store::{AsOfView, Table};
 use sha1::{Digest, Sha1};
 
@@ -618,10 +618,9 @@ fn table_tag(table: &BTreeMap<String, Vec<f64>>) -> String {
     let parts: Vec<String> = table
         .iter()
         .map(|(k, v)| {
-            let mut checksum = 0.0;
-            for (i, x) in v.iter().enumerate() {
-                checksum += (i + 1) as f64 * x;
-            }
+            // Python's `sum()` (compensated): a plain loop can differ in the last bit and so
+            // in the 3rd decimal (2559.4185 rounds either way; chip_shrink=0.75's FH table)
+            let checksum = py_sum(v.iter().enumerate().map(|(i, x)| (i + 1) as f64 * x));
             format!("{k}:{:.2}-{:.2}#{checksum:.3}", v[0], v[v.len() - 1])
         })
         .collect();
@@ -877,4 +876,38 @@ pub fn chip_gains(
         ("gain_wc".to_owned(), wc),
         ("blanks".to_owned(), Some(blanks(ctx)? as f64)),
     ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_tag_sums_like_python() {
+        // chip_shrink=0.75 × the estimated Free Hit row: Python's sum() gives 2559.4185
+        // (→ .419), a plain loop 2559.4184999999998 (→ .418)
+        let row = vec![
+            4.58955,
+            7.264049999999999,
+            9.10365,
+            10.3932,
+            10.56705,
+            11.093175,
+            11.4309,
+            11.604375000000001,
+            12.815100000000001,
+            13.008375000000001,
+            13.199025,
+            13.5231,
+            13.597724999999999,
+            13.604625000000002,
+            13.6524,
+            13.819875,
+            14.4327,
+            14.9334,
+            16.7889,
+        ];
+        let table = BTreeMap::from([("freehit".to_string(), row)]);
+        assert_eq!(table_tag(&table), "freehit:4.59-16.79#2559.419");
+    }
 }
