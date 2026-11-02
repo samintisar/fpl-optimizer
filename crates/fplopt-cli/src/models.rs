@@ -11,6 +11,10 @@ use fplopt_features::leakcheck::fmt_micros;
 pub enum ModelsJob {
     /// Walk-forward xP and decision metrics of models over seasons.
     Eval(crate::models_eval::EvalArgs),
+    /// Fit a v1-family model's calibration table (Python `dev/calibrate_v1.py`, the
+    /// p_start part only).
+    #[command(subcommand)]
+    Calibrate(crate::calibrate::CalibrateJob),
     /// Build the plan context for the next deadline after --now from data/ (no rebuild) and
     /// write it under <out>/ as `live prepare` would (the batch 6 gate's entry point).
     Context {

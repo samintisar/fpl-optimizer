@@ -12,6 +12,7 @@
 mod backtest;
 mod bench;
 mod bot;
+mod calibrate;
 mod chips;
 mod holdout;
 mod live;
@@ -290,6 +291,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }))
         }
         Command::Models { command: models::ModelsJob::Eval(args) } => models_eval::run(&args),
+        Command::Models { command: models::ModelsJob::Calibrate(job) } => Ok(calibrate::run(&job)),
         Command::Models { command: models::ModelsJob::Context { now, out } } => {
             Ok(run_job("models context", |ctx| models::context(&ctx.settings.data_dir, &now, &out)))
         }

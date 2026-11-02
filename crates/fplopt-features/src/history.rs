@@ -122,7 +122,7 @@ impl Matches {
 
 /// Inferred starters per row: per (fixture, team) the `N_STARTERS` rows with the most
 /// minutes, ties by player_key; only rows with minutes > 0.
-fn infer_starts(fixture: &[i64], team: &[i64], minutes: &[i64], player: &[i64]) -> Vec<bool> {
+pub fn infer_starts(fixture: &[i64], team: &[i64], minutes: &[i64], player: &[i64]) -> Vec<bool> {
     let mut order: Vec<usize> = (0..fixture.len()).collect();
     order.sort_by_key(|&i| (fixture[i], team[i], std::cmp::Reverse(minutes[i]), player[i]));
     let mut out = vec![false; fixture.len()];

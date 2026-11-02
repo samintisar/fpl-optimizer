@@ -123,6 +123,13 @@ impl V1Params {
         }
     }
 
+    /// The settings a calibration table was fitted for (`Debug` of the params with
+    /// `calibrate` on): what a Rust-written table records as `params` (v1's file keeps
+    /// Python's `calibration_fingerprint` string instead).
+    pub fn fingerprint(&self) -> String {
+        format!("{:?}", V1Params { calibrate: true, ..self.clone() })
+    }
+
     /// The params a model name stands for.
     pub fn for_model(name: &str) -> Result<Self> {
         match name {
@@ -692,6 +699,16 @@ mod tests {
         assert_eq!(V1Params::for_model("v1").unwrap(), V1Params::default());
         assert_eq!(V1Params::for_model("v1r").unwrap(), V1Params::v1r());
         assert!(V1Params::for_model("nope").is_err());
+    }
+
+    #[test]
+    fn fingerprint_is_the_calibrated_params() {
+        let v1r = V1Params::v1r();
+        let on = V1Params { calibrate: true, ..v1r.clone() };
+        assert_eq!(v1r.fingerprint(), on.fingerprint());
+        assert!(v1r.fingerprint().contains("calibrate: true"));
+        assert!(v1r.fingerprint().starts_with("V1Params { model: \"v1r\""));
+        assert_ne!(v1r.fingerprint(), V1Params::default().fingerprint());
     }
 
     #[test]
