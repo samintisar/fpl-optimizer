@@ -116,6 +116,7 @@ impl V1Params {
                 position_par: true,
                 price_par: true,
                 price_par_quadratic: true,
+                price_prior_quadratic: true,
                 ..base.shares.clone()
             },
             ..base

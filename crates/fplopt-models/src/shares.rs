@@ -62,6 +62,8 @@ pub struct SharesParams {
     pub price_par: bool,
     /// With price_par: a z² term in that regression (`price_finishing_curve`).
     pub price_par_quadratic: bool,
+    /// A z² term in the goal and assist price priors (`price_goal_curve`, `price_assist_curve`).
+    pub price_prior_quadratic: bool,
 }
 
 impl Default for SharesParams {
@@ -79,6 +81,7 @@ impl Default for SharesParams {
             position_par: false,
             price_par: false,
             price_par_quadratic: false,
+            price_prior_quadratic: false,
         }
     }
 }
@@ -111,6 +114,10 @@ pub struct SharesFit {
     pub price_finishing: Vec<(i64, f64, f64, f64)>,
     /// With price_par_quadratic: (element_type, c), the par × exp(c·z²).
     pub price_finishing_curve: Vec<(i64, f64)>,
+    /// With price_prior_quadratic: (element_type, c) on top of `price_goal`.
+    pub price_goal_curve: Vec<(i64, f64)>,
+    /// With price_prior_quadratic: (element_type, c) on top of `price_assist`.
+    pub price_assist_curve: Vec<(i64, f64)>,
 }
 
 // --- inputs ---------------------------------------------------------------------------------
@@ -808,16 +815,20 @@ fn marcel_shares(
         let minutes = v(|s| &s.minutes);
         let new = minutes <= 0.0;
         let use_price = params.price_prior_all || new;
-        let mut prior_g = if use_price {
-            price_prior(&fit.price_goal, element[i], prices[i])
-        } else {
-            position_prior(&fit.position_goal, element[i])
-        };
-        let mut prior_a = if use_price {
-            price_prior(&fit.price_assist, element[i], prices[i])
-        } else {
-            position_prior(&fit.position_assist, element[i])
-        };
+        // Python computes the price priors for every row, × the curve with the flag (no
+        // guard on an empty curve), then selects.
+        let mut by_price_g = price_prior(&fit.price_goal, element[i], prices[i]);
+        let mut by_price_a = price_prior(&fit.price_assist, element[i], prices[i]);
+        if params.price_prior_quadratic {
+            by_price_g *=
+                price_curve(&fit.price_goal, &fit.price_goal_curve, element[i], prices[i]);
+            by_price_a *=
+                price_curve(&fit.price_assist, &fit.price_assist_curve, element[i], prices[i]);
+        }
+        let mut prior_g =
+            if use_price { by_price_g } else { position_prior(&fit.position_goal, element[i]) };
+        let mut prior_a =
+            if use_price { by_price_a } else { position_prior(&fit.position_assist, element[i]) };
         if prior_g.is_nan() {
             prior_g = position_prior(&fit.position_goal, element[i]);
         }
@@ -982,6 +993,7 @@ pub fn fit_shares(view: &AsOfView, params: &SharesParams) -> Result<SharesFit> {
     let (mut price_goal, mut price_assist) = (Vec::new(), Vec::new());
     let (mut position_finishing, mut price_finishing, mut price_finishing_curve) =
         (Vec::new(), Vec::new(), Vec::new());
+    let (mut price_goal_curve, mut price_assist_curve) = (Vec::new(), Vec::new());
     for (position, group) in by_position {
         let wg: Vec<f64> =
             group.iter().map(|s| if s.fb_goals { params.goals_weight } else { 1.0 }).collect();
@@ -1009,10 +1021,22 @@ pub fn fit_shares(view: &AsOfView, params: &SharesParams) -> Result<SharesFit> {
             }
         }
         let table = season_table(&group, |i| [xg[i], dg[i], xa[i], da[i]], &first_price);
-        let goal = price_model(&table.iter().map(|(p, v)| (*p, v[0], v[1])).collect::<Vec<_>>());
-        let assist = price_model(&table.iter().map(|(p, v)| (*p, v[2], v[3])).collect::<Vec<_>>());
-        price_goal.push((position, goal.0, goal.1, goal.2));
-        price_assist.push((position, assist.0, assist.1, assist.2));
+        let goal_rows: Vec<(f64, f64, f64)> = table.iter().map(|(p, v)| (*p, v[0], v[1])).collect();
+        let assist_rows: Vec<(f64, f64, f64)> =
+            table.iter().map(|(p, v)| (*p, v[2], v[3])).collect();
+        if params.price_prior_quadratic {
+            let (a, b, center, c) = price_model_quadratic(&goal_rows);
+            price_goal.push((position, a, b, center));
+            price_goal_curve.push((position, c));
+            let (a, b, center, c) = price_model_quadratic(&assist_rows);
+            price_assist.push((position, a, b, center));
+            price_assist_curve.push((position, c));
+        } else {
+            let goal = price_model(&goal_rows);
+            let assist = price_model(&assist_rows);
+            price_goal.push((position, goal.0, goal.1, goal.2));
+            price_assist.push((position, assist.0, assist.1, assist.2));
+        }
     }
     let window: Vec<&TeamFixture> =
         teams.iter().filter(|t| t.season > season - FIT_SEASONS).collect();
@@ -1092,6 +1116,8 @@ pub fn fit_shares(view: &AsOfView, params: &SharesParams) -> Result<SharesFit> {
         position_finishing,
         price_finishing,
         price_finishing_curve,
+        price_goal_curve,
+        price_assist_curve,
     })
 }
 
@@ -1393,6 +1419,14 @@ impl SharesFit {
         if !self.price_finishing_curve.is_empty() {
             let v = self.price_finishing_curve.iter().map(|(p, c)| serde_json::json!([p, c]));
             map.insert("price_finishing_curve".into(), v.collect());
+        }
+        if !self.price_goal_curve.is_empty() {
+            let v = self.price_goal_curve.iter().map(|(p, c)| serde_json::json!([p, c]));
+            map.insert("price_goal_curve".into(), v.collect());
+        }
+        if !self.price_assist_curve.is_empty() {
+            let v = self.price_assist_curve.iter().map(|(p, c)| serde_json::json!([p, c]));
+            map.insert("price_assist_curve".into(), v.collect());
         }
         out
     }
@@ -1711,6 +1745,58 @@ mod tests {
         // The goal / assist price priors don't depend on the flags.
         let base = synthetic_fit(&SharesParams::default());
         assert_eq!((&q.price_goal, &q.price_assist), (&base.price_goal, &base.price_assist));
+    }
+
+    #[test]
+    fn prior_curves_only_when_quadratic() {
+        let off = synthetic_fit(&SharesParams::default());
+        assert!(off.price_goal_curve.is_empty() && off.price_assist_curve.is_empty());
+        let on = SharesParams { price_prior_quadratic: true, ..SharesParams::default() };
+        let fit = synthetic_fit(&on);
+        assert_eq!(fit.price_goal_curve.len(), fit.price_goal.len());
+        assert_eq!(fit.price_assist_curve.len(), fit.price_assist.len());
+        // Off: the JSON has no curve keys.
+        let json = off.to_json();
+        assert!(json.get("price_goal_curve").is_none());
+        assert!(json.get("price_assist_curve").is_none());
+        assert!(fit.to_json().get("price_goal_curve").is_some());
+        assert!(fit.to_json().get("price_assist_curve").is_some());
+    }
+
+    #[test]
+    fn quadratic_prior_fit_is_finite_and_moves_priors() {
+        let store = synthetic_store();
+        let view = store.as_of(deadline(2023, 10));
+        let linear = fit_shares(&view, &SharesParams::default()).unwrap();
+        let quad_params = SharesParams { price_prior_quadratic: true, ..SharesParams::default() };
+        let quad = fit_shares(&view, &quad_params).unwrap();
+        for &(_, c) in quad.price_goal_curve.iter().chain(&quad.price_assist_curve) {
+            assert!(c.is_finite());
+        }
+        for t in quad.price_goal.iter().chain(&quad.price_assist) {
+            assert!(t.1.is_finite() && t.2.is_finite() && t.3.is_finite());
+        }
+        // The (a, b) of at least one position differ from the linear fit.
+        assert_ne!(
+            (&quad.price_goal, &quad.price_assist),
+            (&linear.price_goal, &linear.price_assist)
+        );
+        // Marcel posteriors differ for at least one pool player.
+        let (matches, teams, _) = rows(&view, Some(&quad), None).unwrap();
+        let shares =
+            share_rows(&matches, &teams, (quad.ratio_goals, quad.ratio_assists, quad.ratio_team));
+        let pool = Table::new()
+            .with("player_key", Column::I64(vec![13, 24, 15, 11, 23, 14]))
+            .with("team_key", Column::I64(vec![1, 2, 1, 1, 2, 1]))
+            .with(
+                "element_type",
+                Column::OptI64(vec![Some(3), Some(3), Some(4), Some(2), Some(3), Some(3)]),
+            )
+            .with("price", Column::F64(vec![45.0, 110.0, 130.0, 50.0, 100.0, 80.0]));
+        let g_quad = marcel_shares(&shares, &pool, &quad, 2023).unwrap();
+        let g_lin = marcel_shares(&shares, &pool, &linear, 2023).unwrap();
+        assert!(g_quad.iter().all(|p| p.g.is_finite() && p.a.is_finite()));
+        assert!(g_quad.iter().zip(&g_lin).any(|(q, l)| q.g != l.g || q.a != l.a));
     }
 
     #[test]
