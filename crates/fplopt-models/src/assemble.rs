@@ -101,8 +101,6 @@ impl V1Params {
         let rounds = GbmParams { num_boost_round: 400, ..GbmParams::default() };
         V1Params {
             model: "v1r",
-            // Uncalibrated until Task 12 fits `calibration_table_v1r.json` and turns this on.
-            calibrate: false,
             minutes: MinutesParams {
                 start: rounds.clone(),
                 sixty: rounds.clone(),
@@ -683,12 +681,13 @@ mod tests {
         assert!(crate::COMPONENTS.contains(&"v1r"));
         assert_eq!(V1Params::default().model, "v1");
         assert_eq!(V1Params::v1r().model, "v1r");
-        // v1r has no table yet, so it runs uncalibrated (Task 12 turns calibration on).
-        assert!(!V1Params::v1r().calibrate);
+        // v1r is calibrated with its own table, fitted with v1r's params (from 2017/18).
+        assert!(V1Params::v1r().calibrate);
         // One flag-layer slope per category in v1r only.
         assert!(V1Params::v1r().category_slopes);
         assert!(!V1Params::default().category_slopes);
-        assert!(crate::calibration::calibration_for("v1r", 2023).unwrap().is_none());
+        assert!(crate::calibration::calibration_for("v1r", 2016).unwrap().is_none());
+        assert!(crate::calibration::calibration_for("v1r", 2023).unwrap().is_some());
         assert!(crate::calibration::calibration_for("v1", 2023).unwrap().is_some());
         // A name outside the family is an error, not "no table".
         assert!(crate::calibration::calibration_for("nope", 2023).is_err());
@@ -728,7 +727,6 @@ mod tests {
         let rounds = GbmParams { num_boost_round: 400, ..GbmParams::default() };
         let expected = V1Params {
             model: "v1r",
-            calibrate: false, // until Task 12's table
             category_slopes: true,
             minutes: MinutesParams {
                 start: rounds.clone(),

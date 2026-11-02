@@ -146,6 +146,7 @@ fn walk(
                             started.elapsed().as_secs_f64()
                         ),
                         Err(e) => {
+                            log::error!("season {season} failed: {e:#}");
                             failures.lock().unwrap().push(e.context(format!("season {season}")));
                         }
                     }
@@ -430,6 +431,9 @@ fn fit(
     write: bool,
     compare: Option<&Path>,
 ) -> Result<()> {
+    if write && model == "v1" {
+        bail!("v1's table is calibration_table.json, exported from Python's; --write is for v1r");
+    }
     let params = params_for(model)?;
     let groups = parse_groups(groups)?;
     let fingerprint = std::fs::read_to_string(walk.join("params.txt"))

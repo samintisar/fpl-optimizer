@@ -23,8 +23,8 @@ pub static TABLE: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../calibration_table.json")).expect("calibration_table.json")
 });
 
-/// v1r's table (`fplopt-rs models calibrate fit --model v1r --write`); None until fitted.
-const V1R_TABLE_TEXT: Option<&str> = None;
+/// v1r's table (`fplopt-rs models calibrate fit --model v1r --write`).
+const V1R_TABLE_TEXT: Option<&str> = Some(include_str!("../calibration_table_v1r.json"));
 
 pub static V1R_TABLE: LazyLock<Option<Value>> = LazyLock::new(|| {
     V1R_TABLE_TEXT.map(|t| serde_json::from_str(t).expect("calibration_table_v1r.json"))
