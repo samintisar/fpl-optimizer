@@ -125,10 +125,10 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
   - `rules export` is byte-identical for 2025-26 and 2026-27.
   - `token_set_ratio` matches rapidfuzz on all 1,844,337 name pairs the maps score. The committed golden keeps the 49k pairs that can change a map.
   - The schema checks are ported as explicit checks per builder, and they raise as pandera did. Their failure texts differ from pandera's.
+- *Gate on the server (2026-10-31, Linux, gcc):* 22/22 tables identical (`--raw` the live `raw/`, read only).
 - *Still open:*
   - The Python build tests are covered by the real-data gate rather than translated one by one. The Rust unit tests cover the helpers (lockdown and clock changes, CSV NA handling, the float repr, defcon scoring, rapidfuzz).
   - The xz decoder (`lzma-rs`) dominates `player_snapshot` (~75 s).
-  - The gate re-runs on the server before the switch.
 
 ### Batch 3 — As-of store and features (~2 weeks)
 
@@ -145,6 +145,7 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
   - All 234 frames are identical: 9 frames (7 features, 2 history frames) at 26 deadlines, the 16 edge deadlines plus 10 sampled ones from 2016/17 GW1 to 2026/27 GW10. Each frame was diffed on its key, and its row order was checked too.
   - Python takes 80 s and Rust 33 s for all of them.
   - `fplopt-rs check leakage` passes: 28 deadlines (16 edge, 12 sampled) × 9 frames × 2 variants, no leaks, 17 min (about 35 s per deadline: two corrupted copies of 13 tables in memory).
+- *Gate on the server (2026-10-31, Linux):* 234/234 frames identical.
 - *Still open:* the Python feature tests are covered by the real-data gate rather than translated one by one. The Rust unit tests cover the store's visibility rules, the ban rules and the leakage harness (it must catch a stateful and a failing builder).
 
 ### Batch 4 — Optimizer (~3 weeks)
@@ -160,7 +161,7 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
   - CLI: `optimize plan` and `optimize squad` with Python's flags, except that the xP frame comes from `--xp-file` (models: batch 6) and `--start random:SEED` waits for numpy's RNG (batch 7). `optimize solve` runs one gate case (not in the Python CLI). The FPL entry endpoints are on the archiver's `FplClient`.
   - Tests: the Python optimizer tests translated as integration tests (`crates/fplopt-optimize/tests/`, 90 tests: model, chips, search, prune, minutes; a test-only `apply_decision` replays plans; seeded instances use the tests' own generator), and the entry and start tests as unit tests. Skipped: tests of PuLP/highspy internals (bulk hand-over, warm starts, pickling, monkeypatched solves) and the `realdata` one, which the gate covers.
 - *Gate (2026-10-30):* `dev/optimize_parity.py` on the local `data/`: seed 0 (12 deadlines) 120/120 cases and seed 1 (20 deadlines) 173/173, i.e. 293 planner calls (template, random and carried squads; `ep_next` everywhere, `v1` at 8 deadlines (68 cases); 119 with chips): all 1,172 plans (#1–#3 and roll) identical to Python's, objectives equal, node counts equal, bench weights identical, and every Rust plan valid under Python's rule checker. `optimize plan`/`squad` print Python's text on template, chip, imported (`--entry`, live FPL) and squad-file runs.
-- *Still open:* run the gate on the server (Linux: gcc-built HiGHS vs the manylinux highspy wheel) before the switch.
+- *Gate on the server (2026-10-31, Linux: gcc-built HiGHS vs the manylinux highspy wheel):* first 115/120, then 120/120 (480 plans, node counts equal in every case, bench weights identical) with `OPENBLAS_CORETYPE=Haswell`. The 5 failures weren't HiGHS: numpy's OpenBLAS picks its kernel by CPU, and on the server's i9-10940X (AVX-512) it runs the SkylakeX `dgemv`/`ddot` kernels, whose FMA rounds differently from the Haswell kernel `prune::blas_dot` reproduces (the local Zen 3 runs Haswell). Python itself gives different plans on the two kernels. So every gate that runs Python's numpy pins the kernel: the gate scripts set `OPENBLAS_CORETYPE=Haswell` for the Python subprocesses, and `dev/backtest_parity.py` also for itself, before numpy loads (it computes Python's v1 xP in-process). The live system doesn't need it: after the switch only Rust runs.
 
 ### Batch 5 — Bot (~3 weeks)
 
@@ -225,7 +226,12 @@ Order follows the import graph (`seasons/adapters → ingest → build → store
   - Added (no Python counterpart): the caches are single-flight (one thread computes a v1 fit, xP frame, pool or outcome, the others asking for it wait), and xP frames are also cached on disk across runs (`fplopt_backtest::xp_cache`, `results/.xp-cache/`, keyed by `data/`'s tables and the binary's bytes, so a rebuild of either starts afresh; `--no-xp-cache`, `--xp-cache DIR`). Off, cold and warm give identical tables and metrics; warm, a v1 eval of 2023/24 takes 7 s instead of 173 s and a greedy:v1 season 4 s instead of 120 s.
 - *Gate (2026-10-31, first pass):* the 17 logged commands without v1 backtests or chips (`--select '^(?!.*v1)(?!.*chips=1)|^models eval'`), on the local `data/`: 17/17 pass. Tables identical except v1's predictions (at most 3.8e-9 relative, batch 6's last digits; the table tolerance is 1e-7), every metric within 1e-6, CIs included. `check leakage` passes with the probes (28 deadlines × 18 frames).
   - Speed: greedy, roll and eval runs 1.8–8× faster than Python; the optimizer compares were 1.3–1.9× *slower* (e.g. 896 s vs 1304 s), though one case at a time (`optimize bench`) Rust's solves were as fast or faster (plan solves 25.6 s vs 23.6 s, chip search 96 s vs 58 s). The cause was the Windows heap: Python's units are processes, each with its own heap; Rust's are threads of one process, whose allocations (polars frames per decision and HiGHS's C++ objects) the heap serialized, worse with more threads than cores. Fixed with mimalloc as Rust's global allocator (`fplopt-cli`) and for C++ `operator new`/`delete` (`crates/fplopt-highs/src/new_delete.cpp`); results identical. Optimizer:ep_next_fade vs greedy (2021–2024, 24 units, full runs): 15 jobs Python 658 s, Rust 991–1011 s → 471 s; 8 jobs Python 694 s, Rust 549 s.
-  - Still to run: the v1 backtests and the chip study (hours each in Python).
+- *Gate (2026-11-02, second pass, on the server):* the 30 logged commands with v1 backtests, the chip study and the v1 evals (`--select '^(?!.*chip-diagnostics)(?=.*(:v1|models eval --models v1 ))'`, `--jobs 14`): 30/30 pass.
+  - v1 backtests are compared on Python's v1 xP (the user's call, 2026-11-01). On Rust's own xP they drift: v1's frames differ from Python's in the last digits (up to 1.5e-8, batch 6), and the planner stops at its 0.5% MIP gap, so a 1e-9 change in one player's xP can pick a different incumbent at one decision and the season paths split from there (the same noise added to Python's own frame does the same). `dev/backtest_parity.py` therefore runs Rust twice per v1 command: once on its own xP, to fill a disk cache, then on a cache whose v1 frames are replaced by Python's (computed in the gate process, same rows, key order and Rust's schema), and the second run must match exactly with no cache miss. The v1 evals (commands 29–30) compare Rust's own xP, as in the first pass. `--no-python-xp` turns the mode off.
+  - Result: every table identical (gws and decisions, chip choices, captains, transfer gains, xG-scored outcomes within 3e-14), every metric within 1e-6, CIs included; the 12 compares give the same verdicts and deflated means.
+  - Found on the way: the chip study's policy name carries a checksum of the terminal value table, which Python sums with 3.12's compensated `sum()`. At `chip_shrink=0.75` the Free Hit row sums to 2559.4185 in Python and 2559.4184999999998 with a plain loop, so the names differed in the 3rd decimal (every number matched); `table_tag` uses `py_sum` now.
+  - Speed (Rust timed on the cached Python xP, so without the v1 fits): 14.7 h Python vs 9.4 h Rust in all. Greedy compares 3 s vs 510–550 s, evals 2.2×, optimizer compares and chip runs 1.3–2×.
+  - Added for the season comparison (no Python counterpart): a start kind `squad:FILE@G` in `backtest run|compare` (a real squad from a squad file, `fplopt_optimize::entry::squad_file_state`).
 
 ### Batch 8 — Retire Python (~1 week)
 
