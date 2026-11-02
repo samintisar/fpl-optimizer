@@ -584,6 +584,102 @@ fn price_prior(table: &[(i64, f64, f64, f64)], element_type: f64, price: f64) ->
     f64::NAN
 }
 
+/// `_price_model(..., quadratic=True)`: (a, b, center, c), a c·z² term in the exponent,
+/// ridged like b (and not a). Sequential sums, as `price_model`.
+#[cfg_attr(not(test), allow(dead_code))]
+fn price_model_quadratic(seasons: &[(f64, f64, f64)]) -> (f64, f64, f64, f64) {
+    let rows: Vec<&(f64, f64, f64)> =
+        seasons.iter().filter(|(p, _, d)| *d > 0.0 && !p.is_nan()).collect();
+    let xs: Vec<f64> = rows.iter().map(|r| r.1).collect();
+    if rows.is_empty() || pd_sum(&xs) <= 0.0 {
+        // Python's flat fallback is the same for both: (log rate, 0, 0), c = 0.
+        let (a, b, center) = price_model(seasons);
+        return (a, b, center, 0.0);
+    }
+    let weights: Vec<f64> = rows.iter().map(|r| r.2).collect();
+    let price: Vec<f64> = rows.iter().map(|r| r.0).collect();
+    let products: Vec<f64> = price.iter().zip(&weights).map(|(p, w)| p * w).collect();
+    let center = np_sum(&products) / np_sum(&weights);
+    let z: Vec<f64> = price.iter().map(|p| (p - center) / PRICE_SCALE).collect();
+    let cols = |i: usize| [1.0, z[i], z[i] * z[i]];
+    let mut theta = [(np_sum(&xs) / np_sum(&weights)).ln(), 0.0, 0.0];
+    for _ in 0..PRICE_ITERATIONS {
+        let mu: Vec<f64> = (0..z.len())
+            .map(|i| {
+                let c = cols(i);
+                weights[i] * (theta[0] * c[0] + theta[1] * c[1] + theta[2] * c[2]).exp()
+            })
+            .collect();
+        let mut g = [0.0; 3];
+        let mut h = [[0.0; 3]; 3];
+        for (j, gj) in g.iter_mut().enumerate() {
+            *gj = (0..z.len()).map(|i| cols(i)[j] * (mu[i] - xs[i])).sum::<f64>();
+            for k in 0..3 {
+                h[j][k] = (0..z.len()).map(|i| mu[i] * cols(i)[j] * cols(i)[k]).sum::<f64>();
+            }
+        }
+        for j in 1..3 {
+            g[j] += PRICE_RIDGE * theta[j];
+            h[j][j] += PRICE_RIDGE;
+        }
+        let step = solve3(h, g);
+        for j in 0..3 {
+            theta[j] -= step[j];
+        }
+    }
+    (theta[0], theta[1], center, theta[2])
+}
+
+/// `np.linalg.solve` of a 3 × 3 system (LU with partial pivoting, as LAPACK's getrf/getrs).
+/// The pivot is the first row with the largest |value| (`idamax`), not the last.
+#[cfg_attr(not(test), allow(dead_code))]
+fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> [f64; 3] {
+    let (mut a, mut b) = (a, b);
+    for col in 0..3 {
+        let mut pivot = col;
+        for row in col + 1..3 {
+            if a[row][col].abs() > a[pivot][col].abs() {
+                pivot = row;
+            }
+        }
+        a.swap(col, pivot);
+        b.swap(col, pivot);
+        let inv = 1.0 / a[col][col];
+        for row in col + 1..3 {
+            let l = a[row][col] * inv;
+            for k in col..3 {
+                a[row][k] -= l * a[col][k];
+            }
+            b[row] -= l * b[col];
+        }
+    }
+    let mut x = [0.0; 3];
+    for row in (0..3).rev() {
+        let s: f64 = (row + 1..3).map(|k| a[row][k] * x[k]).sum();
+        x[row] = (b[row] - s) / a[row][row];
+    }
+    x
+}
+
+/// exp(c·z²) for a row (z from the position's center in `table`), 1 without a curve
+/// (Python `_price_curve`).
+#[cfg_attr(not(test), allow(dead_code))]
+fn price_curve(
+    table: &[(i64, f64, f64, f64)],
+    curve: &[(i64, f64)],
+    element_type: f64,
+    price: f64,
+) -> f64 {
+    for &(position, _, _, center) in table {
+        if element_type == position as f64 {
+            let c = curve.iter().find(|t| t.0 == position).map_or(0.0, |t| t.1);
+            let z = (price - center) / PRICE_SCALE;
+            return (c * z * z).exp();
+        }
+    }
+    1.0
+}
+
 fn position_prior(table: &[(i64, f64)], element_type: f64) -> f64 {
     let fallback = if table.is_empty() {
         0.0
@@ -1177,5 +1273,80 @@ impl SharesFit {
             "taker_q": self.taker_q,
             "n_rows": self.n_rows,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quadratic_price_model_recovers_a_convex_curve() {
+        // x = d · exp(a + b z + c z²) exactly, z = (price − center)/10, weights d.
+        let (a, b, c) = (-1.0, 0.3, 0.8);
+        let prices: Vec<f64> = (0..40).map(|i| 4.0 + 0.25 * i as f64).collect();
+        let d = 1000.0;
+        let center = prices.iter().sum::<f64>() / prices.len() as f64;
+        let rows: Vec<(f64, f64, f64)> = prices
+            .iter()
+            .map(|&p| {
+                let z = (p - center) / PRICE_SCALE;
+                (p, d * (a + b * z + c * z * z).exp(), d)
+            })
+            .collect();
+        let (fa, fb, fcenter, fc) = price_model_quadratic(&rows);
+        assert!((fcenter - center).abs() < 1e-12);
+        // The ridge (1.0 on b and c) pulls a little; d is large so the data dominates it.
+        assert!((fa - a).abs() < 0.05 && (fb - b).abs() < 0.1 && (fc - c).abs() < 0.2);
+    }
+
+    #[test]
+    fn linear_price_model_is_unchanged() {
+        let rows = vec![(5.0, 1.0, 10.0), (7.0, 2.0, 10.0), (10.0, 4.0, 10.0)];
+        let (a, b, center) = price_model(&rows);
+        let (qa, qb, qcenter, _) = price_model_quadratic(&rows);
+        assert_eq!(center, qcenter);
+        assert!(a.is_finite() && b.is_finite() && qa.is_finite() && qb.is_finite());
+    }
+
+    #[test]
+    fn quadratic_price_model_flat_fallback_matches_linear() {
+        let rows = vec![(5.0, 0.0, 10.0), (7.0, 0.0, 10.0)];
+        let (a, b, center) = price_model(&rows);
+        assert_eq!(price_model_quadratic(&rows), (a, b, center, 0.0));
+        assert_eq!(price_model_quadratic(&[]), (price_model(&[]).0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn solve3_matches_hand_computed_solutions() {
+        // No swap needed: x = (1, 2, 3).
+        let a = [[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 4.0]];
+        let x = solve3(a, [4.0, 10.0, 14.0]);
+        for (got, want) in x.iter().zip([1.0, 2.0, 3.0]) {
+            assert!((got - want).abs() < 1e-12, "{x:?}");
+        }
+        // Row swaps needed (zero leading entry, then a larger pivot below): x = (1, -1, 2).
+        let a = [[0.0, 2.0, 1.0], [1.0, 1.0, 0.0], [3.0, 0.0, 1.0]];
+        let x = solve3(a, [0.0, 0.0, 5.0]);
+        for (got, want) in x.iter().zip([1.0, -1.0, 2.0]) {
+            assert!((got - want).abs() < 1e-12, "{x:?}");
+        }
+        // Tie on |pivot| in column 0 (rows 0 and 1 both |2|; the first wins, as idamax).
+        // 2x + y = 4, -2x + 3y + z = 7, x + y + z = 6 -> x = 1, y = 2, z = 3
+        let a = [[2.0, 1.0, 0.0], [-2.0, 3.0, 1.0], [1.0, 1.0, 1.0]];
+        let x = solve3(a, [4.0, 7.0, 6.0]);
+        for (got, want) in x.iter().zip([1.0, 2.0, 3.0]) {
+            assert!((got - want).abs() < 1e-12, "{x:?}");
+        }
+    }
+
+    #[test]
+    fn price_curve_applies_the_position_curve_or_one() {
+        let table = [(2_i64, -1.0, 0.1, 6.0)];
+        let curve = [(2_i64, 0.5)];
+        let z = (8.0 - 6.0) / PRICE_SCALE;
+        assert_eq!(price_curve(&table, &curve, 2.0, 8.0), (0.5 * z * z).exp());
+        assert_eq!(price_curve(&table, &[], 2.0, 8.0), 1.0);
+        assert_eq!(price_curve(&table, &curve, 3.0, 8.0), 1.0);
     }
 }
