@@ -27,7 +27,7 @@ The two broken synthetic tests are resolved during the port: each test is either
 ## Section 1: build
 
 - **Model name.** The stack goes behind a new xP model name `v1r`; `v1` stays as it is. On adoption `v1r` becomes `v1` and the old model is kept as `v1-2026-10`.
-- **Calibration.** The calibration table is refit for `v1r` on develop (2016/17–2022/23), with its own `V1Params` fingerprint.
+- **Calibration.** The calibration table is refit for `v1r` with its own `V1Params` fingerprint, using the same expanding-window procedure and the same part as v1's table (`p_start`, horizons 1+ pooled, from 2016). Fitting is Python-only today (`dev/calibrate_v1.py`) and batch 8 deletes Python, so the plan ports the needed part to Rust (`fplopt-rs models calibrate walk|fit`). The port is gated on reproducing v1's current table.
 - **Where.** Rust only (`crates/fplopt-models`, `crates/fplopt-features`), on top of `rust-migration`, started after the switch's gates pass (about GW13–14). Nothing is added to the Python package.
 - **Parity.** The port is checked against Python `research` at the pinned commit with `fplopt-rs check parity table`, at batch 6's tolerances: fitted parameters within 1e-6, plan #1 identical (a tie within the 0.5% MIP gap counts as identical).
 - **Leakage.** `fplopt-rs check leakage` with `model:v1r` must pass. The new Elo-style inputs (`win_expectancy`, `club_rating`) are the main risk.
