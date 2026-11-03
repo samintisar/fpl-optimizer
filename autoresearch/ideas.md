@@ -412,6 +412,16 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 
 ## Needs the user (not the loop's to do)
 
+- **2026-11-03: no experiments tonight, again.** `last_checked_gw` is still 8 (GW9's
+  deadline was 2026-10-31; FPL hasn't marked it checked as of the 02:32Z bootstrap), so no
+  monitor; the next run should do GW9. Both blockers re-checked and unchanged: the harness
+  hash is still b7e2afde (baseline `4200b4b7a0-b7e2afde` reused), so the crowd (idea 13)
+  stays blocked; `test_the_calibration_table_matches_the_default_settings` still fails at
+  the head (the table predates gbm-400 and the Elo features' defaults), so `optimizer:v1`
+  decision runs (idea 5) can't run. With every model line closed under the 3-value rule or
+  waiting on you (ideas 6, 7, 9, 10, 11), I didn't spend variants on settings without a
+  mechanism. Unblocking either the crowd or the table is what would let the loop do work.
+
 - **2026-11-02: no experiments tonight.** GW9 wasn't checked yet (`last_checked_gw` 8), so
   there was no monitor. Three new slices of the gbm-400 head walk (05d4b12, h0, 2017–22)
   found nothing testable with a mechanism:
