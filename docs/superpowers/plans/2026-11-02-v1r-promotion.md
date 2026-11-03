@@ -1691,3 +1691,14 @@ Not a criterion, recorded as a warning for stage 2: XI and captain regret on the
 - The log's `n_variants` for the family is 2 because the stage 1 `models eval` row shares the family; the spec's N=1 is one candidate, and the bar is the raw mean (deflated values are printed only).
 
 **Verdict: adopt** (both stages pass). Task 16 next; the develop run below is information only.
+
+**Develop (information only, not part of the verdict).** Same command on 2016/17–2022/23, family `v1r-promotion-2026-11-develop`, `results/v1r-stage2-develop`, 4,795 s.
+
+| v1r − v1, develop | mean | 80% CI | p |
+|---|---|---|---|
+| per-decision, realized (7 seasons) | −2.55 | [−4.33, −0.90] | 0.977 |
+| per-decision, realized on the xG sample (2019/20 →) | +1.09 | [−0.45, +2.61] | 0.191 |
+| per-decision, xG-scored (2019/20 →) | +0.58 | [−0.27, +1.42] | 0.204 |
+| full run per GW, realized | −0.02 | [−0.66, +0.61] | 0.498 |
+
+Per season (full-run total / per-decision per window): 2016/17 −118.8 / −10.5, 2017/18 +5.0 / −4.2, 2018/19 −42.6 / −6.9, 2019/20 +48.1 / −1.1, 2020/21 +37.8 / −0.8, 2021/22 +9.1 / +1.2, 2022/23 +55.2 / +4.7. The loss is in the three oldest seasons (no xG data there); from 2019/20 on v1r is ahead in every season's full run, and the per-decision difference turns positive from 2021/22. Not diagnosed: whether the early seasons' thinner inputs (no xG, `team_rating` coverage, the calibration table's first entries) or a real weakness of the keeps cause it.
