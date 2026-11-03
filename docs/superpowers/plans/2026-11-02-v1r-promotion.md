@@ -1597,7 +1597,7 @@ git push origin feat/v1r v1r-preregistered
 
 On the server checkout of the tag (`nice -n 15`, at most 12 jobs, a quiet window with the research loop paused if it shares the box). Both runs log to `results/experiments.csv` with family `v1r-promotion-2026-11`.
 
-- [ ] **Step 1: Stage 1, components.**
+- [x] **Step 1: Stage 1, components.**
 
 ```bash
 target/release/fplopt-rs models eval --models v1,v1r --seasons 2023-2024 --family v1r-promotion-2026-11 --out results/v1r-stage1
@@ -1659,3 +1659,19 @@ Filled in by Task 0 and later tasks.
 ## Results
 
 Filled in by Task 15.
+
+**Stage 1 (components): PASS.** 2026-11-03, locally at the tag `v1r-preregistered` (`models eval --models v1,v1r --seasons 2023-2024 --family v1r-promotion-2026-11 --out results/v1r-stage1`, 293 s; 76 deadlines).
+
+| criterion | v1 | v1r | result |
+|---|---|---|---|
+| MSE per player-GW, h0, pooled | 3.465 | 3.446 | lower |
+| MSE per player-GW, h1–5, pooled | 3.969 | 3.960 | lower |
+| Diebold–Mariano at h0, one-sided p (v1r better) | | 0.000 | < 0.10 |
+| minutes log loss, h0, 2023/24 | 0.43147 | 0.42546 | not worse |
+| minutes log loss, h0, 2024/25 | 0.45795 | 0.45041 | not worse |
+| P(start) reliability (10 bins), h0, 2023/24 | 0.001662 | 0.000584 | not worse |
+| P(start) reliability (10 bins), h0, 2024/25 | 0.001469 | 0.000326 | not worse |
+
+Also h1–5 DM p 0.002 and candidate MSE at h0 10.183 → 10.127. The per-season numbers come from `predictions.parquet` (a scratch script whose pooled values matched `metrics.json`'s components exactly). v1r's P(start) bins no longer overpredict in the 0.2–0.5 range (2024/25 bin 0.3–0.4: v1 predicts 0.350 vs 0.249 observed, v1r 0.350 vs 0.330).
+
+Not a criterion, recorded as a warning for stage 2: XI and captain regret on the template + 3 random squads are worse for v1r (XI 4.59 → 5.04, captain 4.02 → 4.48; one-sided DM p 0.035 that v1 is better).
