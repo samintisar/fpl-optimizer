@@ -1605,7 +1605,7 @@ target/release/fplopt-rs models eval --models v1,v1r --seasons 2023-2024 --famil
 
 Read `metrics.json`. Pass (spec): pooled MSE per player-GW lower for `v1r` at h0 **and** h1–5, one-sided Diebold–Mariano p < 0.10 at h0; minutes log loss and P(start) calibration by band not worse, per season (computed from `predictions.parquet` at h0 per the spec; `models eval` reports components per split only). Write the numbers and the pass/fail under *Results* below.
 
-- [ ] **Step 2: Stage 2, decisions** (only if stage 1 passed; spec: otherwise stop, no change):
+- [x] **Step 2: Stage 2, decisions** (only if stage 1 passed; spec: otherwise stop, no change):
 
 ```bash
 target/release/fplopt-rs backtest compare \
@@ -1675,3 +1675,19 @@ Filled in by Task 15.
 Also h1–5 DM p 0.002 and candidate MSE at h0 10.183 → 10.127. The per-season numbers come from `predictions.parquet` (a scratch script whose pooled values matched `metrics.json`'s components exactly). v1r's P(start) bins no longer overpredict in the 0.2–0.5 range (2024/25 bin 0.3–0.4: v1 predicts 0.350 vs 0.249 observed, v1r 0.350 vs 0.330).
 
 Not a criterion, recorded as a warning for stage 2: XI and captain regret on the template + 3 random squads are worse for v1r (XI 4.59 → 5.04, captain 4.02 → 4.48; one-sided DM p 0.035 that v1 is better).
+
+**Stage 2 (decisions): PASS.** 2026-11-03, locally, same binary (built at the tag; only the stage 1 write-up committed since). The pre-registered command with `--family v1r-promotion-2026-11 --out results/v1r-stage2`, 1,247 s.
+
+| v1r − v1, validate | mean | 80% CI | p (one-sided) | bar |
+|---|---|---|---|---|
+| **per-decision, 4-GW windows, realized** | **+3.27** | [−0.51, +7.07] | 0.139 | ≥ 0: pass |
+| **per-decision, 4-GW windows, xG-scored** | **+1.26** | [−1.19, +3.82] | 0.259 | ≥ 0: pass |
+| full run, per GW, realized | +4.56 | [+2.83, +6.33] | 0.000 | (info) |
+| full run, per GW, xG-scored | +3.21 | [+1.98, +4.50] | 0.000 | (info) |
+
+- Full-run season totals, v1r − v1: +121.6 (2023/24), +225.2 (2024/25); template from GW1 2,510 vs 2,350 and 2,387 vs 2,093. The one arm where v1r is behind: the three GW20 random starts in 2024/25 (mean 1,124 vs 1,171). Full-run window t-test on 8-GW cells (the chip study's statistic): +4.63/GW, p 0.001.
+- 20 decision windows; plans differ at 83% / 99% of decisions. The stage 1 regret warning didn't carry over: XI regret is higher for v1r in the backtest (11.03 vs 9.62 from GW1) but the squads it picks score more.
+- Transfer-gain slope (realized on predicted) 0.75 for v1r vs 1.32 for v1: v1r's predicted gains are less flat but somewhat inflated (intercept +5.3); no general optimizer's-curse correction is in scope here (spec, *Not in scope*).
+- The log's `n_variants` for the family is 2 because the stage 1 `models eval` row shares the family; the spec's N=1 is one candidate, and the bar is the raw mean (deflated values are printed only).
+
+**Verdict: adopt** (both stages pass). Task 16 next; the develop run below is information only.
