@@ -1603,7 +1603,7 @@ On the server checkout of the tag (`nice -n 15`, at most 12 jobs, a quiet window
 target/release/fplopt-rs models eval --models v1,v1r --seasons 2023-2024 --family v1r-promotion-2026-11 --out results/v1r-stage1
 ```
 
-Read `metrics.json`. Pass (spec): pooled MSE per player-GW lower for `v1r` at h0 **and** h1–5, one-sided Diebold–Mariano p < 0.10 at h0; minutes log loss and P(start) calibration by band not worse, per season. Write the numbers and the pass/fail under *Results* below.
+Read `metrics.json`. Pass (spec): pooled MSE per player-GW lower for `v1r` at h0 **and** h1–5, one-sided Diebold–Mariano p < 0.10 at h0; minutes log loss and P(start) calibration by band not worse, per season (computed from `predictions.parquet` at h0 per the spec; `models eval` reports components per split only). Write the numbers and the pass/fail under *Results* below.
 
 - [ ] **Step 2: Stage 2, decisions** (only if stage 1 passed; spec: otherwise stop, no change):
 
@@ -1616,7 +1616,7 @@ target/release/fplopt-rs backtest compare \
   --family v1r-promotion-2026-11 --out results/v1r-stage2
 ```
 
-(If `backtest compare` takes starts by another flag name, use it; the starts are fixed by the spec.) Pass: per-decision mean ≥ 0 realized **and** ≥ 0 xG-scored. Then run the same with `--seasons 2016-2022 --out results/v1r-stage2-develop` (develop: in-sample for the loop, information only, not part of the verdict).
+(If `backtest compare` takes starts by another flag name, use it; the starts are fixed by the spec.) Pass: per-decision mean ≥ 0 realized **and** ≥ 0 xG-scored. Then run the same with `--seasons 2016-2022 --family v1r-promotion-2026-11-develop --out results/v1r-stage2-develop` (develop: in-sample for the loop, information only, not part of the verdict).
 
 - [ ] **Step 3: Verdict.** Per the spec: both pass → adopt (Task 16). Stage 1 fails → no change; append the result to the loop's ledger (the maintainer's job: tell the user; don't write to the research repo). Stage 1 passes, stage 2 fails → no change; find which keep hurt planning before any retry (a retry is N=2). Write the verdict under *Results*, add a line to `docs/PLAN.md` §12 (decision log), commit.
 
