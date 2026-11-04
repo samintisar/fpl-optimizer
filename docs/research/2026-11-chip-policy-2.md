@@ -78,3 +78,15 @@ As pre-registered: no pass, so nothing changes.
 - The bot's plans don't play chips.
 
 Under the spec, the best variant by deflated mean (V6) is frozen in git before GW20 for information, and logged next to H's call over GW20–38 in the live shadow. The spec lets the frozen variant drive chip advice in 2027/28 only if it passed on develop and then beats H in the shadow. V6 didn't pass, so the shadow is information only.
+
+## 5. Freeze (2026-11-04, user decision)
+
+V6 is frozen at tag `chip-policy-2-frozen`:
+
+- **Backtested spec:** `optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2,chips=1,chip_shrink=0.8,chip_split=1,loso=1,fh_scale=0.4`.
+- **Live spec (GW20–38 shadow):** the same without `loso=1`, i.e. `optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2,chips=1,chip_shrink=0.8,chip_split=1,fh_scale=0.4`.
+  - It reads the all-seasons per-window table: `values` in `config/chips/terminal-values-window.json`, estimated on all seven develop seasons.
+  - Live has no held-out season, so there's nothing to leave out.
+- **Tables:** `config/chips/` as committed in 9f3472d, unchanged since.
+- **Comparison arm:** H, `chiprules:v1:…,t_tc=8.3,t_bb=10.9,k_fh=4,t_wc=12.87`, as pre-registered.
+- **Before GW20 (~2026-12-29):** the shadow logger (spec *Code* item 6, written in Rust) logs both calls per registered user and deadline. Advice doesn't change.
