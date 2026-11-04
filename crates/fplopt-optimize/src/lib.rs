@@ -26,3 +26,4 @@ pub use params::OptimizerParams;
 pub use plans::{GwPlan, Plan, PlanSet, optimize};
 pub use problem::{HorizonGw, PlanInput, Player, XpFrame};
 pub use search::Search;
+pub use util::py_sum;
