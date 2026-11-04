@@ -166,7 +166,12 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      approximation that is consistently small on develop. Live matters more than develop
      here (defcon era: DEF bias −0.134 per player-GW at h0). Don't run a third variant
      without a new mechanism; the user may want to judge it on its merits.
-   - Team-level live P(CS) stays a watch item (GW to GW 0.13–0.40). Recheck at GW10.
+   - **GW9 (2026-11-04)**: team P(CS) 0.245–0.250 for every position vs 60+ realized GK
+     0.294 (n 180, ~1.5 SE), DEF 0.301, MID 0.354, FWD 0.355; above 0.25 in 7 of 9 GWs
+     (GW9 0.367). GW9's top-10 misses: 9 of 10 clean sheets. GK h0 bias −0.081 → −0.100.
+     Part level shift (keepers), part subbing (MID / FWD > GK). Develop team model is
+     calibrated, so the level part isn't testable there.
+   - Team-level live P(CS) stays a watch item (GW to GW 0.13–0.43). Recheck at GW10.
      GW8: team P(CS) 0.247 predicted vs keepers 60+ 0.288 (n 160, ~1.1 SE), GW8 alone
      0.433; DEF 0.297, MID 0.349, FWD 0.351 (the subbing pattern again).
    - Head walk 2021–22 (`diag-components.txt`), starters (p_start > 0.8): P(CS)·P(60+) vs
@@ -297,6 +302,9 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
       `player_snapshot` without the transfer columns. Not a guard; the harness's input list.
     - Scoreable proxy, `price_change` (price − first price of the season; prices follow
       net transfers): DISCARD (MSE h0 −0.00028, 2020 +0.0031; Brier −0.01 %): too coarse.
+    - 2026-11-04: rebased onto the head as b3a642b (`try/net-transfers-head`, history tests
+      pass) and re-scored after the hash change to adeb6c64: same KeyError. Score b3a642b
+      directly once the walk reads the columns; `ownership` needs the same rebase.
     - Next, once the harness reads them: score `net_transfers`, then `ownership` (snapshot
       `selected_by_percent` for 2021+, `player_gw_ownership` before), one at a time.
       Promotion check: live `player_gw_ownership` / snapshot transfer coverage for 2026/27,
@@ -411,6 +419,15 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 `diag-finish-price-over.txt`).
 
 ## Needs the user (not the loop's to do)
+
+- **2026-11-04 (GW9 report)**: the harness hash changed (b7e2afde → adeb6c64; baseline
+  metrics identical), so `net_transfers` was cherry-picked onto the head (b3a642b on the
+  server hub, `try/net-transfers-head`) and re-scored: same KeyError (no
+  `transfers_in_event` / `transfers_out_event` in the walk's `player_snapshot`). Ledger
+  `crowd-recheck2`, ERROR. Nothing else run: model lines closed, decisions blocked by the
+  calibration table. GW9 live: clean sheets under-predicted for the 3rd week (team P(CS)
+  0.245 vs keepers 60+ 0.294, 7 of 9 GWs above), DEF defcon still under (0.230 vs 0.279 |
+  60+), P(start) regulars gap back to 5 pp in GW9; see the report.
 
 - **2026-11-03: no experiments tonight, again.** `last_checked_gw` is still 8 (GW9's
   deadline was 2026-10-31; FPL hasn't marked it checked as of the 02:32Z bootstrap), so no
