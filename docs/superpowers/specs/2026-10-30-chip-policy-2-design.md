@@ -65,6 +65,21 @@ after V1–V3. Ties: the smaller k.
   `~/fpl-optimizer`.
 - Logged to `results/experiments.csv`, family `chip-policy-2026-11` (N = 5 eligible variants).
 
+**Amended 2026-11-03 (user decision), before any variant ran** (the log had no
+`chip-policy-2026-11` rows): the study runs on the **new v1**, v1r adopted as v1 (dd5c6ba),
+which gives advice live from the Rust switch on, so the winner is chosen under the model it
+will advise with.
+
+- S0 (`chipgains:v1:BASE`, same grid) is re-run on the new v1, and the pooled, window and
+  double tables (leave-one-season-out for window and double) are re-estimated from it and
+  committed before H, P or any variant runs. The tables in #58 came from the old v1.
+- H keeps its pre-registered thresholds (tuned in-sample under the old v1; the bias note under
+  *Statistic and bar* now cuts the other way too: they weren't tuned for this model).
+- The runs use `fplopt-rs` (batch 7's gate: the same tables and logs as Python's), in the
+  server's migration checkout `~/fpl-optimizer-rs/repo` on the root disk, `nice -n 15`, ≤ 12
+  jobs; never `~/fpl-optimizer`. `dev/chip_policy_2.py` compares the runs' GW tables.
+- Variants, spec strings, statistic, bar and N are unchanged.
+
 ## Statistic and bar
 
 - Each variant vs H: `backtest compare`'s full-run window t-test on 8-GW cells (realized
