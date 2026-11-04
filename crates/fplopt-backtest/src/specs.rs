@@ -14,7 +14,7 @@ use fplopt_optimize::OptimizerParams;
 
 use crate::policies::{ChipPolicy2, DOUBLE_LEAD, Policy};
 
-pub const XP_MODELS: [&str; 5] = ["rolling", "ep_next", "ep_next_fade", "v1", "v1r"];
+pub const XP_MODELS: [&str; 6] = ["rolling", "ep_next", "ep_next_fade", "v1", "v1r", "v1-2026-10"];
 pub const MINUTES_XP_MODELS: &[&str] = fplopt_models::V1_FAMILY;
 pub const MINUTES_KEYS: [&str; 2] = ["bench_from_minutes", "min_minutes"];
 pub const MAX_PLAN_HORIZON: i64 = 6;

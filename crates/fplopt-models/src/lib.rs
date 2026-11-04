@@ -32,10 +32,11 @@ pub use baseline::HORIZON;
 pub const MAX_HORIZON: i64 = HORIZON + 1;
 
 /// The registered models (Python's `MODELS`), by name.
-pub const MODELS: &[&str] = &["rolling", "ep_next", "ep_next_fade", "v1", "v1r"];
+/// `v1r` is `v1`'s name before its adoption (logged specs still parse).
+pub const MODELS: &[&str] = &["rolling", "ep_next", "ep_next_fade", "v1", "v1r", "v1-2026-10"];
 
 /// The v1 family: models whose frame has `p_play`, `e_minutes`, ... (one list for everyone).
-pub const V1_FAMILY: &[&str] = &["v1", "v1r"];
+pub const V1_FAMILY: &[&str] = &["v1", "v1r", "v1-2026-10"];
 
 /// Whether `name` is a v1-family model.
 pub fn is_v1_family(name: &str) -> bool {
@@ -43,15 +44,16 @@ pub fn is_v1_family(name: &str) -> bool {
 }
 
 /// Model components the parity gate checks on their own, fitted at the view's deadline
-/// (not the refit cutoff): name → (frame, fitted values); `v1` and `v1r` are the models themselves
+/// (not the refit cutoff): name → (frame, fitted values); the parts take the module defaults
+/// (`v1-2026-10`'s, Python's). `v1` (alias `v1r`) and `v1-2026-10` are the models themselves
 /// (fitted at the refit cutoff), their xP frames and every component's fitted values.
 pub const COMPONENTS: &[&str] =
-    &["team", "minutes", "availability", "shares", "components", "v1", "v1r"];
+    &["team", "minutes", "availability", "shares", "components", "v1", "v1r", "v1-2026-10"];
 
 pub fn component(name: &str, view: &AsOfView) -> Result<(Table, serde_json::Value)> {
     match name {
-        "v1" => assemble::xp_v1_with_fit(view),
-        "v1r" => assemble::xp_v1r_with_fit(view),
+        "v1" | "v1r" => assemble::xp_v1_with_fit(view),
+        "v1-2026-10" => assemble::xp_v1_2026_10_with_fit(view),
         "team" => {
             let fit = team::fit_team(view, &team::TeamParams::default())?;
             Ok((team::team_lambdas(view, &fit)?, fit.to_json()))
@@ -113,7 +115,7 @@ pub const LEAKAGE_BUILDERS: &[(&str, fplopt_features::FeatureBuilder)] = &[
     ("model:ep_next", baseline::xp_ep_next),
     ("model:ep_next_fade", baseline::xp_ep_next_fade),
     ("model:v1", assemble::xp_v1),
-    ("model:v1r", assemble::xp_v1r),
+    ("model:v1-2026-10", assemble::xp_v1_2026_10),
 ];
 
 /// Tables the models read beyond the features' (`leakcheck::FEATURE_TABLES`).
@@ -125,8 +127,8 @@ pub fn predict(name: &str, view: &AsOfView) -> Result<Table> {
         "rolling" => baseline::xp_rolling(view),
         "ep_next" => baseline::xp_ep_next(view),
         "ep_next_fade" => baseline::xp_ep_next_fade(view),
-        "v1" => assemble::xp_v1(view),
-        "v1r" => assemble::xp_v1r(view),
+        "v1" | "v1r" => assemble::xp_v1(view),
+        "v1-2026-10" => assemble::xp_v1_2026_10(view),
         other => bail!("unknown xP model {other:?} (known: {})", MODELS.join(", ")),
     }
 }

@@ -1,10 +1,11 @@
-//! v1's calibration, applied (Python `fplopt.models.calibration`): isotonic maps of P(start),
-//! the team's P(CS) and P(goal ≥ 1) per horizon group, and a per-position linear map of the
-//! per-fixture xP. The maps come from `calibration_table.json` (Python's
-//! `calibration_table`, exported by tests/test_rust_golden.py): the entry for a season was
-//! fitted on the seasons before it; a later season uses the last entry, an earlier one none.
-//! The P(start) fit (`isotonic`) is ported for `fplopt-rs models calibrate`, which writes
-//! v1r's table (`calibration_table_v1r.json`, fingerprinted with `V1Params::fingerprint`).
+//! The v1 family's calibration, applied (Python `fplopt.models.calibration`): isotonic maps
+//! of P(start), the team's P(CS) and P(goal ≥ 1) per horizon group, and a per-position linear
+//! map of the per-fixture xP. The entry for a season was fitted on the seasons before it; a
+//! later season uses the last entry, an earlier one none. `v1-2026-10`'s maps are
+//! `calibration_table_v1-2026-10.json` (Python's `calibration_table`, exported by
+//! tests/test_rust_golden.py); `v1`'s are `calibration_table.json`, P(start) only, written by
+//! `fplopt-rs models calibrate fit --write` (the ported `isotonic`) and fingerprinted with
+//! `V1Params::fingerprint`.
 
 use std::sync::LazyLock;
 
@@ -18,23 +19,22 @@ pub const MAX_BINS: usize = 200;
 /// Breakpoints are rounded to this many decimals in the table.
 const DIGITS: usize = 6;
 
-/// The V1Params fingerprint the table was fitted with (`CALIBRATION_PARAMS`).
+/// v1's table (`fplopt-rs models calibrate fit --model v1 --write`).
 pub static TABLE: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../calibration_table.json")).expect("calibration_table.json")
 });
 
-/// v1r's table (`fplopt-rs models calibrate fit --model v1r --write`).
-const V1R_TABLE_TEXT: Option<&str> = Some(include_str!("../calibration_table_v1r.json"));
-
-pub static V1R_TABLE: LazyLock<Option<Value>> = LazyLock::new(|| {
-    V1R_TABLE_TEXT.map(|t| serde_json::from_str(t).expect("calibration_table_v1r.json"))
+/// `v1-2026-10`'s table: Python's, with its `CALIBRATION_PARAMS` fingerprint.
+pub static TABLE_2026_10: LazyLock<Value> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../calibration_table_v1-2026-10.json"))
+        .expect("calibration_table_v1-2026-10.json")
 });
 
 /// The table of `model`: None if a v1-family model has none (yet), an error for any other name.
 pub fn table_for(model: &str) -> Result<Option<&'static Value>> {
     match model {
-        "v1" => Ok(Some(&TABLE)),
-        "v1r" => Ok(V1R_TABLE.as_ref()),
+        "v1" | "v1r" => Ok(Some(&TABLE)),
+        "v1-2026-10" => Ok(Some(&TABLE_2026_10)),
         other => bail!("not a v1-family model: {other:?}"),
     }
 }
@@ -220,17 +220,16 @@ pub fn isotonic(pred: &[f64], outcome: &[f64], weight: Option<&[f64]>, bins: usi
     }
 }
 
-/// v1r's table must have been fitted with v1r's current params (`params` is
-/// `V1Params::fingerprint`); v1's holds Python's fingerprint string and is not checked here.
+/// v1's table must have been fitted with v1's current params (`params` is
+/// `V1Params::fingerprint`); `v1-2026-10`'s holds Python's fingerprint string and is not
+/// checked here.
 fn check_params(model: &str, table: &Value) -> Result<()> {
-    if model == "v1r" {
-        let want = V1Params::for_model(model)?.fingerprint();
-        if table["params"].as_str() != Some(want.as_str()) {
-            bail!(
-                "the {model} calibration table was fitted with other params than {model}'s \
-                 (refit it: fplopt-rs models calibrate walk|fit --model {model})"
-            );
-        }
+    let params = V1Params::for_model(model)?;
+    if params.model == "v1" && table["params"].as_str() != Some(params.fingerprint().as_str()) {
+        bail!(
+            "the v1 calibration table was fitted with other params than v1's \
+             (refit it: fplopt-rs models calibrate walk|fit --model v1)"
+        );
     }
     Ok(())
 }
@@ -370,13 +369,16 @@ mod tests {
     }
 
     #[test]
-    fn v1r_tables_must_match_the_params() {
-        let good = V1Params::v1r().fingerprint();
+    fn v1_tables_must_match_the_params() {
+        let good = V1Params::default().fingerprint();
         let table = serde_json::json!({"params": good, "table": []});
+        assert!(check_params("v1", &table).is_ok());
         assert!(check_params("v1r", &table).is_ok());
         let stale = serde_json::json!({"params": "V1Params { other }", "table": []});
-        assert!(check_params("v1r", &stale).is_err());
-        // v1's table keeps Python's fingerprint string.
-        assert!(check_params("v1", &stale).is_ok());
+        assert!(check_params("v1", &stale).is_err());
+        // v1-2026-10's table keeps Python's fingerprint string.
+        assert!(check_params("v1-2026-10", &stale).is_ok());
+        // The embedded tables pass.
+        assert!(check_params("v1", &TABLE).is_ok());
     }
 }

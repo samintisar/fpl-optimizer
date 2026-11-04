@@ -1624,7 +1624,7 @@ target/release/fplopt-rs backtest compare \
 
 ### Task 16: Go live (only on an adopt verdict)
 
-- [ ] **Step 1: Swap names** so `v1` is the live model's name everywhere (spec: `v1r` becomes `v1`, the old model stays as `v1-2026-10`):
+- [x] **Step 1: Swap names** (2026-11-04; goldens needed no change: none holds v1 model output. The remaining switch gates compare Python's v1 with Rust's `v1-2026-10`: `models_parity.py` maps it by default, `bot_parity.py` builds `models context --xp v1-2026-10`; `backtest_parity.py`'s v1 commands only compare from before the rename. Check: `v1-2026-10` at 2026/27 GW10 = Python's v1 frame, 4,014/4,014 rows) so `v1` is the live model's name everywhere (spec: `v1r` becomes `v1`, the old model stays as `v1-2026-10`):
   - `V1Params::default()` takes `v1r()`'s settings with `model: "v1"`; the old settings move to `V1Params::v1_2026_10()` with `model: "v1-2026-10"`; `v1r` stays as an alias of `v1` (`for_model("v1r")` returns `default()`), so logged specs still parse.
   - Calibration: `calibration_table.json` ← the v1r table (re-keyed to `v1`'s fingerprint); the old file → `calibration_table_v1-2026-10.json`.
   - `MODELS`, `LEAKAGE_BUILDERS`, `is_v1_family`, eval/bench lists: add `v1-2026-10`.

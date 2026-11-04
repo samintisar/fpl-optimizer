@@ -24,8 +24,9 @@ the same bytes. Checks per session:
   unless it ties plan #2 within 1e-6) decides whether it is a tie broken differently.
 
 `--rust-contexts` (batch 6): at the local deadlines the Rust bot plans on a context built by
-the Rust v1 model (`fplopt-rs models context`), the Python bot on Python's, so the whole live
-stack is compared. The Rust context takes the Python one's id and build time (both show in
+Rust's `v1-2026-10` (`fplopt-rs models context --xp v1-2026-10`: Python's v1; Rust's `v1` is
+the adopted v1r since 2026-11-03), the Python bot on Python's, so the whole live stack is
+compared. The Rust context takes the Python one's id, build time and model name (shown in
 messages and rows), so replies, alert texts and rows stay byte for byte except numbers: the
 xP agrees to ~1e-8, so plan logs compare with every number within OBJECTIVE_TOL (the
 decisions still exactly) and the `/chips` scenario values, solved to the planner's MIP gap,
@@ -250,7 +251,9 @@ def rust_context(binary: Path, data: Path, python, root: Path) -> Path:
     deadline = python.deadline
     now = (deadline - timedelta(days=2)).isoformat()
     env = {**os.environ, **QUIET, "FPLOPT_DATA_DIR": str(data), "RUST_LOG": "warn"}
+    # Rust's v1-2026-10 is Python's v1 (Rust's v1 is the adopted v1r, 2026-11-03).
     command = [str(binary), "models", "context", "--now", now, "--out", str(root / "context")]
+    command += ["--xp", "v1-2026-10"]
     done = subprocess.run(command, cwd=REPO, env=env, capture_output=True, text=True)
     if done.returncode != 0 or not ContextStore(root / "context").ids():
         tail = (done.stdout + done.stderr)[-800:]
@@ -259,6 +262,7 @@ def rust_context(binary: Path, data: Path, python, root: Path) -> Path:
     meta = json.loads((built / "meta.json").read_text(encoding="utf-8"))
     meta["context_id"] = python.context_id
     meta["created_at"] = python.created_at.isoformat()
+    meta["xp_model"] = python.xp_model
     (built / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     built.rename(root / "context" / python.context_id)
     return root

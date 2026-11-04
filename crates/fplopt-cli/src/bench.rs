@@ -23,7 +23,7 @@ use crate::optimize_plan::{exit_code, parse_seasons, usage};
 
 /// Wall-clock cap per HiGHS solve for interactive commands only.
 const INTERACTIVE_TIME_LIMIT: f64 = 60.0;
-const MODELS: [&str; 5] = ["rolling", "ep_next", "ep_next_fade", "v1", "v1r"];
+const MODELS: [&str; 6] = ["rolling", "ep_next", "ep_next_fade", "v1", "v1r", "v1-2026-10"];
 
 #[derive(Args)]
 pub struct BenchArgs {

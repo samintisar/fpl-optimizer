@@ -23,6 +23,10 @@ numpy's dot products round as OpenBLAS's kernel for the CPU does (FMA on AVX-512
 on Zen or Haswell); Rust follows the Haswell kernel, so Python runs with
 OPENBLAS_CORETYPE=Haswell (a no-op where OpenBLAS picks it anyway).
 
+Since v1r's adoption (2026-11-03) Rust's `v1` is not Python's (that is Rust's `v1-2026-10`),
+so the logged v1 commands only compare from a checkout before the rename (`rust-migration`
+at 2b49a64, where this gate passed).
+
 The log's rows were made by older commits, so the reference is today's Python, not the
 logged values. The logged runs take hours (v1 chip runs: ~3 h each in Python); `--select`
 picks commands by regex, `--list` prints them. Results go to `results/experiments.csv`

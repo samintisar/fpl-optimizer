@@ -81,8 +81,12 @@ def test_names_golden_is_current():
     assert all(fuzz.token_set_ratio(a, b) == score for a, b, score in golden["pairs"])
 
 
+# Python's v1 is Rust's `v1-2026-10` (Rust's `calibration_table.json` is the adopted v1r's).
 CALIBRATION_FILE = (
-    Path(__file__).resolve().parents[1] / "crates" / "fplopt-models" / "calibration_table.json"
+    Path(__file__).resolve().parents[1]
+    / "crates"
+    / "fplopt-models"
+    / "calibration_table_v1-2026-10.json"
 )
 
 

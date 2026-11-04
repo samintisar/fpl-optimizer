@@ -91,7 +91,14 @@ fn fit_writes_one_monotone_map_per_season() {
     assert!(String::from_utf8_lossy(&again.stdout).contains("compare: pass"));
     // A walk of other params is refused.
     let refused = binary()
-        .args(["models", "calibrate", "fit", "--model", "v1r", "--walk"])
+        .args(["models", "calibrate", "fit", "--model", "v1-2026-10", "--walk"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    // --write is for v1 only (v1-2026-10's table is Python's export).
+    let refused = binary()
+        .args(["models", "calibrate", "fit", "--model", "v1-2026-10", "--write", "--walk"])
         .arg(&dir)
         .output()
         .unwrap();

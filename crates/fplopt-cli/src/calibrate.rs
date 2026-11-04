@@ -1,7 +1,7 @@
 //! `models calibrate walk|fit`: the walk-forward rows of a v1-family model and the
 //! expanding-window P(start) calibration fitted on them (Python `dev/calibrate_v1.py`'s
 //! `walk` and `fit --write`, part `p_start` only; `score`, the variant report, `ban` and the
-//! other parts are not ported: neither v1's nor v1r's table uses them).
+//! other parts are not ported: neither v1's nor v1-2026-10's table uses them).
 //!
 //! **walk**: per season, at every deadline in gw_index order, the uncalibrated per
 //! player-fixture components (`fixture_components`, fitted at the refit cutoff) of the
@@ -44,7 +44,7 @@ pub enum CalibrateJob {
     /// Per season, the uncalibrated per player-fixture P(start) at every deadline and the
     /// realized start; writes <out>/<season>.parquet and <out>/params.txt.
     Walk {
-        /// v1 or v1r.
+        /// v1 (alias v1r) or v1-2026-10.
         #[arg(long)]
         model: String,
         /// Start years, e.g. 2016-2024 (the 2025/26 holdout is refused).
@@ -61,9 +61,10 @@ pub enum CalibrateJob {
     },
     /// From a walk, the table: for each season S, the P(start) map(s) fitted on the walk
     /// rows of seasons [first_fit, S); written to <walk>/calibration-table.json, and with
-    /// --write to crates/fplopt-models/calibration_table_<model>.json.
+    /// --write (v1 only) to crates/fplopt-models/calibration_table.json.
     Fit {
-        /// v1 or v1r (the walk's params.txt must be this model's fingerprint).
+        /// v1 (alias v1r) or v1-2026-10 (the walk's params.txt must be this model's
+        /// fingerprint).
         #[arg(long)]
         model: String,
         #[arg(long)]
@@ -431,10 +432,13 @@ fn fit(
     write: bool,
     compare: Option<&Path>,
 ) -> Result<()> {
-    if write && model == "v1" {
-        bail!("v1's table is calibration_table.json, exported from Python's; --write is for v1r");
-    }
     let params = params_for(model)?;
+    if write && params.model != "v1" {
+        bail!(
+            "{model}'s table is calibration_table_v1-2026-10.json, exported from Python's; \
+             --write is for v1"
+        );
+    }
     let groups = parse_groups(groups)?;
     let fingerprint = std::fs::read_to_string(walk.join("params.txt"))
         .with_context(|| format!("{}: no params.txt (not a walk?)", walk.display()))?;
@@ -456,7 +460,7 @@ fn fit(
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("fplopt-models")
-            .join(format!("calibration_table_{model}.json"));
+            .join("calibration_table.json");
         std::fs::write(&path, &text)?;
         println!("wrote {}", path.display());
     }

@@ -275,7 +275,7 @@ def main() -> int:
         "--rust-model",
         action="append",
         default=[],
-        help="PY=RUST: compare Python model PY with Rust model RUST (e.g. v1=v1r)",
+        help="PY=RUST: compare Python model PY with Rust model RUST (default v1=v1-2026-10)",
     )
     parser.add_argument(
         "--no-calibrate", action="store_true", help="v1: fit and predict without calibration"
@@ -293,7 +293,9 @@ def main() -> int:
         parser.error(f"no Rust binary at {args.bin} (cargo build --release -p fplopt-cli)")
     NO_CALIBRATE = args.no_calibrate
     models = [m.strip() for m in args.models.split(",") if m.strip()]
-    rust_names = {m: m for m in models}  # Python name -> the name Rust dumps it under
+    # Python name -> the name Rust dumps it under; Python's v1 is Rust's v1-2026-10 (Rust's
+    # v1 is the adopted v1r since 2026-11-03).
+    rust_names = {m: "v1-2026-10" if m == "v1" else m for m in models}
     for pair in args.rust_model:
         py_name, _, rs_name = pair.partition("=")
         if py_name not in rust_names or not rs_name:

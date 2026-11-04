@@ -63,7 +63,9 @@ pub const GW_PROBABILITIES: [&str; 9] = [
 ];
 pub const GW_SUMS: [&str; 4] = ["e_minutes", "e_goals", "e_assists", "e_bonus"];
 
-/// v1's settings: the module defaults, with the minutes model's ban residual.
+/// v1's settings: the module defaults with the minutes model's ban residual (that much is
+/// `v1-2026-10`, Python's v1) plus the research loop's keeps (`v1r` until its adoption on
+/// 2026-11-03, spec 2026-11-02-v1r-promotion).
 #[derive(Clone, Debug, PartialEq)]
 pub struct V1Params {
     /// The model name: picks the calibration table (`calibration::calibration_for`).
@@ -79,28 +81,12 @@ pub struct V1Params {
 }
 
 impl Default for V1Params {
+    /// `v1-2026-10` with the research loop's keeps on (research pin dcacbcb).
     fn default() -> Self {
-        V1Params {
-            model: "v1",
-            team: TeamParams::default(),
-            minutes: MinutesParams { ban_residual: true, ..MinutesParams::default() },
-            shares: SharesParams::default(),
-            components: ComponentsParams::default(),
-            back_split: true,
-            category_slopes: false,
-            calibrate: true,
-        }
-    }
-}
-
-impl V1Params {
-    /// `v1` with the research loop's keeps on (spec 2026-11-02-v1r-promotion). Each task of
-    /// the plan turns one on here.
-    pub fn v1r() -> Self {
-        let base = V1Params::default();
+        let base = V1Params::v1_2026_10();
         let rounds = GbmParams { num_boost_round: 400, ..GbmParams::default() };
         V1Params {
-            model: "v1r",
+            model: "v1",
             minutes: MinutesParams {
                 start: rounds.clone(),
                 sixty: rounds.clone(),
@@ -120,19 +106,36 @@ impl V1Params {
             ..base
         }
     }
+}
+
+impl V1Params {
+    /// The live model until 2026-11-03 (Python's v1): the module defaults with the minutes
+    /// model's ban residual.
+    pub fn v1_2026_10() -> Self {
+        V1Params {
+            model: "v1-2026-10",
+            team: TeamParams::default(),
+            minutes: MinutesParams { ban_residual: true, ..MinutesParams::default() },
+            shares: SharesParams::default(),
+            components: ComponentsParams::default(),
+            back_split: true,
+            category_slopes: false,
+            calibrate: true,
+        }
+    }
 
     /// The settings a calibration table was fitted for (`Debug` of the params with
-    /// `calibrate` on): what a Rust-written table records as `params` (v1's file keeps
-    /// Python's `calibration_fingerprint` string instead).
+    /// `calibrate` on): what a Rust-written table records as `params` (`v1-2026-10`'s file
+    /// keeps Python's `calibration_fingerprint` string instead).
     pub fn fingerprint(&self) -> String {
         format!("{:?}", V1Params { calibrate: true, ..self.clone() })
     }
 
-    /// The params a model name stands for.
+    /// The params a model name stands for (`v1r`, its name before adoption, is `v1`).
     pub fn for_model(name: &str) -> Result<Self> {
         match name {
-            "v1" => Ok(V1Params::default()),
-            "v1r" => Ok(V1Params::v1r()),
+            "v1" | "v1r" => Ok(V1Params::default()),
+            "v1-2026-10" => Ok(V1Params::v1_2026_10()),
             other => bail!("not a v1-family model: {other:?}"),
         }
     }
@@ -636,9 +639,9 @@ pub fn xp_v1(view: &AsOfView) -> Result<Table> {
     xp_v1_family("v1", view)
 }
 
-/// `MODELS["v1r"](view)`.
-pub fn xp_v1r(view: &AsOfView) -> Result<Table> {
-    xp_v1_family("v1r", view)
+/// `MODELS["v1-2026-10"](view)`.
+pub fn xp_v1_2026_10(view: &AsOfView) -> Result<Table> {
+    xp_v1_family("v1-2026-10", view)
 }
 
 impl V1Fit {
@@ -666,9 +669,9 @@ pub fn xp_v1_with_fit(view: &AsOfView) -> Result<(Table, serde_json::Value)> {
     xp_v1_family_with_fit("v1", view)
 }
 
-/// `xp_v1r` with the fit's values.
-pub fn xp_v1r_with_fit(view: &AsOfView) -> Result<(Table, serde_json::Value)> {
-    xp_v1_family_with_fit("v1r", view)
+/// `xp_v1_2026_10` with the fit's values.
+pub fn xp_v1_2026_10_with_fit(view: &AsOfView) -> Result<(Table, serde_json::Value)> {
+    xp_v1_family_with_fit("v1-2026-10", view)
 }
 
 #[cfg(test)]
@@ -676,19 +679,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v1r_is_registered_and_v1_is_unchanged() {
-        assert!(crate::MODELS.contains(&"v1r"));
-        assert!(crate::COMPONENTS.contains(&"v1r"));
+    fn v1_is_the_adopted_model_and_the_old_one_is_kept() {
+        for name in ["v1", "v1r", "v1-2026-10"] {
+            assert!(crate::MODELS.contains(&name));
+            assert!(crate::is_v1_family(name));
+        }
+        assert!(crate::COMPONENTS.contains(&"v1-2026-10"));
         assert_eq!(V1Params::default().model, "v1");
-        assert_eq!(V1Params::v1r().model, "v1r");
-        // v1r is calibrated with its own table, fitted with v1r's params (from 2017/18).
-        assert!(V1Params::v1r().calibrate);
-        // One flag-layer slope per category in v1r only.
-        assert!(V1Params::v1r().category_slopes);
-        assert!(!V1Params::default().category_slopes);
-        assert!(crate::calibration::calibration_for("v1r", 2016).unwrap().is_none());
-        assert!(crate::calibration::calibration_for("v1r", 2023).unwrap().is_some());
-        assert!(crate::calibration::calibration_for("v1", 2023).unwrap().is_some());
+        assert_eq!(V1Params::v1_2026_10().model, "v1-2026-10");
+        // Both calibrated, each with its own table (entries from 2017/18).
+        assert!(V1Params::default().calibrate && V1Params::v1_2026_10().calibrate);
+        // One flag-layer slope per category in v1 only.
+        assert!(V1Params::default().category_slopes);
+        assert!(!V1Params::v1_2026_10().category_slopes);
+        for name in ["v1", "v1r", "v1-2026-10"] {
+            assert!(crate::calibration::calibration_for(name, 2016).unwrap().is_none());
+            assert!(crate::calibration::calibration_for(name, 2023).unwrap().is_some());
+        }
         // A name outside the family is an error, not "no table".
         assert!(crate::calibration::calibration_for("nope", 2023).is_err());
     }
@@ -696,37 +703,39 @@ mod tests {
     #[test]
     fn for_model_maps_names_to_params() {
         assert_eq!(V1Params::for_model("v1").unwrap(), V1Params::default());
-        assert_eq!(V1Params::for_model("v1r").unwrap(), V1Params::v1r());
+        assert_eq!(V1Params::for_model("v1r").unwrap(), V1Params::default());
+        assert_eq!(V1Params::for_model("v1-2026-10").unwrap(), V1Params::v1_2026_10());
         assert!(V1Params::for_model("nope").is_err());
     }
 
     #[test]
     fn fingerprint_is_the_calibrated_params() {
-        let v1r = V1Params::v1r();
-        let on = V1Params { calibrate: true, ..v1r.clone() };
-        assert_eq!(v1r.fingerprint(), on.fingerprint());
-        assert!(v1r.fingerprint().contains("calibrate: true"));
-        assert!(v1r.fingerprint().starts_with("V1Params { model: \"v1r\""));
-        assert_ne!(v1r.fingerprint(), V1Params::default().fingerprint());
+        let v1 = V1Params::default();
+        let on = V1Params { calibrate: true, ..v1.clone() };
+        assert_eq!(v1.fingerprint(), on.fingerprint());
+        assert!(v1.fingerprint().contains("calibrate: true"));
+        assert!(v1.fingerprint().starts_with("V1Params { model: \"v1\""));
+        assert_ne!(v1.fingerprint(), V1Params::v1_2026_10().fingerprint());
     }
 
     #[test]
-    fn v1r_minutes_parts_have_400_rounds() {
-        let p = V1Params::v1r();
+    fn v1_minutes_parts_have_400_rounds() {
+        let p = V1Params::default();
         for part in [&p.minutes.start, &p.minutes.sixty, &p.minutes.sub] {
             assert_eq!(part.num_boost_round, 400);
         }
-        assert_eq!(V1Params::default().minutes.start.num_boost_round, 200);
+        assert_eq!(V1Params::v1_2026_10().minutes.start.num_boost_round, 200);
     }
 
-    /// v1r is v1 plus exactly the research keeps at dcacbcb (the plan's Pins), nothing else:
-    /// the whole struct is compared, so a stray change to any other setting fails here.
+    /// v1 is v1-2026-10 plus exactly the research keeps at dcacbcb (the v1r plan's Pins),
+    /// nothing else: the whole struct is compared, so a stray change to any other setting
+    /// fails here.
     #[test]
-    fn v1r_is_v1_plus_exactly_the_keeps() {
-        let v1 = V1Params::default();
+    fn v1_is_v1_2026_10_plus_exactly_the_keeps() {
+        let v1 = V1Params::v1_2026_10();
         let rounds = GbmParams { num_boost_round: 400, ..GbmParams::default() };
         let expected = V1Params {
-            model: "v1r",
+            model: "v1",
             category_slopes: true,
             minutes: MinutesParams {
                 start: rounds.clone(),
@@ -745,6 +754,6 @@ mod tests {
             },
             ..v1
         };
-        assert_eq!(V1Params::v1r(), expected);
+        assert_eq!(V1Params::default(), expected);
     }
 }

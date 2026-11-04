@@ -23,6 +23,10 @@ pub enum ModelsJob {
         now: String,
         #[arg(long)]
         out: PathBuf,
+        /// The context's xP model (default the live one, `LIVE_XP`); the bot gate builds
+        /// `v1-2026-10` contexts to compare with Python's v1.
+        #[arg(long, default_value = fplopt_bot::builder::LIVE_XP)]
+        xp: String,
     },
     /// Write each model's xP frame at each deadline to <out>/<NN>/<model>.parquet (NN: the
     /// deadline's line number in the file, from 00); a component (`fplopt_models::COMPONENTS`)
@@ -75,18 +79,11 @@ pub fn dump(data_dir: &Path, models: &str, deadlines: &Path, out: &Path) -> Resu
     Ok(())
 }
 
-pub fn context(data_dir: &Path, now: &str, out: &Path) -> Result<()> {
+pub fn context(data_dir: &Path, now: &str, out: &Path, xp: &str) -> Result<()> {
     let now = chrono::DateTime::from_timestamp_micros(crate::parse_deadline(now)?)
         .ok_or_else(|| anyhow::anyhow!("--now out of range"))?;
     let store = fplopt_store::DataStore::open(data_dir)?;
-    let built = fplopt_bot::builder::build_context(
-        &store,
-        now,
-        "",
-        None,
-        None,
-        fplopt_bot::builder::LIVE_XP,
-    )?;
+    let built = fplopt_bot::builder::build_context(&store, now, "", None, None, xp)?;
     match built {
         None => log::info!("no deadline ahead in the data: no context"),
         Some(context) => {
