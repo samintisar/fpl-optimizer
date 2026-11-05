@@ -1,6 +1,6 @@
 # Chip suggestions in the bot's alerts: design
 
-**Date:** 2026-11-05. **Status:** approved by the user in chat. Written in Rust on `feat/chip-alerts` (from `rust-migration`). It goes live with the Rust server switch.
+**Date:** 2026-11-05. **Status:** approved by the user in chat. Written in Rust on `feat/chip-alerts`, from `main`. The server switched to Rust on 2026-11-05: PR #55 was merged as 0011edc. This change goes live when it merges to `main` and the server is rebuilt, which is a separate step the user approves.
 
 ## Why
 
@@ -113,7 +113,7 @@ It is fixed text, as above. It stays until a chip policy passes the full gate.
    - `true` in `bot run` and `live tick`;
    - `false` by default in `bot replay`, where a script may set `"chip_alerts": true`.
 
-   So the Python-generated golden (`tests/fixtures/rust_golden/bot/`) and `dev/bot_parity.py` still compare byte for byte. **Intentional divergence from Python:** Rust's live alerts carry the section and Python's don't. That's fine because the bot gates have run (df34009, 000670b) and Python is deleted after the switch.
+   So the Python-generated golden (`tests/fixtures/rust_golden/bot/`) and `dev/bot_parity.py` still compare byte for byte. **Intentional divergence from Python:** Rust's live alerts carry the section and Python's don't. That's fine because the bot gates have run (df34009, 000670b), the server runs Rust since 2026-11-05, and Python is deleted in batch 8.
 5. **Store:** the `chip_calls` table is created with `CREATE TABLE IF NOT EXISTS` (the schema convention), plus `record_chip_call` and `chip_calls(user_id)`.
 6. **Docs:**
    - PLAN §8: alerts carry chip suggestions.
@@ -145,7 +145,7 @@ It is fixed text, as above. It stays until a chip policy passes the full gate.
 
 ## Timing
 
-- **Live:** with the server switch (about GW12–13).
-- **The user's first-half Bench Boost and Free Hit** (window ends GW19) are therefore covered by alerts from about GW13.
+- **Live:** after merging to `main` and rebuilding on the server. The aim is a deploy between two gameweeks, well before GW19.
+- **The user's first-half Bench Boost and Free Hit** (window ends GW19) are then covered by alerts.
 - **Until then:** the user checks `/chips` before each deadline.
-- **V6 logging** starts at GW20 (deadline about 2026-12-29), after the switch.
+- **V6 logging** starts at GW20 (deadline about 2026-12-29).
