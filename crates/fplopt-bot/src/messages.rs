@@ -10,6 +10,7 @@ use fplopt_optimize::chips::chip_value;
 use fplopt_optimize::entry::{SquadSpec, season_label};
 use serde_json::Value;
 
+use crate::chip_calls::ChipCalls;
 use crate::context::PlanContext;
 use crate::planner::{
     CHIP_LABELS, ChipOptions, Decision, UserPlan, chip_label, chips_left, ranked,
@@ -457,9 +458,156 @@ pub fn split_message(text: &str, limit: usize) -> Vec<String> {
     pieces
 }
 
+/// The alert's chip section (Telegram HTML; the caller adds the blank line after it).
+pub fn chip_section(calls: &ChipCalls) -> String {
+    let headline = calls.forced.as_deref().or(calls.planner.as_deref());
+    let mut lines = Vec::new();
+    lines.push(match (calls.forced.as_deref(), calls.planner.as_deref()) {
+        (Some(c), _) => format!("<b>Chip this week:</b> play {} now, or lose it", e(chip_label(c))),
+        (None, Some(c)) => {
+            let mut line = format!(
+                "<b>Chip this week:</b> play {} ({:+.1} xP vs keeping it)",
+                e(chip_label(c)),
+                calls.planner_gain
+            );
+            if c == "freehit" || c == "wildcard" {
+                line.push_str(" \u{b7} see /chips for the chip squad");
+            }
+            line
+        }
+        (None, None) => "<b>Chip this week:</b> hold".to_string(),
+    });
+
+    let gain = |key: &str| match calls.gains.get(key).copied().flatten() {
+        Some(v) => format!("{v:.1}"),
+        None => "n/a".to_string(),
+    };
+    let rules = calls.rules.as_deref();
+    let reason = match rules {
+        Some(c) if calls.forced.as_deref() == Some(c) => {
+            "last chance before the window closes".to_string()
+        }
+        Some("3xc") => format!("captain xP {} \u{2265} 8.3", gain("captain_xp")),
+        Some("bboost") => format!("bench xP {} \u{2265} 10.9", gain("bench_xp")),
+        Some("freehit") => format!(
+            "{} squad players without a match \u{2265} 4",
+            gain("blanks").trim_end_matches(".0")
+        ),
+        Some("wildcard") => format!("wildcard gain {} \u{2265} 12.9", gain("gain_wc")),
+        Some(_) => String::new(),
+        None => format!("captain xP {}, bench xP {}", gain("captain_xp"), gain("bench_xp")),
+    };
+    if rules == headline {
+        lines.push(match rules {
+            Some(_) => format!("  Simple rules agree: {}", e(&reason)),
+            None => "  Simple rules agree: hold".to_string(),
+        });
+    } else {
+        let play = match rules {
+            Some(c) => format!("play {}", e(chip_label(c))),
+            None => "hold".to_string(),
+        };
+        lines.push(format!("  Simple rules: {play} ({})", e(&reason)));
+    }
+
+    if calls.open.is_empty() {
+        lines.push("Unused chips: none".to_string());
+    } else {
+        let parts: Vec<String> = calls
+            .open
+            .iter()
+            .map(|o| {
+                let mut note = if o.expiring {
+                    format!("expires after GW{}", o.last_gw)
+                } else {
+                    format!("until GW{}", o.last_gw)
+                };
+                if headline == Some(o.name.as_str()) {
+                    note.push_str(", playing now");
+                } else if let Some(best) = o.best_gw {
+                    note.push_str(&format!(", best GW: GW{best}"));
+                }
+                format!("{} ({note})", e(chip_label(&o.name)))
+            })
+            .collect();
+        lines.push(format!("Unused chips: {}", parts.join(", ")));
+    }
+    lines.push(
+        "Evidence: on 2023/24 and 2024/25 this planner scored +4.2 pts/GW over playing no chips; \
+         not proven better than the simple rules."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+/// The chip section when the calls could not be computed.
+pub fn chip_failure_section() -> String {
+    "<b>Chip this week:</b> chip check failed this time: try /chips".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chip_calls::OpenChip;
+
+    fn chip_calls(planner: Option<&str>, rules: Option<&str>, forced: Option<&str>) -> ChipCalls {
+        ChipCalls {
+            gw: 13,
+            planner: planner.map(Into::into),
+            planner_gain: 7.44,
+            rules: rules.map(Into::into),
+            gains: [("captain_xp", 7.0), ("bench_xp", 11.6), ("blanks", 0.0), ("gain_wc", 3.0)]
+                .iter()
+                .map(|(k, v)| (k.to_string(), Some(*v)))
+                .collect(),
+            forced: forced.map(Into::into),
+            open: vec![
+                OpenChip {
+                    name: "freehit".into(),
+                    last_gw: 19,
+                    best_gw: Some(16),
+                    expiring: false,
+                },
+                OpenChip { name: "bboost".into(), last_gw: 19, best_gw: Some(13), expiring: false },
+            ],
+            v6: None,
+            scenarios: vec![],
+        }
+    }
+
+    #[test]
+    fn chip_section_play_and_agree() {
+        assert_eq!(
+            chip_section(&chip_calls(Some("bboost"), Some("bboost"), None)),
+            "<b>Chip this week:</b> play Bench Boost (+7.4 xP vs keeping it)\n\
+             \x20 Simple rules agree: bench xP 11.6 \u{2265} 10.9\n\
+             Unused chips: Free Hit (until GW19, best GW: GW16), Bench Boost (until GW19, playing now)\n\
+             Evidence: on 2023/24 and 2024/25 this planner scored +4.2 pts/GW over playing no chips; \
+             not proven better than the simple rules."
+        );
+    }
+
+    #[test]
+    fn chip_section_hold_and_differ() {
+        let text = chip_section(&chip_calls(None, Some("bboost"), None));
+        assert!(text.starts_with("<b>Chip this week:</b> hold\n  Simple rules: play Bench Boost (bench xP 11.6 \u{2265} 10.9)\n"));
+    }
+
+    #[test]
+    fn chip_section_forced_and_expiring() {
+        let mut calls = chip_calls(None, Some("freehit"), Some("freehit"));
+        calls.open[0].expiring = true;
+        let text = chip_section(&calls);
+        assert!(text.starts_with("<b>Chip this week:</b> play Free Hit now, or lose it\n  Simple rules agree: last chance before the window closes\n"));
+        assert!(text.contains("Free Hit (expires after GW19, playing now)"));
+    }
+
+    #[test]
+    fn chip_section_free_hit_points_to_chips() {
+        let text = chip_section(&chip_calls(Some("freehit"), None, None));
+        assert!(text.starts_with("<b>Chip this week:</b> play Free Hit (+7.4 xP vs keeping it) \u{b7} see /chips for the chip squad\n"));
+        assert!(text.contains("\n  Simple rules: hold (captain xP 7.0, bench xP 11.6)\n"));
+    }
 
     // Python test_split_message.
     #[test]
