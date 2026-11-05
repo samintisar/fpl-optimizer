@@ -12,7 +12,7 @@ WorkingDirectory=%h/fpl-optimizer
 # After=network-online.target does nothing for user units: wait up to ~2 min for DNS at boot,
 # then start regardless (if the network never came up, the bot fails and is restarted).
 ExecStartPre=/bin/sh -c 'for i in $$(seq 24); do getent hosts fantasy.premierleague.com >/dev/null && exit 0; sleep 5; done; echo "fantasy.premierleague.com still not resolving after 2 minutes; starting anyway" >&2; exit 0'
-ExecStart=%h/fpl-optimizer/.venv/bin/fplopt bot run
+ExecStart=%h/fpl-optimizer/target/release/fplopt-rs bot run
 Restart=on-failure
 RestartSec=30
 # systemctl stop sends SIGTERM, which the CLI turns into exit status 143.

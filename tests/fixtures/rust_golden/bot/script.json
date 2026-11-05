@@ -1,0 +1,229 @@
+{
+ "admin": 1000,
+ "params": {
+  "horizon": 1,
+  "time_limit": null
+ },
+ "chip_params": {
+  "horizon": 1,
+  "time_limit": null,
+  "chip_value_left": null
+ },
+ "steps": [
+  {
+   "now": "2023-09-14T21:30:00+00:00"
+  },
+  {
+   "chat": 5,
+   "text": "/plan"
+  },
+  {
+   "chat": 5,
+   "text": "/start"
+  },
+  {
+   "chat": 5,
+   "text": "/start"
+  },
+  {
+   "chat": 5,
+   "text": "/register 7"
+  },
+  {
+   "chat": 6,
+   "text": "/register 7"
+  },
+  {
+   "chat": 5,
+   "text": "/allow 5"
+  },
+  {
+   "chat": 1000,
+   "text": "/help"
+  },
+  {
+   "chat": 1000,
+   "text": "/allow x"
+  },
+  {
+   "chat": 1000,
+   "text": "/allow 5"
+  },
+  {
+   "chat": 1000,
+   "text": "/users"
+  },
+  {
+   "chat": 5,
+   "text": "/help"
+  },
+  {
+   "chat": 5,
+   "text": "hello"
+  },
+  {
+   "chat": 5,
+   "text": "/nope"
+  },
+  {
+   "chat": 5,
+   "text": "/plan"
+  },
+  {
+   "chat": 5,
+   "text": "/chips"
+  },
+  {
+   "chat": 5,
+   "text": "/register"
+  },
+  {
+   "chat": 5,
+   "text": "/register abc"
+  },
+  {
+   "chat": 5,
+   "text": "/register 0"
+  },
+  {
+   "chat": 5,
+   "text": "/register 8"
+  },
+  {
+   "chat": 5,
+   "text": "/register 7"
+  },
+  {
+   "chat": 5,
+   "text": "/plan"
+  },
+  {
+   "alert": 5,
+   "kind": "alert24"
+  },
+  {
+   "chat": 5,
+   "text": "/setft 9"
+  },
+  {
+   "chat": 5,
+   "text": "/setft 2"
+  },
+  {
+   "chat": 5,
+   "text": "/plan"
+  },
+  {
+   "chat": 5,
+   "text": "/setft clear"
+  },
+  {
+   "chat": 5,
+   "text": "/transfer"
+  },
+  {
+   "chat": 5,
+   "text": "/transfer a b c"
+  },
+  {
+   "chat": 5,
+   "text": "/transfer Nobody -> X"
+  },
+  {
+   "chat": 5,
+   "text": "/transfer P100109 -> P100311"
+  },
+  {
+   "chat": 5,
+   "text": "/transfer P100109 -> P100311"
+  },
+  {
+   "chat": 5,
+   "text": "/transfer 114 -> P100311"
+  },
+  {
+   "chat": 5,
+   "text": "/transfer list"
+  },
+  {
+   "chat": 5,
+   "text": "/plan"
+  },
+  {
+   "chat": 5,
+   "text": "/chips"
+  },
+  {
+   "now": "2023-09-15T15:30:00+00:00"
+  },
+  {
+   "alert": 5,
+   "kind": "alert2"
+  },
+  {
+   "chat": 5,
+   "text": "/transfer undo"
+  },
+  {
+   "alert": 5,
+   "kind": "alert2"
+  },
+  {
+   "fpl_down": true
+  },
+  {
+   "chat": 5,
+   "text": "/plan"
+  },
+  {
+   "fpl_down": false
+  },
+  {
+   "chat": 5,
+   "text": "  /PLAN@fplopt_bot "
+  },
+  {
+   "chat": 5,
+   "text": "/alerts"
+  },
+  {
+   "chat": 5,
+   "text": "/alerts off"
+  },
+  {
+   "chat": 5,
+   "text": "/alerts maybe"
+  },
+  {
+   "chat": 1000,
+   "text": "/block 1000"
+  },
+  {
+   "chat": 1000,
+   "text": "/block 5"
+  },
+  {
+   "chat": 5,
+   "text": "/plan"
+  },
+  {
+   "chat": 5,
+   "text": "/start"
+  },
+  {
+   "chat": 1000,
+   "text": "/users"
+  },
+  {
+   "now": "2023-09-15T17:30:00+00:00"
+  },
+  {
+   "chat": 1000,
+   "text": "/register 7"
+  },
+  {
+   "chat": 1000,
+   "text": "/plan"
+  }
+ ]
+}

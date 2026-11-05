@@ -1,0 +1,10 @@
+[Unit]
+Description=fpl-optimizer Rust shadow: daily snapshot (15 min after the live one)
+
+[Timer]
+OnCalendar=*-*-* 02:45:00 Europe/London
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,22 @@
+[package]
+name = "fplopt-highs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+links = "highs"
+
+# HiGHS from the pinned submodule third_party/HiGHS (v1.15.1, commit 04024d7: the version
+# highspy bundles), built with CMake; the C API is declared by hand in src/lib.rs.
+[dependencies]
+anyhow = "1.0.104"
+libmimalloc-sys = "0.1.49"
+
+[build-dependencies]
+cc = "1.10.0"
+cmake = "0.1.58"
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "fplopt-features"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# fplopt-store only: features read data through `AsOfView` (what Python's
+# tests/test_features_architecture.py checks, Cargo enforces here).
+[dependencies]
+anyhow = "1.0.104"
+fplopt-store = { version = "0.1.0", path = "../fplopt-store" }
+log = "0.4.34"
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "fplopt-lgbm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+links = "lightgbm"
+
+# LightGBM from the pinned submodule third_party/LightGBM (v4.7.0: the version the Python
+# environment's wheel bundles), built with CMake; the C API is declared by hand in src/lib.rs.
+[dependencies]
+anyhow = "1.0.104"
+
+[build-dependencies]
+cmake = "0.1.58"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+flate2 = "1"
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }

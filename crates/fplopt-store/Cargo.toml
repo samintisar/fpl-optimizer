@@ -1,0 +1,17 @@
+[package]
+name = "fplopt-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+fplopt-build = { version = "0.1.0", path = "../fplopt-build" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

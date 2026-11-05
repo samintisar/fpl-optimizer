@@ -8,9 +8,9 @@ use std::path::Path;
 
 use anyhow::Result;
 use chrono::{SecondsFormat, Utc};
-use serde::Serialize;
 use serde_json::Value;
-use serde_json::ser::Formatter;
+
+use crate::pyjson::dumps;
 
 pub const EXPERIMENT_COLUMNS: [&str; 7] =
     ["timestamp", "git_sha", "command", "config", "metrics", "n_variants", "family"];
@@ -52,7 +52,7 @@ pub fn family_variants(path: &Path, family: &str) -> Result<usize> {
 }
 
 /// Append one row: UTC timestamp, git sha, command, config and metrics as JSON (sorted
-/// keys, Python's `json.dumps` separators; non-finite floats are already null in a
+/// keys, `pyjson::dumps`; non-finite floats are already null in a
 /// `serde_json::Value`), n_variants, family. LF line endings; the header is written if the
 /// file is new or empty, and a log with an older header is rewritten with these columns.
 pub fn log_experiment(
@@ -102,52 +102,10 @@ fn writer<W: io::Write>(inner: W) -> csv::Writer<W> {
     csv::WriterBuilder::new().terminator(csv::Terminator::Any(b'\n')).from_writer(inner)
 }
 
-/// `json.dumps(value, sort_keys=True)`: ", " and ": " separators. Keys come out sorted
-/// because `serde_json::Map` is a BTreeMap (no `preserve_order` feature).
-pub fn dumps(value: &Value) -> Result<String> {
-    let mut out = Vec::new();
-    let mut ser = serde_json::Serializer::with_formatter(&mut out, PythonFormatter);
-    value.serialize(&mut ser)?;
-    Ok(String::from_utf8(out)?)
-}
-
-struct PythonFormatter;
-
-impl Formatter for PythonFormatter {
-    fn begin_array_value<W: ?Sized + io::Write>(
-        &mut self,
-        w: &mut W,
-        first: bool,
-    ) -> io::Result<()> {
-        if first { Ok(()) } else { w.write_all(b", ") }
-    }
-
-    fn begin_object_key<W: ?Sized + io::Write>(
-        &mut self,
-        w: &mut W,
-        first: bool,
-    ) -> io::Result<()> {
-        if first { Ok(()) } else { w.write_all(b", ") }
-    }
-
-    fn begin_object_value<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
-        w.write_all(b": ")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn dumps_matches_python_layout() {
-        let value = json!({"b": [1, 2.5, null], "a": {"y": "x", "x": true}, "nan": f64::NAN});
-        assert_eq!(
-            dumps(&value).unwrap(),
-            r#"{"a": {"x": true, "y": "x"}, "b": [1, 2.5, null], "nan": null}"#
-        );
-    }
 
     #[test]
     fn appends_rows_with_header_and_counts_family() {

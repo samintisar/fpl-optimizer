@@ -1,0 +1,8 @@
+[submodule "third_party/HiGHS"]
+	path = third_party/HiGHS
+	url = https://github.com/ERGO-Code/HiGHS
+	shallow = true
+[submodule "third_party/LightGBM"]
+	path = third_party/LightGBM
+	url = https://github.com/microsoft/LightGBM
+	shallow = true

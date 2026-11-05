@@ -1,0 +1,24 @@
+[package]
+name = "fplopt-backtest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+fplopt-build = { version = "0.1.0", path = "../fplopt-build" }
+fplopt-core = { version = "0.1.0", path = "../fplopt-core" }
+fplopt-features = { version = "0.1.0", path = "../fplopt-features" }
+fplopt-models = { version = "0.1.0", path = "../fplopt-models" }
+fplopt-optimize = { version = "0.1.0", path = "../fplopt-optimize" }
+fplopt-store = { version = "0.1.0", path = "../fplopt-store" }
+libm = "0.2.16"
+log = "0.4.34"
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+sha1 = "0.10.7"
+sha2 = "0.11.1"
+
+[lints]
+workspace = true
