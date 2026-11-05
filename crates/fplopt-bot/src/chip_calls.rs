@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use fplopt_optimize::chip_rules::{H, chip_gains, last_chance, rule_chip};
 use fplopt_optimize::state::PoolPlayer;
 use fplopt_optimize::{OptimizerParams, PlanInput, XpFrame};
@@ -22,11 +22,14 @@ pub struct OpenChip {
     pub expiring: bool,       // stop - gw_index <= 3
 }
 
-/// The chip calls for one alert (logged in `chip_calls`, shown by `messages::chip_section`).
+/// The chip calls for one alert (logged in `chip_calls`, for the alert's chip section).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChipCalls {
     pub gw: i64,
-    /// The planner's chip for this GW (None: hold) and its gain over the no-chip scenario.
+    /// The planner's chip for this GW (None: hold) and its gain over the no-chip scenario:
+    /// the single-chip scenario `{chip}@gw{gw}`'s objective minus `none`'s when P solved it,
+    /// else the best plan's total objective minus `none`'s (a pair's gain then includes the
+    /// later chip).
     pub planner: Option<String>,
     pub planner_gain: f64,
     /// H's chip for this GW and the numbers it read.
@@ -60,12 +63,22 @@ pub fn scenario_gw(label: &str) -> Option<i64> {
 }
 
 /// V6's settings: the live settings, the per-window table × 0.8, Free Hit gains × 0.4.
+///
+/// Errors if the table is missing, unusable or not a window-split table; the caller must
+/// degrade (skip V6 and warn), never fail the alert.
 pub fn v6_params() -> Result<OptimizerParams> {
     v6_params_from(Path::new(V6_TABLE))
 }
 
 /// `v6_params` with the per-window table read from `table`.
 pub fn v6_params_from(table: &Path) -> Result<OptimizerParams> {
+    // as the backtest's check_table_header does for chip_split=1
+    if table.is_file() {
+        let payload: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(table)?)?;
+        if payload.get("split").and_then(|x| x.as_str()) != Some("window") {
+            bail!("{} is not a window-split table (chips values --split window)", table.display());
+        }
+    }
     let params = OptimizerParams {
         chip_value_left: Some(load_terminal_values(V6_SHRINK, table)?),
         fh_scale: V6_FH_SCALE,
@@ -76,7 +89,7 @@ pub fn v6_params_from(table: &Path) -> Result<OptimizerParams> {
 }
 
 /// Squad players (by club, `squad_teams`) whose club blanks the target GW: every pool player
-/// of the club has xP 0 or null at horizon 0 (a v1 frame gives a blank 0; a club that plays
+/// of the club has xP 0 or none at horizon 0 (a blank is 0 or absent; a club that plays
 /// always has someone above 0).
 pub fn blanks_from_frame(frame: &XpFrame, pool: &[PoolPlayer], squad_teams: &[i64]) -> i64 {
     let team_of: HashMap<i64, i64> = pool.iter().map(|p| (p.player_key, p.team_key)).collect();
@@ -98,20 +111,65 @@ pub fn calls_changed(a: &ChipCalls, b: &ChipCalls) -> bool {
         != (b.planner.as_deref(), b.rules.as_deref(), b.forced.as_deref())
 }
 
+/// The best GW for a chip within its own window `current_gw..=last_gw`: the single-chip
+/// solve's GW if it is in the window, else the best solved single-chip scenario of that name
+/// in the window (highest objective, earliest GW on ties), else None.
+pub fn best_gw_in_window(
+    single: Option<&(String, f64)>,
+    objectives: &[(String, f64)],
+    name: &str,
+    current_gw: i64,
+    last_gw: i64,
+) -> Option<i64> {
+    let in_window = |g: i64| (current_gw..=last_gw).contains(&g);
+    if let Some(g) = single.and_then(|(label, _)| scenario_gw(label)).filter(|g| in_window(*g)) {
+        return Some(g);
+    }
+    let prefix = format!("{name}@gw");
+    let mut best: Option<(i64, f64)> = None;
+    for (label, value) in objectives {
+        if label.contains('+') || !label.starts_with(&prefix) {
+            continue;
+        }
+        let Some(g) = scenario_gw(label).filter(|g| in_window(*g)) else { continue };
+        let better = match best {
+            None => true,
+            Some((bg, bv)) => *value > bv || (*value == bv && g < bg),
+        };
+        if better {
+            best = Some((g, *value));
+        }
+    }
+    best.map(|(g, _)| g)
+}
+
 /// The calls for `plan`'s user from P's search `options` and, from GW20, V6's `v6` search.
+///
+/// Errors (no "none" scenario, H's inputs failing) are the caller's to handle: a failed P or
+/// H gives the failure line, V6 is skipped with a warning; never a failed alert.
 pub fn compute_chip_calls(
     plan: &UserPlan,
     options: &ChipOptions,
     v6: Option<&ChipOptions>,
 ) -> Result<ChipCalls> {
     let context = &plan.context;
+    // `gameweeks` covers the whole season, so the fallback only guards a malformed context
     let gw_of: HashMap<i64, i64> = context.gameweeks.iter().map(|(g, i)| (*i, *g)).collect();
     // P
     let objectives = &options.plans.scenario_objectives;
-    let base = objectives.iter().rev().find(|(l, _)| l == "none").map_or(0.0, |(_, v)| *v);
+    let Some(base) = objectives.iter().rev().find(|(l, _)| l == "none").map(|(_, v)| *v) else {
+        bail!("chip search has no 'none' scenario");
+    };
     let best = options.plans.best();
     let planner = best.first().chip.clone();
-    let planner_gain = if planner.is_some() { best.total_objective() - base } else { 0.0 };
+    let planner_gain = match &planner {
+        None => 0.0,
+        Some(c) => {
+            let label = format!("{c}@gw{}", context.gw);
+            let single = objectives.iter().rev().find(|(l, _)| *l == label).map(|(_, v)| *v);
+            single.unwrap_or_else(|| best.total_objective()) - base
+        }
+    };
     // H on the bot's no-chip plan
     let problem = PlanInput::from_context(
         &plan.state,
@@ -144,11 +202,20 @@ pub fn compute_chip_calls(
         .filter(|w| {
             !used.contains(&w.chip_id) && w.start <= context.gw_index && context.gw_index <= w.stop
         })
-        .map(|w| OpenChip {
-            name: w.name.clone(),
-            last_gw: gw_of.get(&w.stop).copied().unwrap_or(w.stop),
-            best_gw: options.single(&w.name).and_then(|(label, _)| scenario_gw(label)),
-            expiring: is_expiring(context.gw_index, w.stop),
+        .map(|w| {
+            let last_gw = gw_of.get(&w.stop).copied().unwrap_or(w.stop);
+            OpenChip {
+                name: w.name.clone(),
+                last_gw,
+                best_gw: best_gw_in_window(
+                    options.single(&w.name),
+                    objectives,
+                    &w.name,
+                    context.gw,
+                    last_gw,
+                ),
+                expiring: is_expiring(context.gw_index, w.stop),
+            }
         })
         .collect();
     let v6 = v6.map(|o| o.plans.best().first().chip.clone());
@@ -190,11 +257,21 @@ mod tests {
     #[test]
     fn blanks_count_squad_players_of_clubs_with_all_zero_xp() {
         let frame = XpFrame {
-            player_key: vec![10, 11, 20, 21, 30, 31, 10],
-            gw: vec![9; 7],
-            gw_index: vec![9, 9, 9, 9, 9, 9, 10],
-            horizon: vec![0, 0, 0, 0, 0, 0, 1],
-            xp: vec![Some(0.0), Some(3.2), Some(0.0), Some(0.0), None, Some(0.0), Some(5.0)],
+            player_key: vec![10, 11, 20, 21, 30, 31, 10, 40, 40],
+            gw: vec![9; 9],
+            gw_index: vec![9, 9, 9, 9, 9, 9, 10, 9, 10],
+            horizon: vec![0, 0, 0, 0, 0, 0, 1, 0, 1],
+            xp: vec![
+                Some(0.0),
+                Some(3.2),
+                Some(0.0),
+                Some(0.0),
+                None,
+                Some(0.0),
+                Some(5.0),
+                Some(0.0),
+                Some(4.0),
+            ],
             p_play: None,
             p_play_gw: None,
             e_minutes: None,
@@ -206,9 +283,36 @@ mod tests {
             pool_player(21, 2),
             pool_player(30, 3),
             pool_player(31, 3),
+            pool_player(40, 4),
+            pool_player(50, 5),
         ];
-        let squad_teams = [1, 1, 2, 3, 3];
-        assert_eq!(blanks_from_frame(&frame, &pool, &squad_teams), 3);
+        // club 4 only has xP > 0 at horizon 1, club 5 is absent from the frame
+        let squad_teams = [1, 1, 2, 3, 3, 4, 5];
+        assert_eq!(blanks_from_frame(&frame, &pool, &squad_teams), 5);
+    }
+
+    #[test]
+    fn best_gw_stays_in_the_chips_window() {
+        let o: Vec<(String, f64)> = [
+            ("none", 100.0),
+            ("bboost@gw21", 109.0),
+            ("bboost@gw17", 105.0),
+            ("bboost@gw18", 105.0),
+            ("bboost@gw16+3xc@gw17", 120.0),
+            ("3xc@gw17", 130.0),
+        ]
+        .iter()
+        .map(|(l, x)| (l.to_string(), *x))
+        .collect();
+        // the single's GW is in the window
+        let in_window = ("bboost@gw16".to_string(), 104.0);
+        assert_eq!(best_gw_in_window(Some(&in_window), &o, "bboost", 15, 19), Some(16));
+        // outside: best solved single in the window, earliest GW on a tie
+        let outside = ("bboost@gw21".to_string(), 109.0);
+        assert_eq!(best_gw_in_window(Some(&outside), &o, "bboost", 15, 19), Some(17));
+        // nothing in the window
+        assert_eq!(best_gw_in_window(Some(&outside), &o, "bboost", 22, 25), None);
+        assert_eq!(best_gw_in_window(None, &o, "freehit", 15, 19), None);
     }
 
     #[test]
@@ -251,6 +355,12 @@ mod tests {
             assert_eq!(left[name], want, "{name}");
         }
         assert_eq!(v6.fh_scale, 0.4);
+        let dir = std::env::temp_dir().join(format!("fplopt-v6-split-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wrong = dir.join("t.json");
+        std::fs::write(&wrong, r#"{"split": "pooled", "values": {"bboost": [1.0]}}"#).unwrap();
+        assert!(v6_params_from(&wrong).unwrap_err().to_string().contains("window-split"));
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(OptimizerParams { chip_value_left: None, fh_scale: 1.0, ..v6 }, live_params());
     }
 }
