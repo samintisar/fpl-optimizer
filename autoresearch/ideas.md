@@ -144,6 +144,12 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      `b_play` (`bonus_player_prior=80`): DISCARD, MSE h0 +0.00001, 3–3 seasons. Real but
      ~0.03 points per played match after shrinkage: too small to see. Don't retry the
      offset; the season weighting is the only bonus item left, and it is low value.
+   - 2026-11-05, the season weighting: `comp-decay-05` (`ComponentsParams.season_decay` 0.7
+     → 0.5; bonus, saves, cards, defcon): DISCARD, MSE h0 +0.00003, 2–4 seasons, every
+     component metric unchanged to 4 digits. Develop has no BPS drift to adapt to, so it
+     can't show a gain. On live, the faster decay is harmless, so it's a judgment call for
+     the new BPS rules (**for the user**, no more loop variants). The idea is closed for the
+     loop.
 5. **Free-transfer value** (decision; `ft_scale` key on `research`, c6eb489). **Blocked on
    `research`** since `back_split` is on: calibrated v1 raises (fingerprint), so every
    `optimizer:v1` backtest at the head fails until the table is regenerated (*Needs the
@@ -419,6 +425,14 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 `diag-finish-price-over.txt`).
 
 ## Needs the user (not the loop's to do)
+
+- **2026-11-05**: `last_checked_gw` still 9 (GW10 deadline 2026-11-06 18:30Z), so no
+  monitor; the next report is GW10. Harness hash unchanged (adeb6c64; baseline
+  `043aa3bc2a-adeb6c64`), so the crowd (idea 13, b3a642b) is still unscoreable, and the
+  calibration table still blocks decision runs. One variant tonight: `comp-decay-05` (idea
+  4), DISCARD, flat. Every open model line is now closed for the loop or waiting on you.
+  Until the harness reads the crowd columns or the table is regenerated on `research`, the
+  nightly run can only do the weekly monitor.
 
 - **2026-11-04 (GW9 report)**: the harness hash changed (b7e2afde → adeb6c64; baseline
   metrics identical), so `net_transfers` was cherry-picked onto the head (b3a642b on the
