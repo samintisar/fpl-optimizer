@@ -464,19 +464,17 @@ pub fn chip_section(calls: &ChipCalls) -> String {
     let mut lines = Vec::new();
     lines.push(match (calls.forced.as_deref(), calls.planner.as_deref()) {
         (Some(c), _) => format!("<b>Chip this week:</b> play {} now, or lose it", e(chip_label(c))),
-        (None, Some(c)) => {
-            let mut line = format!(
-                "<b>Chip this week:</b> play {} ({:+.1} xP vs keeping it)",
-                e(chip_label(c)),
-                calls.planner_gain
-            );
-            if c == "freehit" || c == "wildcard" {
-                line.push_str(" \u{b7} see /chips for the chip squad");
-            }
-            line
-        }
+        (None, Some(c)) => format!(
+            "<b>Chip this week:</b> play {} ({:+.1} xP vs keeping it)",
+            e(chip_label(c)),
+            calls.planner_gain
+        ),
         (None, None) => "<b>Chip this week:</b> hold".to_string(),
     });
+    // A Free Hit or Wildcard squad differs from the alert's no-chip plan, forced or not.
+    if matches!(headline, Some("freehit" | "wildcard")) {
+        lines[0].push_str(" \u{b7} see /chips for the chip squad");
+    }
 
     let gain = |key: &str| match calls.gains.get(key).copied().flatten() {
         Some(v) => format!("{v:.1}"),
@@ -598,7 +596,7 @@ mod tests {
         let mut calls = chip_calls(None, Some("freehit"), Some("freehit"));
         calls.open[0].expiring = true;
         let text = chip_section(&calls);
-        assert!(text.starts_with("<b>Chip this week:</b> play Free Hit now, or lose it\n  Simple rules agree: last chance before the window closes\n"));
+        assert!(text.starts_with("<b>Chip this week:</b> play Free Hit now, or lose it · see /chips for the chip squad\n  Simple rules agree: last chance before the window closes\n"));
         assert!(text.contains("Free Hit (expires after GW19, playing now)"));
     }
 
