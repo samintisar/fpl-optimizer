@@ -790,6 +790,22 @@ mod tests {
         }
     }
 
+    /// Cells equal in key and within 1e-12 relative in value: the recorded values are
+    /// Windows' (MSVC libm); glibc's `exp`/`ln` differ in the last bit (CI, the server).
+    fn assert_cells_close(got: &[(String, i64, f64)], want: Vec<(String, i64, f64)>) {
+        assert_eq!(got.len(), want.len());
+        for (g, w) in got.iter().zip(&want) {
+            assert_eq!((&g.0, g.1), (&w.0, w.1));
+            assert!(
+                (g.2 - w.2).abs() <= 1e-12 * w.2.abs().max(1.0),
+                "{:?}: {} vs {}",
+                (&g.0, g.1),
+                g.2,
+                w.2
+            );
+        }
+    }
+
     fn cells(v: &[(&str, i64, f64)]) -> Vec<(String, i64, f64)> {
         v.iter().map(|(c, b, x)| (c.to_string(), *b, *x)).collect()
     }
@@ -800,8 +816,8 @@ mod tests {
     fn shared_slope_fit_is_unchanged() {
         let fit = fit_mapping(synthetic_rows(), &CARRIED, true, false).unwrap();
         assert_eq!(fit.slope, 0.9459744052097245);
-        assert_eq!(
-            fit.offsets,
+        assert_cells_close(
+            &fit.offsets,
             cells(&[
                 ("a", 0, 0.1649484373009503),
                 ("a", 1, -0.09059659755906703),
@@ -827,16 +843,16 @@ mod tests {
                 ("a_back", 1, 0.2190704135678721),
                 ("a_back", 2, -0.134861509383363),
                 ("a_back", 3, -0.37887865559997386),
-            ])
+            ]),
         );
-        assert_eq!(
-            fit.back_slopes,
+        assert_cells_close(
+            &fit.back_slopes,
             cells(&[
                 ("a_back", 0, 1.0302162754422977),
                 ("a_back", 1, 0.4540067344299013),
                 ("a_back", 2, 0.9126070906778803),
                 ("a_back", 3, 0.9139223237878391),
-            ])
+            ]),
         );
         assert!(fit.slopes.is_empty());
 
