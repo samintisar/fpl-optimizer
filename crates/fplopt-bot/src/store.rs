@@ -93,6 +93,24 @@ CREATE TABLE IF NOT EXISTS chip_checks (
     best TEXT NOT NULL,
     scenarios TEXT NOT NULL
 );
+-- Rust-only table (chip alerts, 2026-11-05): not in Python's schema.
+CREATE TABLE IF NOT EXISTS chip_calls (
+    call_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users (user_id),
+    season INTEGER NOT NULL,
+    gw INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    context_id TEXT,
+    created_at TEXT NOT NULL,
+    planner_call TEXT NOT NULL,
+    planner_gain REAL,
+    rules_call TEXT NOT NULL,
+    forced TEXT,
+    v6_call TEXT,
+    gains TEXT NOT NULL,
+    scenarios TEXT NOT NULL,
+    error TEXT
+);
 CREATE TABLE IF NOT EXISTS alert_runs (
     season INTEGER NOT NULL,
     gw INTEGER NOT NULL,
@@ -160,6 +178,46 @@ pub struct ChipCheck {
     pub created_at: String,
     pub best: String,
     pub scenarios: Value,
+}
+
+/// One `chip_calls` row (Rust-only table): an alert's chip call, `gains` and `scenarios` as
+/// JSON text. Call and chip fields are chip names, `"none"` for hold.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChipCallRow {
+    pub user_id: i64,
+    pub season: i64,
+    pub gw: i64,
+    pub kind: String,
+    pub context_id: Option<String>,
+    pub planner_call: String,
+    pub planner_gain: Option<f64>,
+    pub rules_call: String,
+    pub forced: Option<String>,
+    pub v6_call: Option<String>,
+    pub gains: String,
+    pub scenarios: String,
+    pub error: Option<String>,
+    /// Set by `record_chip_call` (ignored on insert).
+    pub created_at: String,
+}
+
+fn chip_call_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChipCallRow> {
+    Ok(ChipCallRow {
+        user_id: r.get("user_id")?,
+        season: r.get("season")?,
+        gw: r.get("gw")?,
+        kind: r.get("kind")?,
+        context_id: r.get("context_id")?,
+        planner_call: r.get("planner_call")?,
+        planner_gain: r.get("planner_gain")?,
+        rules_call: r.get("rules_call")?,
+        forced: r.get("forced")?,
+        v6_call: r.get("v6_call")?,
+        gains: r.get("gains")?,
+        scenarios: r.get("scenarios")?,
+        error: r.get("error")?,
+        created_at: r.get("created_at")?,
+    })
 }
 
 /// An `alert_runs` row.
@@ -560,6 +618,64 @@ impl UserStore {
             .collect()
     }
 
+    /// Log an alert's chip call; `created_at` is set here.
+    pub fn record_chip_call(&self, row: &ChipCallRow) -> Result<()> {
+        self.with(|db| {
+            db.execute(
+                "INSERT INTO chip_calls (user_id, season, gw, kind, context_id, created_at, \
+                 planner_call, planner_gain, rules_call, forced, v6_call, gains, scenarios, \
+                 error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    row.user_id,
+                    row.season,
+                    row.gw,
+                    row.kind,
+                    row.context_id,
+                    now(),
+                    row.planner_call,
+                    row.planner_gain,
+                    row.rules_call,
+                    row.forced,
+                    row.v6_call,
+                    row.gains,
+                    row.scenarios,
+                    row.error
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn chip_calls(&self, user_id: i64) -> Result<Vec<ChipCallRow>> {
+        self.with(|db| {
+            let mut q =
+                db.prepare("SELECT * FROM chip_calls WHERE user_id = ? ORDER BY call_id")?;
+            let rows =
+                q.query_map([user_id], chip_call_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// The newest call of that kind for the gameweek.
+    pub fn chip_call(
+        &self,
+        user_id: i64,
+        season: i64,
+        gw: i64,
+        kind: &str,
+    ) -> Result<Option<ChipCallRow>> {
+        self.with(|db| {
+            Ok(db
+                .query_row(
+                    "SELECT * FROM chip_calls WHERE user_id = ? AND season = ? AND gw = ? \
+                     AND kind = ? ORDER BY call_id DESC LIMIT 1",
+                    params![user_id, season, gw, kind],
+                    chip_call_row,
+                )
+                .optional()?)
+        })
+    }
+
     // --- alert runs -------------------------------------------------------------------------
 
     pub fn alert_run(&self, season: i64, gw: i64, kind: &str) -> Result<Option<AlertRun>> {
@@ -820,6 +936,41 @@ mod tests {
             (run.context_id.as_str(), run.bootstrap_at.as_str()),
             ("c1", "2023-10-01T10:00:00+00:00")
         );
+    }
+
+    #[test]
+    fn chip_calls_round_trip() {
+        let (_dir, users) = store();
+        let uid = users.add_user(5, "active").unwrap().user_id;
+        let gains = r#"{"bench_xp": 11.6, "blanks": 0.0}"#;
+        users
+            .record_chip_call(&ChipCallRow {
+                user_id: uid,
+                season: 2026,
+                gw: 13,
+                kind: "alert24".into(),
+                context_id: Some("ctx".into()),
+                planner_call: "bboost".into(),
+                planner_gain: Some(7.4),
+                rules_call: "bboost".into(),
+                forced: None,
+                v6_call: None,
+                gains: gains.into(),
+                scenarios: "{}".into(),
+                error: None,
+                created_at: String::new(),
+            })
+            .unwrap();
+        let rows = users.chip_calls(uid).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].planner_call, "bboost");
+        assert_eq!(rows[0].gains, gains);
+        assert!(!rows[0].created_at.is_empty());
+        assert_eq!(
+            users.chip_call(uid, 2026, 13, "alert24").unwrap().unwrap().rules_call,
+            "bboost"
+        );
+        assert!(users.chip_call(uid, 2026, 13, "alert2").unwrap().is_none());
     }
 
     #[test]
