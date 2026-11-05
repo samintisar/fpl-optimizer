@@ -12,11 +12,11 @@ use crate::model::{SolveError, solve_plan};
 use crate::params::OptimizerParams;
 use crate::plans::Plan;
 use crate::problem::{PlanInput, XpFrame};
-use crate::state::{InvalidDecision, PoolPlayer, SquadState, chip_window};
+use crate::state::{InvalidDecision, PoolPlayer, SquadState, chip_available, chip_window};
 
 /// Order the rule policy considers chips in (one per GW), and forced "last chance" plays.
 pub const CHIP_PRIORITY: [&str; 4] = ["freehit", "wildcard", "bboost", "3xc"];
-/// Per-GW chip quantities (`chip_gains`), recorded by the simulator.
+/// The keys of `chip_gains`' result (recorded per GW by the simulator, logged by the bot).
 pub const CHIP_DIAGNOSTICS: [&str; 7] =
     ["captain_xp", "bench_xp", "gain_tc", "gain_bb", "gain_fh", "gain_wc", "blanks"];
 
@@ -33,11 +33,6 @@ pub struct RuleThresholds {
 
 /// H as chosen on develop: `chiprules:v1:...,t_tc=8.3,t_bb=10.9,k_fh=4,t_wc=12.87`.
 pub const H: RuleThresholds = RuleThresholds { t_tc: 8.3, t_bb: 10.9, k_fh: 4, t_wc: 12.87 };
-
-/// Whether chip `name` can be played at `state.gw_index`.
-fn chip_available(state: &SquadState, name: &str, rules: &Rules) -> bool {
-    chip_window(state, name, rules).is_ok()
-}
 
 /// The chip the rules must play now or lose (more unused chips in a window than GWs left in
 /// it, first in `CHIP_PRIORITY`), or None.
@@ -192,7 +187,7 @@ mod tests {
     }
 
     /// A squad at `gw_index` with `chips_used` (chip_id, gw_index), and 2026/27's chip
-    /// windows: two halves, GW2/GW1-19 and GW20-38.
+    /// windows: first half GW1/2-19, second half GW20-38.
     fn state_at(gw_index: i64, chips_used: &[(i64, i64)]) -> (SquadState, Rules) {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/scoring");
         let mut rules = backtest_rules(2026, &dir).unwrap();
@@ -257,8 +252,21 @@ mod tests {
     }
 
     #[test]
-    fn h_is_the_chosen_rule_baseline() {
-        // docs/superpowers/plans/2026-10-11-chip-policy.md: t_tc=8.3,t_bb=10.9,k_fh=4,t_wc=12.87
-        assert_eq!(H, RuleThresholds { t_tc: 8.3, t_bb: 10.9, k_fh: 4, t_wc: 12.87 });
+    fn wildcard_threshold_fires() {
+        let (state, rules) = state_at(10, &[]);
+        let g =
+            gains(&[("captain_xp", 5.0), ("bench_xp", 5.0), ("blanks", 0.0), ("gain_wc", 12.87)]);
+        assert_eq!(rule_chip(&state, &rules, &g, &H).unwrap().as_deref(), Some("wildcard"));
+        let g =
+            gains(&[("captain_xp", 5.0), ("bench_xp", 5.0), ("blanks", 0.0), ("gain_wc", 12.8)]);
+        assert_eq!(rule_chip(&state, &rules, &g, &H).unwrap(), None);
+    }
+
+    #[test]
+    fn a_used_chip_is_skipped() {
+        // bboost (id 4) used at GW3: bench_xp is high but 3xc is next
+        let (state, rules) = state_at(10, &[(4, 3)]);
+        let g = gains(&[("captain_xp", 9.0), ("bench_xp", 12.0), ("blanks", 0.0)]);
+        assert_eq!(rule_chip(&state, &rules, &g, &H).unwrap().as_deref(), Some("3xc"));
     }
 }
