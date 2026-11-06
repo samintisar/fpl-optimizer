@@ -511,7 +511,8 @@ impl Policy {
         }
         if *prices == PriceSource::Oracle {
             let future = ctx.future.context(
-                "prices=oracle needs the future deadline prices, which only the backtester's                  decision paths provide (DecisionContext.future is None)",
+                "prices=oracle needs the future deadline prices, which only the backtester's \
+                 decision paths provide (DecisionContext.future is None)",
             )?;
             let season = ctx.state.season;
             let gws = problem.gws.clone();
