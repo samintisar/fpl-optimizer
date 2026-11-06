@@ -26,7 +26,8 @@ use crate::gw_score::score_gameweek;
 use crate::outcomes::{GwOutcomes, read_outcomes};
 use crate::policies::{CHIP_DIAGNOSTICS, DecisionContext, Policy, best_lineup};
 use crate::state::{
-    Decision, PoolPlayer, SquadState, apply_decision, next_state, refresh, squad_value,
+    Decision, PoolPlayer, SquadState, apply_decision, market_value, next_state, refresh,
+    squad_value,
 };
 use crate::xp_cache::DiskCache;
 
@@ -211,6 +212,8 @@ pub struct GwRow {
     pub bank: i64,
     pub free_transfers: i64,
     pub squad_value: i64,
+    /// state::market_value of gw_state (Rust only; dev/backtest_parity.py ignores it).
+    pub market_value: i64,
     pub transfers: String,
     pub autosubs: String,
     pub pred_gain: Option<f64>,
@@ -349,6 +352,7 @@ pub fn play_step(
         bank: gw_state.bank,
         free_transfers: state.free_transfers,
         squad_value: squad_value(&gw_state, rules.sell_on_fee),
+        market_value: market_value(&gw_state),
         transfers: pairs_json(decision.transfers.iter().map(|t| (t.out_key, t.in_key))),
         autosubs: pairs_json(score.autosubs.iter().copied()),
         pred_gain: None,
