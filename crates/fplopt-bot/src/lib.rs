@@ -5,6 +5,7 @@
 //! `replay` runs scripted sessions for the parity gate.
 
 pub mod builder;
+pub mod chip_calls;
 pub mod context;
 pub mod live;
 pub mod messages;

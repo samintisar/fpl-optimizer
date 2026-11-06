@@ -67,7 +67,8 @@ def test_job_units_alert_on_failure_and_run_from_the_checkout(unit):
     assert unit_settings(unit, "Unit")["OnFailure"] == "fplopt-failure@%n.service"
     service = unit_settings(unit, "Service")
     assert service["WorkingDirectory"] == "%h/fpl-optimizer"  # the CLI reads .env from it
-    assert service["ExecStart"].startswith("%h/fpl-optimizer/.venv/bin/fplopt ")
+    # the Rust binary since the server switch (2026-11-05, PR #55)
+    assert service["ExecStart"].startswith("%h/fpl-optimizer/target/release/fplopt-rs ")
 
 
 def test_live_timer_runs_after_the_archiver_tick():

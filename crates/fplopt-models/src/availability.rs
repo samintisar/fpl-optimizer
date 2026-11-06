@@ -806,6 +806,11 @@ mod tests {
         }
     }
 
+    /// One value within 1e-12 relative, for the same reason as `assert_cells_close`.
+    fn assert_close(got: f64, want: f64) {
+        assert!((got - want).abs() <= 1e-12 * want.abs().max(1.0), "{got} vs {want}");
+    }
+
     fn cells(v: &[(&str, i64, f64)]) -> Vec<(String, i64, f64)> {
         v.iter().map(|(c, b, x)| (c.to_string(), *b, *x)).collect()
     }
@@ -815,7 +820,7 @@ mod tests {
     #[test]
     fn shared_slope_fit_is_unchanged() {
         let fit = fit_mapping(synthetic_rows(), &CARRIED, true, false).unwrap();
-        assert_eq!(fit.slope, 0.9459744052097245);
+        assert_close(fit.slope, 0.9459744052097245);
         assert_cells_close(
             &fit.offsets,
             cells(&[
@@ -857,9 +862,9 @@ mod tests {
         assert!(fit.slopes.is_empty());
 
         let fit = fit_mapping(synthetic_rows(), &CARRIED, false, false).unwrap();
-        assert_eq!(fit.slope, 0.9387090509896416);
-        assert_eq!(
-            fit.offsets,
+        assert_close(fit.slope, 0.9387090509896416);
+        assert_cells_close(
+            &fit.offsets,
             cells(&[
                 ("a", 0, 0.18743939672447246),
                 ("a", 1, 0.15171971297293105),
@@ -881,7 +886,7 @@ mod tests {
                 ("i", 1, -2.7287290478957225),
                 ("i", 2, -3.077344389746442),
                 ("i", 3, -2.959866626845373),
-            ])
+            ]),
         );
         assert!(fit.back_slopes.is_empty());
         assert!(fit.slopes.is_empty());

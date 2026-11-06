@@ -31,15 +31,12 @@ use sha1::{Digest, Sha1};
 
 use crate::gw_score::Lineup;
 use crate::state::{
-    Decision, GOALKEEPER, InvalidDecision, PoolPlayer, SquadState, Transfer, chip_available,
-    chip_window, refresh, selling_price,
+    Decision, GOALKEEPER, PoolPlayer, SquadState, Transfer, chip_available, chip_window, refresh,
+    selling_price,
 };
 
-/// Order the rule policy considers chips in (one per GW), and forced "last chance" plays.
-pub const CHIP_PRIORITY: [&str; 4] = ["freehit", "wildcard", "bboost", "3xc"];
-/// Per-GW chip quantities (`chip_gains`), recorded by the simulator.
-pub const CHIP_DIAGNOSTICS: [&str; 7] =
-    ["captain_xp", "bench_xp", "gain_tc", "gain_bb", "gain_fh", "gain_wc", "blanks"];
+pub use fplopt_optimize::chip_rules::{CHIP_DIAGNOSTICS, CHIP_PRIORITY, one_gw_params};
+use fplopt_optimize::chip_rules::{RuleThresholds, rule_chip, target_xp_of};
 /// Chip policy 2's known-double lookahead (GWs after the decision GW).
 pub const DOUBLE_LEAD: i64 = 10;
 
@@ -558,31 +555,8 @@ impl Policy {
         let Policy::ChipRules { t_tc, t_bb, k_fh, t_wc, .. } = self else {
             bail!("choose: not a chip rule policy");
         };
-        let (state, rules) = (ctx.state, ctx.rules);
-        let playable: Vec<&str> =
-            CHIP_PRIORITY.iter().copied().filter(|c| chip_available(state, c, rules)).collect();
-        let mut windows = HashMap::new();
-        for c in &playable {
-            windows.insert(*c, chip_window(state, c, rules)?);
-        }
-        let stops: HashMap<i64, i64> = rules.chips.iter().map(|w| (w.chip_id, w.stop)).collect();
-        for chip in &playable {
-            let stop = stops[&windows[chip]];
-            let same: Vec<&str> =
-                playable.iter().copied().filter(|c| stops[&windows[c]] == stop).collect();
-            if same.len() as i64 > stop - state.gw_index {
-                return Ok(Some(same[0].to_owned()));
-            }
-        }
-        let g = |k: &str| gains.get(k).copied().flatten();
-        let fires = |c: &str| match c {
-            "freehit" => g("blanks").unwrap_or(0.0) >= *k_fh as f64,
-            "wildcard" => g("gain_wc").is_some_and(|x| x >= *t_wc),
-            "bboost" => g("bench_xp").unwrap_or(0.0) >= *t_bb,
-            "3xc" => g("captain_xp").unwrap_or(0.0) >= *t_tc,
-            _ => false,
-        };
-        Ok(playable.into_iter().find(|c| fires(c)).map(str::to_owned))
+        let t = RuleThresholds { t_tc: *t_tc, t_bb: *t_bb, k_fh: *k_fh, t_wc: *t_wc };
+        rule_chip(ctx.state, ctx.rules, gains, &t)
     }
 }
 
@@ -756,16 +730,6 @@ pub fn known_doubles(
         .collect())
 }
 
-fn target_xp_of(frame: &XpFrame, key: i64) -> f64 {
-    let mut total = 0.0;
-    for i in 0..frame.len() {
-        if frame.player_key[i] == key && frame.horizon[i] == 0 {
-            total += frame.xp[i].unwrap_or(0.0);
-        }
-    }
-    total
-}
-
 /// Squad players whose club has no fixture in the target GW.
 fn blanks(ctx: &DecisionContext) -> Result<i64> {
     let coverage = pool_coverage(ctx.view)?;
@@ -793,41 +757,6 @@ fn solve_with_chip(
     }
 }
 
-/// The objective (no terminal value) of the plan playing `chip` first, or None if the
-/// rules don't allow it there or the solve found no plan.
-fn chip_objective(
-    problem: &PlanInput,
-    params: &OptimizerParams,
-    chip: &str,
-) -> Result<Option<f64>> {
-    match make_scenario(problem, &BTreeMap::from([(0, chip.to_owned())])) {
-        Err(InvalidDecision(_)) => Ok(None),
-        Ok(scenario) => match solve_plan(problem, params, None, &[], &scenario) {
-            Ok(plan) => Ok(Some(plan.objective)),
-            Err(SolveError::Infeasible(_) | SolveError::LimitReached { .. }) => Ok(None),
-            Err(SolveError::Other(e)) => Err(e),
-        },
-    }
-}
-
-fn no_chip_objective(problem: &PlanInput, params: &OptimizerParams) -> Result<Option<f64>> {
-    let none = fplopt_optimize::ChipScenario::none();
-    match solve_plan(problem, params, None, &[], &none) {
-        Ok(plan) => Ok(Some(plan.objective)),
-        Err(SolveError::Infeasible(_) | SolveError::LimitReached { .. }) => Ok(None),
-        Err(SolveError::Other(e)) => Err(e),
-    }
-}
-
-/// `params` for a 1-GW plan (the Free Hit gain): the expected-minutes floor scaled to one GW.
-pub fn one_gw_params(params: &OptimizerParams) -> OptimizerParams {
-    OptimizerParams {
-        horizon: 1,
-        min_minutes: params.min_minutes / params.horizon as f64,
-        ..params.clone()
-    }
-}
-
 fn no_chip_plan(
     ctx: &DecisionContext,
     params: &OptimizerParams,
@@ -844,38 +773,16 @@ pub fn chip_gains(
     params: &OptimizerParams,
     plan: &Plan,
 ) -> Result<BTreeMap<String, Option<f64>>> {
-    let first = plan.first();
-    let weights = problem.gw_bench_weights(0, params).to_vec();
-    let bench: Vec<f64> = first.bench.iter().map(|k| target_xp_of(ctx.frame, *k)).collect();
-    let captain = target_xp_of(ctx.frame, first.captain);
-    let one = one_gw_params(params);
-    let short = PlanInput::from_context(ctx.state, ctx.pool, ctx.frame, ctx.rules, &one)?;
-    let rules = ctx.rules;
-    let mut fh = None;
-    if chip_available(&problem.state, "freehit", rules) {
-        let base = no_chip_objective(&short, &one)?;
-        let with_fh = chip_objective(&short, &one, "freehit")?;
-        if let (Some(b), Some(f)) = (base, with_fh) {
-            fh = Some(f - b);
-        }
-    }
-    let mut wc = None;
-    if chip_available(&problem.state, "wildcard", rules) {
-        wc = chip_objective(problem, params, "wildcard")?.map(|w| w - plan.objective);
-    }
-    let tc_ok = chip_available(&problem.state, "3xc", rules);
-    let bb_ok = chip_available(&problem.state, "bboost", rules);
-    let bench_sum = bench.iter().fold(0.0, |acc, x| acc + x);
-    let bb_gain = weights.iter().zip(&bench).fold(0.0, |acc, (w, x)| acc + (1.0 - w) * x);
-    Ok(BTreeMap::from([
-        ("captain_xp".to_owned(), Some(captain)),
-        ("bench_xp".to_owned(), Some(bench_sum)),
-        ("gain_tc".to_owned(), tc_ok.then_some(captain)),
-        ("gain_bb".to_owned(), bb_ok.then_some(bb_gain)),
-        ("gain_fh".to_owned(), fh),
-        ("gain_wc".to_owned(), wc),
-        ("blanks".to_owned(), Some(blanks(ctx)? as f64)),
-    ]))
+    fplopt_optimize::chip_rules::chip_gains(
+        ctx.state,
+        ctx.pool,
+        ctx.frame,
+        ctx.rules,
+        problem,
+        params,
+        plan,
+        blanks(ctx)?,
+    )
 }
 
 #[cfg(test)]

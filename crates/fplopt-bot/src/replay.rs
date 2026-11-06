@@ -4,8 +4,10 @@
 //! and the two `bot.sqlite` files.
 //!
 //! The script (JSON): `admin` (the admin chat id), optional `params` / `chip_params` (fields
-//! replaced in `live_params()` / `chip_params()` for `/plan` and alerts / `/chips`), and
-//! `steps`, each one of
+//! replaced in `live_params()` / `chip_params()` for `/plan` and alerts / `/chips`),
+//! optional `chip_alerts` (default false): alerts carry the chip section and log `chip_calls`
+//! (Rust only; not in Python's golden), with `v6_params` (fields replaced in `v6_params()`
+//! for V6's search, alert24 from GW20), and `steps`, each one of
 //! - `{"now": ISO time}`: the clock from here on;
 //! - `{"fpl_down": bool}`: FPL's bootstrap (live prices) fails from here on;
 //! - `{"chat": id, "text": message}`: a message, routed as the Telegram layer routes text
@@ -32,6 +34,7 @@ use fplopt_optimize::entry::EntryClient;
 use fplopt_optimize::io::params_with;
 use serde_json::{Value, json};
 
+use crate::chip_calls::v6_params;
 use crate::context::ContextStore;
 use crate::planner::{BotFpl, NotFound, chip_options, chip_params, live_params, plan_user};
 use crate::service::{AlertOutcome, BotService, SendError};
@@ -113,6 +116,16 @@ pub fn replay(script: &Value, state_dir: &Path, fpl_dir: &Path) -> Result<Value>
     service.chip_planner = Box::new(move |fpl, entry, context, ft, made| {
         chip_options(fpl, entry, context, ft, &chips, made)
     });
+    service.chip_alerts = script["chip_alerts"].as_bool().unwrap_or(false);
+    if service.chip_alerts {
+        let v6 = params_with(
+            v6_params()?,
+            script.get("v6_params").filter(|v| !v.is_null()).unwrap_or(&json!({})),
+        )?;
+        service.v6_planner = Box::new(move |fpl, entry, context, ft, made| {
+            chip_options(fpl, entry, context, ft, &v6, made)
+        });
+    }
 
     let mut results = Vec::new();
     for step in script["steps"].as_array().context("script: no steps")? {

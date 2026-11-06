@@ -489,6 +489,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn chip_rules_h_is_the_preregistered_spec() {
+        let spec = parse_policy_spec(
+            "chiprules:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2,t_tc=8.3,t_bb=10.9,\
+             k_fh=4,t_wc=12.87",
+        )
+        .unwrap();
+        let Policy::ChipRules { t_tc, t_bb, k_fh, t_wc, .. } = spec.build().unwrap() else {
+            panic!("not a chiprules policy");
+        };
+        let h = fplopt_optimize::chip_rules::H;
+        assert_eq!((t_tc, t_bb, k_fh, t_wc), (h.t_tc, h.t_bb, h.k_fh, h.t_wc));
+    }
+
+    #[test]
     fn specs_print_and_name_as_python() {
         let s =
             parse_policy_spec("optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2").unwrap();

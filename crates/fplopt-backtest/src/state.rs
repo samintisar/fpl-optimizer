@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use fplopt_build::scoring::Rules;
 pub use fplopt_optimize::state::{
     GOALKEEPER, Holding, InvalidDecision, PoolPlayer, SquadState, Transfer, TransferRecord,
-    chip_window, is_transfer_chip, next_state, refresh, selling_price,
+    chip_available, chip_window, is_transfer_chip, next_state, refresh, selling_price,
 };
 
 use crate::gw_score::{Lineup, validate_lineup};
@@ -60,11 +60,6 @@ impl Applied {
 /// Sum of the holdings' selling prices (what the squad would raise), bank excluded.
 pub fn squad_value(state: &SquadState, sell_on_fee: f64) -> i64 {
     state.holdings.iter().map(|h| selling_price(h, sell_on_fee)).sum()
-}
-
-/// Whether chip `name` can be played at `state.gw_index`.
-pub fn chip_available(state: &SquadState, name: &str, rules: &Rules) -> bool {
-    chip_window(state, name, rules).is_ok()
 }
 
 fn invalid<T>(msg: String) -> Result<T, InvalidDecision> {

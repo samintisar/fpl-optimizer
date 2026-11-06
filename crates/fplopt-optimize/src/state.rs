@@ -178,6 +178,11 @@ pub fn chip_window(state: &SquadState, name: &str, rules: &Rules) -> Result<i64,
     Err(InvalidDecision(format!("{name} for gw_index {gw} already used")))
 }
 
+/// Whether chip `name` can be played at `state.gw_index`.
+pub fn chip_available(state: &SquadState, name: &str, rules: &Rules) -> bool {
+    chip_window(state, name, rules).is_ok()
+}
+
 /// The state at the next deadline: accrue FTs (after GW1 → 1; after WC/FH per
 /// `chip_week_ft`; else max(ft − n, 0) + 1; plus top-ups in (gw_index, next], capped),
 /// record the chip, revert a Free Hit.

@@ -6,6 +6,7 @@
 //! `PlanInput::from_context(state, pool, xp, rules, params)` → `optimize(problem, params,
 //! top_k, chips, roll, Search::Bound)` → `PlanSet`.
 
+pub mod chip_rules;
 pub mod chips;
 pub mod entry;
 pub mod io;
