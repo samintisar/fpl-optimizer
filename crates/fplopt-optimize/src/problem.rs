@@ -1,7 +1,9 @@
 //! The planner's input at one deadline (Python `fplopt.optimize.problem`; PLAN §7): the
 //! refreshed squad, the horizon GWs of the xP frame, the pruned candidates with their xP
-//! per horizon GW, and the minutes-based bench weights. Prices are fixed over the horizon;
-//! an owned player's first sale earns his selling price, any other sale his buy price.
+//! per horizon GW, and the minutes-based bench weights. Prices are fixed over the horizon
+//! unless a candidate has a per-GW price path (`PlanInput::set_price_paths`); an owned
+//! player's first sale earns his selling price, any other sale his buy price (with a moving
+//! path: FPL's selling rule on the price he was bought at within the plan).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -73,7 +75,9 @@ impl XpFrame {
 }
 
 /// A candidate: `price` the buy price, `sell_price` what his first sale earns; `xp[t]` his
-/// xP in horizon GW t.
+/// xP in horizon GW t. `price_path[t]`, when set, is his expected price at horizon GW t's
+/// deadline (tenths, fractional; `[0]` is today's price) and replaces `price`/`sell_price`
+/// in the money flows; `purchase_price` is an owned player's purchase price.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Player {
     pub player_key: i64,
@@ -84,6 +88,40 @@ pub struct Player {
     pub owned: bool,
     pub buyable: bool,
     pub xp: Vec<f64>,
+    pub purchase_price: Option<i64>,
+    pub price_path: Option<Vec<f64>>,
+}
+
+/// A path "moves" when it spans at least this many tenths over the horizon.
+pub const PATH_MOVES: f64 = 0.05;
+
+impl Player {
+    /// What buying him in horizon GW t costs.
+    pub fn buy_price(&self, t: usize) -> f64 {
+        self.price_path.as_ref().map_or(self.price as f64, |p| p[t])
+    }
+
+    /// What an owned player's first sale in GW t earns: FPL's selling rule on the path's
+    /// price, not floored (expected prices are fractional); `sell_price` without a path.
+    pub fn first_sale_value(&self, t: usize) -> f64 {
+        match (&self.price_path, self.purchase_price) {
+            (Some(p), Some(purchase)) => selling_value(purchase as f64, p[t]),
+            _ => self.sell_price as f64,
+        }
+    }
+
+    /// Whether his path spans at least `PATH_MOVES` (no path: false).
+    pub fn path_moves(&self) -> bool {
+        self.price_path.as_ref().is_some_and(|p| {
+            let (lo, hi) = p.iter().fold((f64::MAX, f64::MIN), |(l, h), &x| (l.min(x), h.max(x)));
+            hi - lo >= PATH_MOVES
+        })
+    }
+}
+
+/// FPL's selling rule without the floor: bought at `bought`, now `now`.
+pub fn selling_value(bought: f64, now: f64) -> f64 {
+    if now > bought { bought + 0.5 * (now - bought) } else { now }
 }
 
 /// A horizon GW: `horizon` is its offset from the target GW (its decay exponent).
@@ -113,6 +151,24 @@ pub struct PlanInput {
 }
 
 impl PlanInput {
+    /// Set each candidate's price path (`None` keeps today's prices). Paths must have one
+    /// entry per horizon GW.
+    pub fn set_price_paths(&mut self, mut path: impl FnMut(&Player) -> Option<Vec<f64>>) {
+        let n = self.gws.len();
+        for p in &mut self.players {
+            p.price_path = path(p);
+            if let Some(v) = &p.price_path {
+                assert_eq!(
+                    v.len(),
+                    n,
+                    "price path of {} has {} GWs, want {n}",
+                    p.player_key,
+                    v.len()
+                );
+            }
+        }
+    }
+
     /// Horizon GW t's bench weights without a chip.
     pub fn gw_bench_weights<'a>(&'a self, t: usize, params: &'a OptimizerParams) -> &'a [f64] {
         match &self.bench_weights {
@@ -224,6 +280,8 @@ impl PlanInput {
                 owned: holding.is_some(),
                 buyable: buyable[row],
                 xp: xp_rows[row].clone(),
+                purchase_price: holding.map(|h| h.purchase_price),
+                price_path: None,
             });
         }
         // GW1 (unlimited transfers) rebuilds the squad freely: the fixed weights apply.

@@ -387,6 +387,30 @@ fn first_sale_at_selling_price_later_sales_at_buy_price() {
 }
 
 #[test]
+fn price_path_prices_buys_and_first_sales() {
+    let rules = rules();
+    let (state, pool, xp, a, c) = churn_instance();
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let mut problem = problem(&state, &pool, &xp, &params, &rules);
+    // no path: today's prices
+    assert_eq!(player(&problem, a).buy_price(2), 60.0);
+    assert_eq!(player(&problem, a).first_sale_value(2), 55.0);
+    problem.set_price_paths(|p| match p.player_key {
+        k if k == a => Some(vec![60.0, 62.0, 66.0]),
+        k if k == c => Some(vec![50.0, 52.0, 54.0]),
+        _ => None,
+    });
+    assert_eq!(player(&problem, a).buy_price(1), 62.0);
+    // A was bought at 50: at 66 he sells for 50 + (66 - 50) / 2 = 58 (not floored)
+    assert_eq!(player(&problem, a).first_sale_value(2), 58.0);
+    assert_eq!(player(&problem, a).purchase_price, Some(50));
+    assert_eq!(player(&problem, c).purchase_price, None);
+    assert!(player(&problem, c).path_moves());
+    assert!(!player(&problem, key(1, 1, 0)).path_moves());
+}
+
+#[test]
 fn departed_player_is_sold_at_last_price_and_never_bought() {
     let rules = rules();
     let pool = grid_pool(1..=6, &[(1, 2), (2, 4), (3, 4), (4, 2)], None);
