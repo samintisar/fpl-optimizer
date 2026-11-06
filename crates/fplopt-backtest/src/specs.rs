@@ -12,7 +12,7 @@ use anyhow::{Result, bail};
 use fplopt_core::pyjson::py_float_repr;
 use fplopt_optimize::OptimizerParams;
 
-use crate::policies::{ChipPolicy2, DOUBLE_LEAD, Policy};
+use crate::policies::{ChipPolicy2, DOUBLE_LEAD, Policy, PriceSource};
 
 pub const XP_MODELS: [&str; 6] = ["rolling", "ep_next", "ep_next_fade", "v1", "v1r", "v1-2026-10"];
 pub const MINUTES_XP_MODELS: &[&str] = fplopt_models::V1_FAMILY;
@@ -28,6 +28,7 @@ enum Kind {
     Int,
     MaxHits,
     Flag,
+    Prices,
 }
 
 impl Kind {
@@ -37,16 +38,19 @@ impl Kind {
             Kind::Int => "int",
             Kind::MaxHits => "int or none",
             Kind::Flag => "0/1 flag",
+            Kind::Prices => "price source (fixed, oracle)",
         }
     }
 }
 
-/// A parsed parameter value (Python float, int or None).
+/// A parsed parameter value (Python float, int or None; `Text` for a named choice, e.g.
+/// `prices=oracle`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
     Float(f64),
     Int(i64),
     None,
+    Text(&'static str),
 }
 
 impl Value {
@@ -54,7 +58,7 @@ impl Value {
         match self {
             Value::Float(x) => x,
             Value::Int(i) => i as f64,
-            Value::None => f64::NAN,
+            Value::None | Value::Text(_) => f64::NAN,
         }
     }
 
@@ -62,7 +66,7 @@ impl Value {
         match self {
             Value::Int(i) => i,
             Value::Float(x) => x as i64,
-            Value::None => 0,
+            Value::None | Value::Text(_) => 0,
         }
     }
 }
@@ -73,6 +77,7 @@ impl fmt::Display for Value {
             Value::Float(x) => f.write_str(&py_float_repr(*x)),
             Value::Int(i) => write!(f, "{i}"),
             Value::None => f.write_str("None"),
+            Value::Text(t) => f.write_str(t),
         }
     }
 }
@@ -86,6 +91,7 @@ fn params_of(name: &str) -> Option<Vec<(&'static str, Kind)>> {
         ("itb_value", Kind::Float),
         ("bench_from_minutes", Kind::Flag),
         ("min_minutes", Kind::Float),
+        ("price_k", Kind::Float),
     ];
     Some(match name {
         "greedy" => vec![
@@ -104,6 +110,7 @@ fn params_of(name: &str) -> Option<Vec<(&'static str, Kind)>> {
                 ("loso", Kind::Flag),
                 ("tc_rule", Kind::Float),
                 ("fh_scale", Kind::Float),
+                ("prices", Kind::Prices),
             ]);
             keys
         }
@@ -156,8 +163,15 @@ fn parse_value(kind: Kind, raw: &str) -> Option<Value> {
             "0" | "false" | "no" => Some(Value::Int(0)),
             _ => None,
         },
+        Kind::Prices => {
+            let raw = raw.trim().to_ascii_lowercase();
+            PRICE_SOURCES.iter().find(|s| **s == raw).map(|s| Value::Text(s))
+        }
     }
 }
+
+/// `prices=` values: `fixed` (default) and `oracle`; `forecast` is reserved (Stage B).
+const PRICE_SOURCES: [&str; 3] = ["fixed", "oracle", "forecast"];
 
 /// A policy spec: name, xP model and the parameters given (sorted by key).
 #[derive(Clone, Debug, PartialEq)]
@@ -285,6 +299,7 @@ fn optimizer_params(params: &BTreeMap<String, Value>) -> Result<OptimizerParams>
             "bench_from_minutes" => p.bench_from_minutes = v.i() != 0,
             "min_minutes" => p.min_minutes = v.f(),
             "fh_scale" => p.fh_scale = v.f(),
+            "price_k" => p.price_value_k = v.f(),
             other => bail!("unexpected keyword argument '{other}'"),
         }
     }
@@ -304,6 +319,14 @@ impl PolicySpec {
                 let split = params.remove("chip_split").map_or(0, Value::i);
                 let loso = params.remove("loso").is_some_and(|v| v.i() != 0);
                 let tc_rule = params.remove("tc_rule").map(Value::f);
+                let prices = match params.remove("prices") {
+                    None | Some(Value::Text("fixed")) => PriceSource::Fixed,
+                    Some(Value::Text("oracle")) => PriceSource::Oracle,
+                    Some(Value::Text("forecast")) => {
+                        bail!("prices=forecast arrives with Stage B")
+                    }
+                    Some(other) => bail!("prices={other}: not a price source (fixed, oracle)"),
+                };
                 let mut extra = ChipPolicy2::default();
                 if !(0..CHIP_SPLITS.len() as i64).contains(&split) {
                     bail!("chip_split must be one of 0..{}", CHIP_SPLITS.len() - 1);
@@ -334,7 +357,7 @@ impl PolicySpec {
                     extra.tc_rule = Some(t);
                 }
                 opt.validate()?;
-                Policy::Optimizer { xp_model, params: opt, chips, extra }
+                Policy::Optimizer { xp_model, params: opt, chips, extra, prices }
             }
             "chipgains" | "chiprules" => {
                 let mut rule = |k: &str, default: Value| params.remove(k).unwrap_or(default);
@@ -372,12 +395,15 @@ impl PolicySpec {
     }
 }
 
-/// Chip spec keys dropped when given at their default.
-fn chip_key_default(key: &str) -> Option<Value> {
-    match key {
-        "chip_split" => Some(Value::Int(0)),
-        "loso" => Some(Value::Int(0)),
-        "fh_scale" => Some(Value::Float(1.0)),
+/// Spec keys dropped when given at their default: the optimizer's chip keys, and the price
+/// keys on every planner.
+fn key_default(name: &str, key: &str) -> Option<Value> {
+    match (name, key) {
+        ("optimizer", "chip_split") => Some(Value::Int(0)),
+        ("optimizer", "loso") => Some(Value::Int(0)),
+        ("optimizer", "fh_scale") => Some(Value::Float(1.0)),
+        (_, "price_k") => Some(Value::Float(0.0)),
+        (_, "prices") => Some(Value::Text("fixed")),
         _ => None,
     }
 }
@@ -385,7 +411,8 @@ fn chip_key_default(key: &str) -> Option<Value> {
 fn values_equal(a: Value, b: Value) -> bool {
     match (a, b) {
         (Value::None, Value::None) => true,
-        (Value::None, _) | (_, Value::None) => false,
+        (Value::Text(x), Value::Text(y)) => x == y,
+        (Value::None | Value::Text(_), _) | (_, Value::None | Value::Text(_)) => false,
         (x, y) => x.f() == y.f(),
     }
 }
@@ -415,9 +442,7 @@ pub fn make_policy_spec(name: &str, xp: &str, given: &[(String, String)]) -> Res
         }
         values.push((key.clone(), value));
     }
-    if name == "optimizer" {
-        values.retain(|(k, v)| !chip_key_default(k).is_some_and(|d| values_equal(*v, d)));
-    }
+    values.retain(|(k, v)| !key_default(name, k).is_some_and(|d| values_equal(*v, d)));
     values.sort_by(|a, b| a.0.cmp(&b.0));
     let spec = PolicySpec { name: name.to_owned(), xp: xp.to_owned(), params: values };
     let get = |k: &str| spec.params.iter().find(|(key, _)| key == k).map(|(_, v)| *v);
@@ -514,5 +539,35 @@ mod tests {
         assert_eq!(n.to_string(), "optimizer:ep_next:max_hits=None");
         assert!(parse_policy_spec("optimizer:ep_next:min_minutes=90").is_err());
         assert!(parse_policy_spec("greedy:rolling:horizon=7").is_err());
+    }
+
+    #[test]
+    fn price_keys_parse_and_label() {
+        let base = "optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2";
+        let spec = parse_policy_spec(&format!("{base},prices=oracle,price_k=1")).unwrap();
+        assert_eq!(
+            spec.to_string(),
+            "optimizer:v1:decay=0.75,hit_margin=2.0,horizon=6,max_hits=1,price_k=1.0,prices=oracle"
+        );
+        let policy = spec.build().unwrap();
+        assert_eq!(policy.name(), "optimizer(v1,mh=1,m=2.0,d=0.75,pk=1.0,oracle)");
+        assert!(policy.wants_future_prices());
+        let Policy::Optimizer { params, prices, .. } = &policy else { panic!("not an optimizer") };
+        assert_eq!((params.price_value_k, *prices), (1.0, PriceSource::Oracle));
+        // defaults are dropped: same spec, same name as without the keys
+        let plain = parse_policy_spec(&format!("{base},prices=fixed,price_k=0")).unwrap();
+        let bare = parse_policy_spec(base).unwrap();
+        assert_eq!(plain, bare);
+        assert_eq!(plain.build().unwrap().name(), bare.build().unwrap().name());
+        assert!(!bare.build().unwrap().wants_future_prices());
+        let err = parse_policy_spec("optimizer:v1:prices=forecast").unwrap_err().to_string();
+        assert!(err.contains("prices=forecast arrives with Stage B"), "{err}");
+        assert!(parse_policy_spec("optimizer:v1:prices=bogus").is_err());
+        assert!(parse_policy_spec("optimizer:v1:price_k=-1").is_err());
+        // price_k on the chip study's planners; prices only on the optimizer
+        let gains = parse_policy_spec("chipgains:v1:price_k=0.5").unwrap().build().unwrap();
+        assert!(gains.name().contains("pk=0.5"), "{}", gains.name());
+        assert!(parse_policy_spec("chipgains:v1:price_k=0").unwrap().params.is_empty());
+        assert!(parse_policy_spec("chiprules:v1:prices=oracle").is_err());
     }
 }

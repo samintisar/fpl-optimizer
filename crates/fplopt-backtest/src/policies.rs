@@ -248,6 +248,16 @@ pub struct ChipPolicy2 {
     pub tc_rule: Option<f64>,
 }
 
+/// Where the optimizer's candidate prices come from: `Fixed` (today's prices over the whole
+/// horizon, the default) or `Oracle` (the real deadline prices of the horizon's GWs, read
+/// from the future: a backtest-only foresight bound, `crate::oracle`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PriceSource {
+    #[default]
+    Fixed,
+    Oracle,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Policy {
     Roll {
@@ -265,6 +275,7 @@ pub enum Policy {
         params: OptimizerParams,
         chips: bool,
         extra: ChipPolicy2,
+        prices: PriceSource,
     },
     ChipGains {
         xp_model: String,
@@ -309,7 +320,7 @@ impl Policy {
                 }
                 Ok(())
             }
-            Policy::Optimizer { xp_model, params, chips, extra } => {
+            Policy::Optimizer { xp_model, params, chips, extra, .. } => {
                 check_model(xp_model)?;
                 params.validate()?;
                 check_horizon(params.horizon)?;
@@ -350,6 +361,11 @@ impl Policy {
         }
     }
 
+    /// Whether deciding needs the future deadline prices (`DecisionContext::future`).
+    pub fn wants_future_prices(&self) -> bool {
+        matches!(self, Policy::Optimizer { prices: PriceSource::Oracle, .. })
+    }
+
     /// Python's policy names (the experiment log keys on them).
     pub fn name(&self) -> String {
         let r = |x: f64| py_float_repr(x);
@@ -368,7 +384,7 @@ impl Policy {
                 }
                 format!("greedy({xp_model},t={}{extra})", r(*threshold))
             }
-            Policy::Optimizer { xp_model, params, chips, extra } => {
+            Policy::Optimizer { xp_model, params, chips, extra, prices } => {
                 let max_hits = params.max_hits.map_or("inf".to_owned(), |h| h.to_string());
                 let mut parts = vec![
                     xp_model.clone(),
@@ -376,6 +392,9 @@ impl Policy {
                     format!("m={}", r(params.hit_margin)),
                 ];
                 parts.extend(optimizer_extras(params));
+                if *prices == PriceSource::Oracle {
+                    parts.push("oracle".to_owned());
+                }
                 if let Some(tables) = &extra.season_tables {
                     parts.push(format!("loso#{}", season_tables_tag(tables)));
                 }
@@ -571,6 +590,7 @@ fn inner_name(xp_model: &str, params: &OptimizerParams) -> String {
         params: params.clone(),
         chips: false,
         extra: ChipPolicy2::default(),
+        prices: PriceSource::Fixed,
     }
     .name();
     name.trim_start_matches("optimizer(").trim_end_matches(')').to_owned()
@@ -701,6 +721,9 @@ fn optimizer_extras(params: &OptimizerParams) -> Vec<String> {
     }
     if params.fh_scale != d.fh_scale {
         parts.push(format!("fhs={}", r(params.fh_scale)));
+    }
+    if params.price_value_k != d.price_value_k {
+        parts.push(format!("pk={}", r(params.price_value_k)));
     }
     parts
 }
