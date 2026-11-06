@@ -98,6 +98,19 @@ Each stage gets its own implementation plan.
 - **Also reported:** per h, and develop vs check.
 - **Otherwise stop:** write it up.
 
+### Addendum (2026-11-07): Stage B as built
+
+Written before any Stage B code, after mapping the code (plan `docs/superpowers/plans/2026-11-07-price-forecast-stage-b.md`):
+
+1. **Ownership scaling.** No total-manager count exists in the data, so transfers are scaled two ways: by ownership, `net / (selected_by_percent + 0.1)`, and by the deadline's market activity, `net / Σ_players |net|` at the same snapshot.
+2. **Candidates.** "The planner's candidates" for Gate B are the union of the top `DEFAULT_PRUNE_N` per position by summed v1 xP, as `models eval` defines candidate MSE. This replaces the optimizer's pruned set from template and random states.
+3. **No fixtures feature.** It is dropped: v1 xP for the next 1 and 3 GWs already carries fixtures and blanks.
+4. **Leakage.**
+   - `check leakage` covers the snapshot feature frame (`price_features`).
+   - Training-set visibility holds by construction and is unit-tested: rows come from the view at the fit cutoff, so a target exists only when its deadline price is visible.
+   - xP inputs are v1's, covered by `model:v1`.
+5. **Clip.** The clip is ±3h tenths, i.e. ±£0.3m per GW (the bound above meant £m).
+
 ## Stage C: tuning and the pre-registered check
 
 - **Tuning (develop 2022/23 only, forecast prices from Stage B's develop fit):**
