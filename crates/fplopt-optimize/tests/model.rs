@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use common::*;
 use fplopt_build::scoring::Rules;
+use fplopt_optimize::model::model_fingerprint;
 use fplopt_optimize::plans::Plan;
 use fplopt_optimize::state::{Holding, PoolPlayer, SquadState, Transfer, selling_price};
 use fplopt_optimize::{
@@ -408,6 +409,134 @@ fn price_path_prices_buys_and_first_sales() {
     assert_eq!(player(&problem, c).purchase_price, None);
     assert!(player(&problem, c).path_moves());
     assert!(!player(&problem, key(1, 1, 0)).path_moves());
+}
+
+#[test]
+fn moving_prices_change_the_money_flows() {
+    // churn_instance with rising prices: the same churn A -> C -> A -> C, but the money
+    // follows the paths and FPL's selling rule per cohort.
+    let rules = rules();
+    let (state, pool, xp, a, c) = churn_instance();
+    let state = SquadState { bank: 15, ..state };
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let mut problem = problem(&state, &pool, &xp, &params, &rules);
+    problem.set_price_paths(|p| match p.player_key {
+        k if k == a => Some(vec![60.0, 62.0, 66.0]),
+        k if k == c => Some(vec![50.0, 52.0, 54.0]),
+        _ => None,
+    });
+    let plan = solve(&problem, &params);
+    let moves: Vec<(Vec<i64>, Vec<i64>)> =
+        plan.gws.iter().map(|g| (transfers_out(g), transfers_in(g))).collect();
+    assert_eq!(moves, vec![(vec![a], vec![c]), (vec![c], vec![a]), (vec![a], vec![c])]);
+    // GW0: 15 + 55 (A's first sale at 60) - 50 (C) = 20
+    // GW1: + 51 (C bought at 50, sold at 52: 50 + 1) - 62 (A) = 9
+    // GW2: + 64 (A bought at 62, sold at 66: 62 + 2) - 54 (C) = 19
+    assert_eq!(plan.gws.iter().map(|g| g.bank).collect::<Vec<_>>(), vec![20, 9, 19]);
+}
+
+#[test]
+fn moving_prices_under_a_free_hit() {
+    // A Free Hit in GW1 buys A back at his GW1 price for that GW only; the kept squad and
+    // its bank are untouched (no cohorts in a Free Hit GW).
+    let rules = rules();
+    let (state, pool, xp, a, c) = churn_instance();
+    let state = SquadState { bank: 15, ..state };
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let mut problem = problem(&state, &pool, &xp, &params, &rules);
+    problem.set_price_paths(|p| match p.player_key {
+        k if k == a => Some(vec![60.0, 62.0, 66.0]),
+        k if k == c => Some(vec![50.0, 52.0, 54.0]),
+        _ => None,
+    });
+    let fh = scenario(&problem, &[(1, "freehit")]);
+    let plan = solve_plan(&problem, &params, None, &[], &fh).expect("a plan");
+    let moves: Vec<(Vec<i64>, Vec<i64>)> =
+        plan.gws.iter().map(|g| (transfers_out(g), transfers_in(g))).collect();
+    assert_eq!(moves, vec![(vec![a], vec![c]), (vec![c], vec![a]), (vec![], vec![])]);
+    // GW0: 15 + 55 - 50 = 20; GW1 (Free Hit): 20 + 52 (C at his GW1 price) - 62 = 10;
+    // GW2: back to the kept squad and bank, 20.
+    assert_eq!(plan.gws.iter().map(|g| g.bank).collect::<Vec<_>>(), vec![20, 10, 20]);
+}
+
+#[test]
+fn a_cohort_sells_by_its_own_buy_price() {
+    // C bought in GW0 at 50 and sold in GW2 at 54 earns 52 (FPL's rule on his GW0 price),
+    // not 54 (his GW2 price) nor 53 (the rule on his GW1 price).
+    let rules = rules();
+    let (state, pool, mut xp, a, c) = churn_instance();
+    let state = SquadState { bank: 15, ..state };
+    // A scores in GW2 only, C in GW0 and 1: A -> C in GW0, C -> A in GW2.
+    for i in 0..xp.len() {
+        if xp.player_key[i] == a {
+            xp.xp[i] = Some([0.0, 0.0, 20.0][xp.horizon[i] as usize]);
+        } else if xp.player_key[i] == c {
+            xp.xp[i] = Some([10.0, 10.0, 0.0][xp.horizon[i] as usize]);
+        }
+    }
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let mut problem = problem(&state, &pool, &xp, &params, &rules);
+    problem.set_price_paths(|p| match p.player_key {
+        k if k == a => Some(vec![60.0, 62.0, 67.0]),
+        k if k == c => Some(vec![50.0, 52.0, 54.0]),
+        _ => None,
+    });
+    let plan = solve(&problem, &params);
+    let moves: Vec<(Vec<i64>, Vec<i64>)> =
+        plan.gws.iter().map(|g| (transfers_out(g), transfers_in(g))).collect();
+    assert_eq!(moves, vec![(vec![a], vec![c]), (vec![], vec![]), (vec![c], vec![a])]);
+    // GW0: 15 + 55 - 50 = 20; GW2: 20 + 52 - 67 = 5
+    assert_eq!(plan.gws.iter().map(|g| g.bank).collect::<Vec<_>>(), vec![20, 20, 5]);
+}
+
+#[test]
+fn without_paths_the_model_is_unchanged() {
+    // same columns, rows and coefficients as before the feature: compare the HiGHS model
+    // of churn_instance with and without an explicit `set_price_paths(|_| None)`.
+    let rules = rules();
+    let (state, pool, xp, _, _) = churn_instance();
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let plain = problem(&state, &pool, &xp, &params, &rules);
+    let mut with_none = plain.clone();
+    with_none.set_price_paths(|_| None);
+    let none = ChipScenario::none();
+    assert_eq!(
+        model_fingerprint(&plain, &params, &none).unwrap(),
+        model_fingerprint(&with_none, &params, &none).unwrap()
+    );
+}
+
+#[test]
+fn the_no_path_model_is_pinned() {
+    // Hashes of the LP (columns, rows, objective) taken before price paths reached the
+    // model: without paths it must not change. decay 0.5 keeps the objective's powers exact.
+    let rules = rules();
+    let (state, pool, xp, _, _) = churn_instance();
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let churn = problem(&state, &pool, &xp, &params, &rules);
+    let mut hashes = vec![model_fingerprint(&churn, &params, &ChipScenario::none()).unwrap()];
+    let (state, pool, xp) = medium_instance(0, 1, 5, 4);
+    let params = OptimizerParams { horizon: 4, decay: 0.5, itb_value: 0.1, ..Default::default() };
+    let medium = problem(&state, &pool, &xp, &params, &rules);
+    for chips in [vec![], vec![(1, "freehit")], vec![(2, "wildcard")], vec![(0, "bboost")]] {
+        let s = scenario(&medium, &chips);
+        hashes.push(model_fingerprint(&medium, &params, &s).unwrap());
+    }
+    assert_eq!(
+        hashes,
+        vec![
+            13757759063911583251,
+            14535929387418066283,
+            13798852871027025433,
+            7663879154313081341,
+            17057924474503506883
+        ]
+    );
 }
 
 #[test]

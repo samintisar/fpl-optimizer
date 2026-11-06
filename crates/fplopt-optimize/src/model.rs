@@ -15,7 +15,7 @@ use fplopt_highs::{Highs, ModelStatus};
 use crate::chips::{ChipScenario, terminal_value};
 use crate::params::OptimizerParams;
 use crate::plans::{GwPlan, Plan};
-use crate::problem::PlanInput;
+use crate::problem::{PlanInput, selling_value};
 use crate::state::{GOALKEEPER, Transfer, is_transfer_chip};
 use crate::util::py_sum;
 
@@ -190,6 +190,11 @@ pub(crate) struct Model<'a> {
     buy_order: Vec<(Key, usize)>,
     sell_first: HashMap<Key, usize>,
     sell_later: HashMap<Key, usize>,
+    /// (k, tb, s): a player whose price path moves, bought in GW tb, sold in GW s (normal
+    /// GWs only); replaces his `sell_later[(k, s)]`.
+    cohort: BTreeMap<(i64, usize, usize), usize>,
+    /// The cohorts sold in (k, s), as (tb, variable) by tb.
+    cohorts_sold: HashMap<Key, Vec<(usize, usize)>>,
     lineup: HashMap<Key, usize>,
     captain: HashMap<Key, usize>,
     bench: Vec<((i64, usize, usize), usize)>,
@@ -250,6 +255,8 @@ impl<'a> Model<'a> {
             buy_order: Vec::new(),
             sell_first: HashMap::new(),
             sell_later: HashMap::new(),
+            cohort: BTreeMap::new(),
+            cohorts_sold: HashMap::new(),
             lineup: HashMap::new(),
             captain: HashMap::new(),
             bench: Vec::new(),
@@ -277,6 +284,7 @@ impl<'a> Model<'a> {
             let k = p.player_key;
             // A later sale needs an earlier buy (owned: an earlier first sale, then a buy).
             let later_from = if p.owned { 2 } else { 1 };
+            let moves = p.path_moves();
             for t in 0..self.t_len {
                 self.squad.insert((k, t), lp.binary());
                 if self.fh.contains(&t) {
@@ -302,7 +310,18 @@ impl<'a> Model<'a> {
                         self.sell_first.insert((k, t), lp.binary());
                     }
                     if p.buyable && t >= later_from {
-                        self.sell_later.insert((k, t), lp.binary());
+                        if moves {
+                            // One sale per earlier buy: it sells by that buy's price.
+                            for tb in 0..t {
+                                if self.buy.contains_key(&(k, tb)) {
+                                    let v = lp.binary();
+                                    self.cohort.insert((k, tb, t), v);
+                                    self.cohorts_sold.entry((k, t)).or_default().push((tb, v));
+                                }
+                            }
+                        } else {
+                            self.sell_later.insert((k, t), lp.binary());
+                        }
                     }
                 }
                 self.lineup.insert((k, t), lp.binary());
@@ -322,8 +341,18 @@ impl<'a> Model<'a> {
 
     fn sells(&self, k: i64, t: usize) -> Expr {
         Expr::sum(
-            self.sell_first.get(&(k, t)).into_iter().chain(self.sell_later.get(&(k, t))).copied(),
+            self.sell_first
+                .get(&(k, t))
+                .into_iter()
+                .chain(self.sell_later.get(&(k, t)))
+                .copied()
+                .chain(self.cohort_sales(k, t).map(|(_, v)| v)),
         )
+    }
+
+    /// The cohorts sold in GW t, as (buy GW, variable).
+    fn cohort_sales(&self, k: i64, t: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.cohorts_sold.get(&(k, t)).into_iter().flatten().copied()
     }
 
     fn fh_sells(&self, k: i64, t: usize) -> Expr {
@@ -422,6 +451,23 @@ impl<'a> Model<'a> {
                     if let Some(&v) = self.sell_later.get(&(k, t)) {
                         let before = self.first_sales_before(k, t);
                         self.lp.le(Expr::var(v), &before);
+                    }
+                    let cohorts: Vec<(usize, usize)> = self.cohort_sales(k, t).collect();
+                    for (_, v) in cohorts {
+                        let before = self.first_sales_before(k, t);
+                        self.lp.le(Expr::var(v), &before);
+                    }
+                }
+            }
+            if p.path_moves() {
+                // A cohort is sold at most once, and only if bought.
+                for tb in 0..self.t_len {
+                    let Some(&b) = self.buy.get(&(k, tb)) else { continue };
+                    let sold: Vec<usize> = (tb + 1..self.t_len)
+                        .filter_map(|s| self.cohort.get(&(k, tb, s)).copied())
+                        .collect();
+                    if !sold.is_empty() {
+                        self.lp.le(Expr::sum(sold), &Expr::var(b));
                     }
                 }
             }
@@ -528,7 +574,9 @@ impl<'a> Model<'a> {
         }
     }
 
-    /// Σ sell_price·sell_first + Σ price·sell_later − Σ price·buy at GW t.
+    /// Σ sell_price·sell_first + Σ price·sell_later − Σ price·buy at GW t, with a price
+    /// path's GW t price (and FPL's selling rule on it) where a candidate has one; a cohort
+    /// sells by FPL's rule on its buy GW's price.
     fn flow(&self, t: usize, fh: bool) -> Expr {
         let (sell_first, sell_later, buy) = if fh {
             (&self.fh_sell_first, &self.fh_sell_later, &self.fh_buy)
@@ -539,13 +587,18 @@ impl<'a> Model<'a> {
         for p in &self.problem.players {
             let k = p.player_key;
             if let Some(&v) = sell_first.get(&(k, t)) {
-                e.add(v, p.sell_price as f64);
+                e.add(v, p.first_sale_value(t));
             }
             if let Some(&v) = sell_later.get(&(k, t)) {
-                e.add(v, p.price as f64);
+                e.add(v, p.buy_price(t));
+            }
+            if !fh {
+                for (tb, v) in self.cohort_sales(k, t) {
+                    e.add(v, selling_value(p.buy_price(tb), p.buy_price(t)));
+                }
             }
             if let Some(&v) = buy.get(&(k, t)) {
-                e.add(v, -(p.price as f64));
+                e.add(v, -p.buy_price(t));
             }
         }
         e.terms.retain(|(_, c)| *c != 0.0);
@@ -932,6 +985,50 @@ pub fn relaxation_bound(
     }
     let value = constant - highs.double_info("objective_function_value")?;
     Ok(value + BOUND_MARGIN * value.abs().max(1.0))
+}
+
+/// An FNV-1a hash of the model `solve_plan` hands HiGHS for `scenario`: every column's
+/// bounds and integrality, every row's terms and bounds, the objective's terms and constant
+/// (all in order, floats by their bits). For tests that pin the LP.
+#[doc(hidden)]
+pub fn model_fingerprint(
+    problem: &PlanInput,
+    params: &OptimizerParams,
+    scenario: &ChipScenario,
+) -> Result<u64> {
+    let model = Model::new(problem, params, scenario)?;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |x: u64| {
+        for byte in x.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    let lp = &model.lp;
+    feed(lp.lower.len() as u64);
+    for j in 0..lp.lower.len() {
+        feed(lp.lower[j].to_bits());
+        feed(lp.upper[j].to_bits());
+        feed(u64::from(lp.integer[j]));
+    }
+    feed(lp.rows.len() as u64);
+    for row in &lp.rows {
+        feed(row.terms.len() as u64);
+        for &(v, c) in &row.terms {
+            feed(v as u64);
+            feed(c.to_bits());
+        }
+        feed(row.lower.to_bits());
+        feed(row.upper.to_bits());
+    }
+    let (terms, constant) = model.objective();
+    feed(terms.len() as u64);
+    for (v, c) in terms {
+        feed(v as u64);
+        feed(c.to_bits());
+    }
+    feed(constant.to_bits());
+    Ok(hash)
 }
 
 /// The solution as GwPlans (vice = best non-captain starter by xP, ties by key).
