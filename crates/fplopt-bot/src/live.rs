@@ -33,6 +33,8 @@ pub const ALERT24_LEAD: TimeDelta = TimeDelta::hours(24);
 const ALERT24_CUTOFF: TimeDelta = TimeDelta::minutes(15);
 const ALERT2_CUTOFF: TimeDelta = TimeDelta::minutes(30);
 pub const MAX_ATTEMPTS: usize = 3;
+/// A tick's chip time budget (`BotService::chip_budget_until`), from the tick's start.
+pub const CHIP_BUDGET: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const DONE_ERRORS: [&str; 2] = ["EntryError", "undeliverable"];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -169,6 +171,8 @@ pub fn live_tick(
     send: &mut dyn FnMut(i64, &str) -> std::result::Result<(), SendError>,
     clock: &dyn Clock,
 ) -> Result<TickResult> {
+    // fplopt-live.service stops the job after 20 minutes: no chip search starts after 10.
+    service.chip_budget_until.set(Some(std::time::Instant::now() + CHIP_BUDGET));
     let mut result = TickResult::default();
     let raw = refresh.raw;
     let Some(latest) = raw.latest("fpl", "bootstrap-static")? else {

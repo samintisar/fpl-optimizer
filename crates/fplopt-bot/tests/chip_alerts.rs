@@ -7,12 +7,13 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
-use fplopt_bot::context::ContextStore;
+use fplopt_bot::context::{ContextStore, PlanContext};
 use fplopt_bot::planner::{chip_options, chip_params, live_params, plan_user};
 use fplopt_bot::replay::FileFpl;
-use fplopt_bot::service::{AlertOutcome, BotService, SendError};
+use fplopt_bot::service::{AlertOutcome, BUDGET_SKIP, BotService, ChipPlanner, SendError};
 use fplopt_bot::store::{ChipCallRow, UserStore};
 use fplopt_bot::util::parse_isoformat;
 use fplopt_optimize::io::params_with;
@@ -46,10 +47,17 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
+/// Rules and chip values are read relative to the repo root, as the CLI runs: every test
+/// runs from there (the process-wide working directory, set once; `golden.rs` is another
+/// binary).
+fn at_repo_root() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| std::env::set_current_dir(repo()).unwrap());
+}
+
 /// A fresh copy of the golden's state directory.
 fn state(name: &str) -> PathBuf {
-    // Rules and chip values are read relative to the repo root, as the CLI runs.
-    std::env::set_current_dir(repo()).unwrap();
+    at_repo_root();
     let state =
         std::env::temp_dir().join(format!("fplopt-chip-alerts-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&state);
@@ -94,7 +102,8 @@ fn alert_recs(state: &Path) -> Vec<AlertRec> {
     let db = rusqlite::Connection::open(state.join("bot.sqlite")).unwrap();
     let mut q = db
         .prepare(
-            "SELECT kind, season, gw, context_id, message, error FROM recommendations              WHERE kind IN ('alert24', 'alert2') ORDER BY rec_id",
+            "SELECT kind, season, gw, context_id, message, error FROM recommendations \
+             WHERE kind IN ('alert24', 'alert2') ORDER BY rec_id",
         )
         .unwrap();
     q.query_map([], |r| {
@@ -221,18 +230,33 @@ fn registered_service(name: &str) -> (PathBuf, BotService) {
     service.planner = Box::new(move |fpl, entry, context, ft, made| {
         plan_user(fpl, entry, context, ft, &params, made)
     });
-    let chips = params_with(chip_params(), &script["chip_params"]).unwrap();
-    service.chip_planner = Box::new(move |fpl, entry, context, ft, made| {
-        chip_options(fpl, entry, context, ft, &chips, made)
-    });
+    service.chip_planner = script_chip_planner();
     service.chip_alerts = true;
     (state, service)
 }
 
-/// Run user 5's alert of `kind`; the outcome and the full text sent.
+/// `/chips`'s search with the script's `chip_params` (fast on the synthetic league).
+fn script_chip_planner() -> ChipPlanner {
+    let chips = params_with(chip_params(), &read("script.json")["chip_params"]).unwrap();
+    Box::new(move |fpl, entry, context, ft, made| {
+        chip_options(fpl, entry, context, ft, &chips, made)
+    })
+}
+
+/// Run user 5's alert of `kind` on the newest context; the outcome and the full text sent.
 fn alert(service: &BotService, kind: &str, refuse: bool) -> (AlertOutcome, String) {
-    let user = service.users.user(5).unwrap().unwrap();
     let context = service.contexts.latest().unwrap().unwrap();
+    alert_on(service, kind, &context, refuse)
+}
+
+/// `alert` on `context`.
+fn alert_on(
+    service: &BotService,
+    kind: &str,
+    context: &PlanContext,
+    refuse: bool,
+) -> (AlertOutcome, String) {
+    let user = service.users.user(5).unwrap().unwrap();
     let sent = RefCell::new(String::new());
     let mut send = |_chat: i64, text: &str| -> Result<(), SendError> {
         if refuse {
@@ -241,7 +265,7 @@ fn alert(service: &BotService, kind: &str, refuse: bool) -> (AlertOutcome, Strin
         sent.borrow_mut().push_str(text);
         Ok(())
     };
-    let outcome = service.alert_user(kind, &context, &user, &mut send).unwrap();
+    let outcome = service.alert_user(kind, context, &user, &mut send).unwrap();
     (outcome, sent.into_inner())
 }
 
@@ -331,5 +355,174 @@ fn chip_alerts_off_logs_no_chip_calls() {
     assert_eq!(outcome, AlertOutcome::Sent);
     assert!(text.starts_with("<b>GW6 plan</b>"), "{text}");
     assert!(service.users.chip_calls(uid).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+/// The newest context as if it were GW20's (`gw_index` 20): V6 is searched on alert24.
+fn gw20(service: &BotService) -> PlanContext {
+    let mut context = (*service.contexts.latest().unwrap().unwrap()).clone();
+    context.gw_index = 20;
+    context
+}
+
+fn uid(service: &BotService) -> i64 {
+    service.users.user(5).unwrap().unwrap().user_id
+}
+
+// Fix 1a: an alert2 that is the user's first alert this GW is treated like alert24.
+#[test]
+fn a_first_alert2_carries_the_section_like_alert24() {
+    let (state, service) = registered_service("first-alert2");
+    let (outcome, text) = alert(&service, "alert2", false);
+    assert_eq!(outcome, AlertOutcome::Sent);
+    let (section, rest) = split_section(&text);
+    assert!(section.contains(EVIDENCE), "{section}");
+    assert!(rest.starts_with("<b>GW6 plan</b>"), "{rest}");
+    let _ = std::fs::remove_dir_all(&state);
+
+    let (state, mut service) = registered_service("first-alert2-failed");
+    service.chip_planner = Box::new(|_, _, _, _, _| anyhow::bail!("solver timed out"));
+    let (outcome, text) = alert(&service, "alert2", false);
+    assert_eq!(outcome, AlertOutcome::Sent);
+    let (section, _) = split_section(&text);
+    assert_eq!(section, fplopt_bot::messages::chip_failure_section());
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+// Fix 1b: no alert24 chip row logged (alert24 went out before chip alerts were on).
+#[test]
+fn alert2_without_a_logged_alert24_call_shows_the_section() {
+    let (state, mut service) = registered_service("no-alert24-row");
+    service.chip_alerts = false;
+    assert_eq!(alert(&service, "alert24", false).0, AlertOutcome::Sent);
+    service.chip_alerts = true;
+    let (outcome, text) = alert(&service, "alert2", false);
+    assert_eq!(outcome, AlertOutcome::Sent);
+    let (_, rest) = split_section(&text);
+    assert!(rest.starts_with("<b>GW6 update</b>"), "{rest}");
+    assert!(!rest.contains("Transfers changed"), "{rest}");
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+// Fix 1c: the alert24 calculation failed, so the user never saw a call.
+#[test]
+fn alert2_after_a_failed_alert24_calculation_shows_the_section() {
+    let (state, mut service) = registered_service("failed-alert24");
+    service.chip_planner = Box::new(|_, _, _, _, _| anyhow::bail!("solver timed out"));
+    assert_eq!(alert(&service, "alert24", false).0, AlertOutcome::Sent);
+    service.chip_planner = script_chip_planner();
+    let (outcome, text) = alert(&service, "alert2", false);
+    assert_eq!(outcome, AlertOutcome::Sent);
+    let (section, rest) = split_section(&text);
+    assert_ne!(section, fplopt_bot::messages::chip_failure_section());
+    assert!(section.contains(EVIDENCE), "{section}");
+    assert!(rest.starts_with("<b>GW6 update</b>"), "{rest}");
+    let calls = service.users.chip_calls(uid(&service)).unwrap();
+    assert!(calls[1].error.is_none(), "{:?}", calls[1]);
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+// Fix 4: a panicking chip search is a failed one.
+#[test]
+fn a_panicking_chip_search_gives_the_failure_line() {
+    let (state, mut service) = registered_service("panic");
+    service.chip_planner = Box::new(|_, _, _, _, _| panic!("chip search blew up"));
+    let (outcome, text) = alert(&service, "alert24", false);
+    assert_eq!(outcome, AlertOutcome::Sent);
+    let (section, _) = split_section(&text);
+    assert_eq!(section, fplopt_bot::messages::chip_failure_section());
+    let row = &service.users.chip_calls(uid(&service)).unwrap()[0];
+    assert!(row.error.as_deref().unwrap().contains("panicked: chip search blew up"), "{row:?}");
+
+    // `/plan` never runs the chip search.
+    let replies = service.run("plan", 5, &[]).unwrap();
+    assert!(replies[0].text.starts_with("<b>GW6 plan</b>"), "{}", replies[0].text);
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+// The Told path (the squad can't be imported) runs no chip search and logs no chip row.
+#[test]
+fn an_entry_error_is_told_without_a_chip_search() {
+    let (state, mut service) = registered_service("told");
+    let nowhere = state.join("no-fpl");
+    service.fpl = Box::new(FileFpl { dir: nowhere, down: Default::default() });
+    service.chip_planner = Box::new(|_, _, _, _, _| panic!("no chip search on the Told path"));
+    let (outcome, text) = alert(&service, "alert24", false);
+    assert_eq!(outcome, AlertOutcome::Told);
+    assert!(text.starts_with("Couldn't plan GW6"), "{text}");
+    assert!(service.users.chip_calls(uid(&service)).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+// Fix 5: no chip search once the tick's budget has run out.
+#[test]
+fn an_exhausted_time_budget_skips_the_chip_search() {
+    let (state, service) = registered_service("budget");
+    service.chip_budget_until.set(Some(Instant::now()));
+    let (outcome, text) = alert(&service, "alert24", false);
+    assert_eq!(outcome, AlertOutcome::Sent);
+    let (section, _) = split_section(&text);
+    assert_eq!(section, fplopt_bot::messages::chip_failure_section());
+    let row = &service.users.chip_calls(uid(&service)).unwrap()[0];
+    assert_eq!(row.error.as_deref(), Some(BUDGET_SKIP));
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+// Fix 5: the budget runs out during P's search: V6 is skipped, P's call still shown.
+#[test]
+fn a_budget_running_out_after_p_skips_v6() {
+    let (state, mut service) = registered_service("budget-v6");
+    let p = script_chip_planner();
+    service.chip_planner = Box::new(move |fpl, entry, context, ft, made| {
+        std::thread::sleep(Duration::from_secs(4));
+        p(fpl, entry, context, ft, made)
+    });
+    service.v6_planner = Box::new(|_, _, _, _, _| panic!("V6 runs over budget"));
+    let context = gw20(&service);
+    // The plan takes well under 3 s, so P starts within the budget and ends after it.
+    service.chip_budget_until.set(Some(Instant::now() + Duration::from_secs(3)));
+    let (outcome, text) = alert_on(&service, "alert24", &context, false);
+    assert_eq!(outcome, AlertOutcome::Sent);
+    let (section, _) = split_section(&text);
+    assert!(section.contains(EVIDENCE), "{section}");
+    let row = &service.users.chip_calls(uid(&service)).unwrap()[0];
+    assert_eq!(row.error.as_deref(), Some(format!("v6: {BUDGET_SKIP}").as_str()));
+    assert!(row.v6_call.is_none());
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+// V6 from GW20: logged on alert24 only; a V6 failure keeps P's section and is in the row.
+#[test]
+fn v6_is_logged_on_alert24_from_gw20() {
+    let (state, mut service) = registered_service("v6");
+    service.v6_planner = script_chip_planner();
+    let context = gw20(&service);
+    let (outcome, text) = alert_on(&service, "alert24", &context, false);
+    assert_eq!(outcome, AlertOutcome::Sent);
+    split_section(&text);
+    let (outcome, _) = alert_on(&service, "alert2", &context, false);
+    assert_eq!(outcome, AlertOutcome::Silent);
+    let calls = service.users.chip_calls(uid(&service)).unwrap();
+    assert!(calls[0].v6_call.is_some(), "{:?}", calls[0]);
+    assert!(calls[0].error.is_none(), "{:?}", calls[0]);
+    assert!(calls[1].v6_call.is_none(), "{:?}", calls[1]);
+
+    let failing: Vec<(&str, ChipPlanner)> = vec![
+        ("error", Box::new(|_, _, _, _, _| anyhow::bail!("no window table"))),
+        ("panic", Box::new(|_, _, _, _, _| panic!("V6 blew up"))),
+    ];
+    for (name, planner) in failing {
+        service.v6_planner = planner;
+        let (outcome, text) = alert_on(&service, "alert24", &context, false);
+        assert_eq!(outcome, AlertOutcome::Sent, "{name}");
+        let (section, _) = split_section(&text);
+        assert_ne!(section, fplopt_bot::messages::chip_failure_section(), "{name}");
+        let row = service.users.chip_calls(uid(&service)).unwrap().pop().unwrap();
+        let error = row.error.clone().unwrap();
+        assert!(error.starts_with("v6: "), "{name}: {row:?}");
+        assert!(row.v6_call.is_none() && row.gains != "{}", "{name}: {row:?}");
+        // P's call was shown: an unchanged alert2 stays silent.
+        assert_eq!(alert_on(&service, "alert2", &context, false).0, AlertOutcome::Silent, "{name}");
+    }
     let _ = std::fs::remove_dir_all(&state);
 }

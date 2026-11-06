@@ -5,8 +5,9 @@
 //! Access is invite-only: `/start` from a new chat makes a `pending` user and tells the admin
 //! (`TELEGRAM_ADMIN_CHAT_ID`, active from the start), who answers `/allow <chat_id>`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -155,11 +156,30 @@ pub fn default_v6_planner() -> ChipPlanner {
     })
 }
 
-/// One alert run's chip calls and P's scenarios as `chip_checks` stores them, or why the
-/// calculation failed.
+/// One alert run's chip calls, P's scenarios as `chip_checks` stores them and V6's error
+/// (`"v6: ..."`), or why P's calculation failed.
 enum ChipStep {
-    Calls { calls: ChipCalls, scenarios: String },
+    Calls { calls: Box<ChipCalls>, scenarios: String, v6_error: Option<String> },
     Failed(String),
+}
+
+/// A chip search skipped because the tick's chip time budget ran out.
+pub const BUDGET_SKIP: &str = "skipped (tick time budget)";
+
+/// `f()` with a panic turned into an error (a chip search must never take the alert down).
+fn guarded<T>(f: impl FnOnce() -> Result<T>) -> std::result::Result<T, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(format!("{err:#}")),
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown".to_string());
+            Err(format!("panicked: {message}"))
+        }
+    }
 }
 
 impl ChipStep {
@@ -223,6 +243,9 @@ pub struct BotService {
     pub chip_alerts: bool,
     /// V6's chip search for the `chip_calls` log (alert24 from GW20).
     pub v6_planner: ChipPlanner,
+    /// No chip search starts after this (`live tick` sets it, so a slow search can't run the
+    /// job past its timeout); None: no budget.
+    pub chip_budget_until: Cell<Option<Instant>>,
     prices: RefCell<Option<LivePrices>>,
 }
 
@@ -243,6 +266,7 @@ impl BotService {
             chip_planner: default_chip_planner(),
             chip_alerts: false,
             v6_planner: default_v6_planner(),
+            chip_budget_until: Cell::new(None),
             prices: RefCell::new(None),
         }
     }
@@ -778,34 +802,30 @@ impl BotService {
         };
         let chips = (self.chip_alerts && (kind == "alert24" || kind == "alert2"))
             .then(|| self.chip_step(user, &plan, kind));
-        let section = match (&chips, kind) {
-            (None, _) => None,
-            (Some(step), "alert24") => {
-                Some(step.calls().map_or_else(chip_failure_section, chip_section))
+        let section =
+            chips.as_ref().and_then(|step| self.chip_text(kind, last.is_none(), user, &plan, step));
+        // Log the run's chip calls after its recommendation row; best effort, never failing
+        // the alert.
+        let record_chips = || {
+            if let Some(step) = &chips
+                && let Err(err) = self.record_chip_step(user, &plan, kind, step)
+            {
+                warn!(
+                    "GW{} {kind} chip_calls row for user {} not written: {err:#}",
+                    context.gw, user.user_id
+                );
             }
-            (Some(step), _) => match step.calls() {
-                // alert2: only when the call changed since this GW's alert24 call
-                Some(calls) => self
-                    .users
-                    .chip_call(user.user_id, context.season, context.gw, "alert24")?
-                    .filter(|logged| shown_call(logged) != shown_call(&chip_call_row(calls)))
-                    .map(|_| chip_section(calls)),
-                None => None,
-            },
         };
-        let record_chips = |kind: &str| -> Result<()> {
-            match &chips {
-                Some(step) => self.record_chip_step(user, &plan, kind, step),
-                None => Ok(()),
-            }
+        let finish = |record: Record, outcome: AlertOutcome| -> Result<AlertOutcome> {
+            self.users.record(user.user_id, context.season, context.gw, kind, &record)?;
+            record_chips();
+            Ok(outcome)
         };
         let text = match (kind, &last) {
             ("alert2", Some(last)) => {
                 let changes = changes_text(last.decision.as_ref(), &decision, &context.names());
                 if changes.is_empty() && section.is_none() {
-                    self.users.record(user.user_id, context.season, context.gw, kind, &base)?;
-                    record_chips(kind)?;
-                    return Ok(AlertOutcome::Silent);
+                    return finish(base, AlertOutcome::Silent);
                 }
                 recommendation_text(&plan, Some(&format!("GW{} update", context.gw)), &changes)
             }
@@ -823,41 +843,78 @@ impl BotService {
             // turns it back on) and don't retry.
             warn!("GW{} {kind} undeliverable to user {}: {err}", context.gw, user.user_id);
             self.users.set_alerts(user.user_id, false)?;
-            self.users.record(
-                user.user_id,
-                context.season,
-                context.gw,
-                kind,
-                &Record {
-                    message: Some(text),
-                    error: Some(format!("undeliverable: {err}")),
-                    ..base
-                },
-            )?;
-            record_chips(kind)?;
-            return Ok(AlertOutcome::Undeliverable);
+            let record = Record {
+                message: Some(text),
+                error: Some(format!("undeliverable: {err}")),
+                ..base
+            };
+            return finish(record, AlertOutcome::Undeliverable);
         }
-        self.users.record(
-            user.user_id,
-            context.season,
-            context.gw,
-            kind,
-            &Record { message: Some(text), sent: true, ..base },
-        )?;
-        record_chips(kind)?;
-        Ok(AlertOutcome::Sent)
+        finish(Record { message: Some(text), sent: true, ..base }, AlertOutcome::Sent)
+    }
+
+    /// The chip section for an alert run (spec §5): on `alert24`, and on an `alert2` that is
+    /// the user's first alert this GW (`first`), the calls or the failure line. On any other
+    /// `alert2`, the calls only if this run's succeeded and the user hasn't seen this call:
+    /// no logged `alert24` call (or it can't be read), the `alert24` calculation failed, or
+    /// the call shown (planner, rules, forced) changed since.
+    fn chip_text(
+        &self,
+        kind: &str,
+        first: bool,
+        user: &User,
+        plan: &UserPlan,
+        step: &ChipStep,
+    ) -> Option<String> {
+        if kind == "alert24" || first {
+            return Some(step.calls().map_or_else(chip_failure_section, chip_section));
+        }
+        let calls = step.calls()?;
+        let context = &plan.context;
+        let logged = match self.users.chip_call(user.user_id, context.season, context.gw, "alert24")
+        {
+            Ok(logged) => logged,
+            Err(err) => {
+                warn!(
+                    "GW{} alert24 chip call of user {} unreadable: {err:#}",
+                    context.gw, user.user_id
+                );
+                None
+            }
+        };
+        let seen = logged.is_some_and(|row| {
+            !planner_failed(&row) && shown_call(&row) == shown_call(&chip_call_row(calls))
+        });
+        (!seen).then(|| chip_section(calls))
     }
 
     /// The chip calls for `plan`'s alert (spec 2026-11-05-chip-alerts §1-3): P's search on the
     /// same priced context, free transfers and made transfers as the plan, and on `alert24`
-    /// from GW20 V6's (logged only). A failure is logged and gives no calls (the failure
-    /// line); a V6 failure only leaves V6 out. Never an error.
+    /// from GW20 V6's (logged only). A failure or panic of P gives no calls (the failure
+    /// line); V6's only sets the row's error. Both are skipped once the tick's chip time budget
+    /// (`chip_budget_until`) has run out. Never an error.
     fn chip_step(&self, user: &User, plan: &UserPlan, kind: &str) -> ChipStep {
+        let started = Instant::now();
+        let step = self.chip_step_inner(user, plan, kind);
+        log::info!(
+            "GW{} {kind} chip calls for user {}: {:.1} s",
+            plan.context.gw,
+            user.user_id,
+            started.elapsed().as_secs_f64()
+        );
+        step
+    }
+
+    fn chip_step_inner(&self, user: &User, plan: &UserPlan, kind: &str) -> ChipStep {
         let context = &plan.context;
-        let failed = |err: anyhow::Error| {
-            warn!("GW{} {kind} chip calls for user {} failed: {err:#}", context.gw, user.user_id);
-            ChipStep::Failed(format!("{err:#}"))
+        let failed = |err: String| {
+            warn!("GW{} {kind} chip calls for user {} failed: {err}", context.gw, user.user_id);
+            ChipStep::Failed(err)
         };
+        let over_budget = || self.chip_budget_until.get().is_some_and(|t| Instant::now() >= t);
+        if over_budget() {
+            return failed(BUDGET_SKIP.to_string());
+        }
         let inputs = (|| -> Result<_> {
             let entry_id = user.entry_id.context("chip calls: the user has no team")?;
             let ft = self.users.free_transfers(user.user_id, context.season, context.gw)?;
@@ -866,20 +923,26 @@ impl BotService {
         })();
         let (entry_id, ft, made) = match inputs {
             Ok(inputs) => inputs,
-            Err(err) => return failed(err),
+            Err(err) => return failed(format!("{err:#}")),
         };
-        let options = match (self.chip_planner)(self.fpl.as_ref(), entry_id, context, ft, &made) {
+        let options = match guarded(|| {
+            (self.chip_planner)(self.fpl.as_ref(), entry_id, context, ft, &made)
+        }) {
             Ok(options) => options,
             Err(err) => return failed(err),
         };
+        let mut v6_error = None;
         let v6 = if kind == "alert24" && context.gw_index >= V6_FROM_GW_INDEX {
-            match (self.v6_planner)(self.fpl.as_ref(), entry_id, context, ft, &made) {
+            let result = if over_budget() {
+                Err(BUDGET_SKIP.to_string())
+            } else {
+                guarded(|| (self.v6_planner)(self.fpl.as_ref(), entry_id, context, ft, &made))
+            };
+            match result {
                 Ok(v6) => Some(v6),
                 Err(err) => {
-                    warn!(
-                        "GW{} V6 chip call for user {} failed: {err:#}",
-                        context.gw, user.user_id
-                    );
+                    warn!("GW{} V6 chip call for user {} failed: {err}", context.gw, user.user_id);
+                    v6_error = Some(format!("v6: {err}"));
                     None
                 }
             }
@@ -887,8 +950,12 @@ impl BotService {
             None
         };
         match compute_chip_calls(plan, &options, v6.as_ref()) {
-            Ok(calls) => ChipStep::Calls { calls, scenarios: chip_scenarios_json(&options) },
-            Err(err) => failed(err),
+            Ok(calls) => ChipStep::Calls {
+                calls: Box::new(calls),
+                scenarios: chip_scenarios_json(&options),
+                v6_error,
+            },
+            Err(err) => failed(format!("{err:#}")),
         }
     }
 
@@ -902,9 +969,10 @@ impl BotService {
     ) -> Result<()> {
         let context = &plan.context;
         let row = match step {
-            ChipStep::Calls { calls, scenarios } => ChipCallRow {
+            ChipStep::Calls { calls, scenarios, v6_error } => ChipCallRow {
                 gains: dumps(&calls.gains)?,
                 scenarios: scenarios.clone(),
+                error: v6_error.clone(),
                 ..chip_call_row(calls)
             },
             ChipStep::Failed(err) => {
@@ -976,6 +1044,12 @@ fn chip_call_row(calls: &ChipCalls) -> ChipCallRow {
         v6_call: calls.v6.as_ref().map(name),
         ..chip_call_row_base()
     }
+}
+
+/// Whether a logged row's planner calculation failed (an error not from V6 alone): its calls
+/// are placeholders the user never saw.
+fn planner_failed(row: &ChipCallRow) -> bool {
+    row.error.as_deref().is_some_and(|e| !e.starts_with("v6: "))
 }
 
 /// The call the user sees (planner, rules, forced; `"none"` for None): an `alert2` shows the
