@@ -52,7 +52,8 @@ pub struct Common {
     /// Start years: 2016-2024, 2021,2023, 2021-22 or a mix (the holdout is refused).
     #[arg(long)]
     pub seasons: String,
-    /// Start states.
+    /// Start states: template@G, random[:N]@G, squad:FILE@G; any kind takes `+bank<n>` before the
+    /// `@` (n tenths of £m added to the bank, e.g. template+bank10@1; Rust only).
     #[arg(long, default_value = DEFAULT_STARTS)]
     pub starts: String,
     /// Output directory (default results/<UTC time>-<command>).
