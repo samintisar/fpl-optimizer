@@ -459,21 +459,44 @@ pub fn split_message(text: &str, limit: usize) -> Vec<String> {
 }
 
 /// The alert's chip section (Telegram HTML; the caller adds the blank line after it).
+///
+/// The headline is P's chip when P plays one. A chip H's last-chance rule forces (more chips
+/// left in a window than GWs) never overrides it, since P may play another chip of that window
+/// now and the forced one next GW: the section then says how many chips and GWs are left.
+/// When P holds, the forced chip is the headline.
 pub fn chip_section(calls: &ChipCalls) -> String {
-    let headline = calls.forced.as_deref().or(calls.planner.as_deref());
+    let forced = calls.forced.as_deref();
+    let headline = calls.planner.as_deref().or(forced);
+    // The forced chip's window: open chips ending with it, GWs to its end.
+    let window = forced.and_then(|f| {
+        let last = calls.open.iter().find(|o| o.name == f)?.last_gw;
+        let left = calls.open.iter().filter(|o| o.last_gw == last).count();
+        Some((left, last - calls.gw + 1, last))
+    });
     let mut lines = Vec::new();
-    lines.push(match (calls.forced.as_deref(), calls.planner.as_deref()) {
-        (Some(c), _) => format!("<b>Chip this week:</b> play {} now, or lose it", e(chip_label(c))),
-        (None, Some(c)) => format!(
+    lines.push(match (calls.planner.as_deref(), forced, window) {
+        (Some(c), _, _) => format!(
             "<b>Chip this week:</b> play {} ({:+.1} xP vs keeping it)",
             e(chip_label(c)),
             calls.planner_gain
         ),
-        (None, None) => "<b>Chip this week:</b> hold".to_string(),
+        (None, Some(c), Some((left, gws, last))) => format!(
+            "<b>Chip this week:</b> play {} now ({left} chips left, {gws} GWs to GW{last})",
+            e(chip_label(c))
+        ),
+        (None, Some(c), None) => {
+            format!("<b>Chip this week:</b> play {} now, or lose it", e(chip_label(c)))
+        }
+        (None, None, _) => "<b>Chip this week:</b> hold".to_string(),
     });
     // A Free Hit or Wildcard squad differs from the alert's no-chip plan, forced or not.
     if matches!(headline, Some("freehit" | "wildcard")) {
         lines[0].push_str(" \u{b7} see /chips for the chip squad");
+    }
+    if calls.planner.is_some()
+        && let Some((left, gws, last)) = window
+    {
+        lines.push(format!("  {left} chips left and {gws} GWs to GW{last}: play one each GW"));
     }
 
     let gain = |key: &str| match calls.gains.get(key).copied().flatten() {
@@ -522,7 +545,10 @@ pub fn chip_section(calls: &ChipCalls) -> String {
                 };
                 if headline == Some(o.name.as_str()) {
                     note.push_str(", playing now");
-                } else if let Some(best) = o.best_gw {
+                } else if let Some(best) = o.best_gw
+                    // "best GW: this GW" would contradict P's "hold"
+                    && !(calls.planner.is_none() && best == calls.gw)
+                {
                     note.push_str(&format!(", best GW: GW{best}"));
                 }
                 format!("{} ({note})", e(chip_label(&o.name)))
@@ -569,7 +595,6 @@ mod tests {
                 OpenChip { name: "bboost".into(), last_gw: 19, best_gw: Some(13), expiring: false },
             ],
             v6: None,
-            scenarios: vec![],
         }
     }
 
@@ -589,15 +614,44 @@ mod tests {
     fn chip_section_hold_and_differ() {
         let text = chip_section(&chip_calls(None, Some("bboost"), None));
         assert!(text.starts_with("<b>Chip this week:</b> hold\n  Simple rules: play Bench Boost (bench xP 11.6 \u{2265} 10.9)\n"));
+        // Bench Boost's best GW is this one (GW13): not shown next to "hold".
+        assert!(
+            text.contains(
+                "Unused chips: Free Hit (until GW19, best GW: GW16), Bench Boost (until GW19)\n"
+            ),
+            "{text}"
+        );
     }
 
     #[test]
     fn chip_section_forced_and_expiring() {
         let mut calls = chip_calls(None, Some("freehit"), Some("freehit"));
+        calls.gw = 18;
         calls.open[0].expiring = true;
         let text = chip_section(&calls);
-        assert!(text.starts_with("<b>Chip this week:</b> play Free Hit now, or lose it · see /chips for the chip squad\n  Simple rules agree: last chance before the window closes\n"));
+        assert!(text.starts_with("<b>Chip this week:</b> play Free Hit now (2 chips left, 2 GWs to GW19) · see /chips for the chip squad\n  Simple rules agree: last chance before the window closes\n"), "{text}");
         assert!(text.contains("Free Hit (expires after GW19, playing now)"));
+    }
+
+    // P plays Bench Boost at GW18 while H's last-chance rule forces Free Hit (two chips left,
+    // window ends GW19): P's call stays the headline.
+    #[test]
+    fn chip_section_forced_chip_does_not_override_the_planner() {
+        let mut calls = chip_calls(Some("bboost"), Some("freehit"), Some("freehit"));
+        calls.gw = 18;
+        for o in &mut calls.open {
+            o.expiring = true;
+        }
+        calls.open[0].best_gw = Some(19);
+        assert_eq!(
+            chip_section(&calls),
+            "<b>Chip this week:</b> play Bench Boost (+7.4 xP vs keeping it)\n\
+             \x20 2 chips left and 2 GWs to GW19: play one each GW\n\
+             \x20 Simple rules: play Free Hit (last chance before the window closes)\n\
+             Unused chips: Free Hit (expires after GW19, best GW: GW19), Bench Boost (expires after GW19, playing now)\n\
+             Evidence: on 2023/24 and 2024/25 this planner scored +4.2 pts/GW over playing no chips; \
+             not proven better than the simple rules."
+        );
     }
 
     #[test]

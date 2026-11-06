@@ -468,9 +468,11 @@ fn an_exhausted_time_budget_skips_the_chip_search() {
     let _ = std::fs::remove_dir_all(&state);
 }
 
-// Fix 5: the budget runs out during P's search: V6 is skipped, P's call still shown.
+// Fix 5: the budget runs out during P's search: H's MILPs and V6 are skipped (the failure
+// line). V6 skipped with P and H shown needs the budget to run out during H, which a test
+// can't time.
 #[test]
-fn a_budget_running_out_after_p_skips_v6() {
+fn a_budget_running_out_during_p_skips_h_and_v6() {
     let (state, mut service) = registered_service("budget-v6");
     let p = script_chip_planner();
     service.chip_planner = Box::new(move |fpl, entry, context, ft, made| {
@@ -484,9 +486,9 @@ fn a_budget_running_out_after_p_skips_v6() {
     let (outcome, text) = alert_on(&service, "alert24", &context, false);
     assert_eq!(outcome, AlertOutcome::Sent);
     let (section, _) = split_section(&text);
-    assert!(section.contains(EVIDENCE), "{section}");
+    assert_eq!(section, fplopt_bot::messages::chip_failure_section());
     let row = &service.users.chip_calls(uid(&service)).unwrap()[0];
-    assert_eq!(row.error.as_deref(), Some(format!("v6: {BUDGET_SKIP}").as_str()));
+    assert_eq!(row.error.as_deref(), Some(BUDGET_SKIP));
     assert!(row.v6_call.is_none());
     let _ = std::fs::remove_dir_all(&state);
 }

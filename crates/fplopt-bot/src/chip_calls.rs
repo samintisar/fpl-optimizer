@@ -40,8 +40,6 @@ pub struct ChipCalls {
     pub open: Vec<OpenChip>,
     /// V6's chip for this GW: None before GW20 (not computed), Some(None) = hold.
     pub v6: Option<Option<String>>,
-    /// P's solved scenarios (label, total objective), as `chip_checks` stores them.
-    pub scenarios: Vec<(String, f64)>,
 }
 
 /// Chip policy 2's frozen V6, live variant (docs/research/2026-11-chip-policy-2.md §5).
@@ -219,17 +217,7 @@ pub fn compute_chip_calls(
         })
         .collect();
     let v6 = v6.map(|o| o.plans.best().first().chip.clone());
-    Ok(ChipCalls {
-        gw: context.gw,
-        planner,
-        planner_gain,
-        rules,
-        gains,
-        forced,
-        open,
-        v6,
-        scenarios: objectives.clone(),
-    })
+    Ok(ChipCalls { gw: context.gw, planner, planner_gain, rules, gains, forced, open, v6 })
 }
 
 #[cfg(test)]
@@ -250,7 +238,6 @@ mod tests {
             forced: forced.map(Into::into),
             open: vec![],
             v6: None,
-            scenarios: vec![],
         }
     }
 
@@ -332,7 +319,6 @@ mod tests {
         let a = calls(Some("bboost"), None, None);
         let mut b = a.clone();
         b.planner_gain += 1.0;
-        b.scenarios.clear();
         assert!(!calls_changed(&a, &b));
         b.rules = Some("3xc".into());
         assert!(calls_changed(&a, &b));

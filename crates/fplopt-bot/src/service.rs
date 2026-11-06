@@ -931,31 +931,35 @@ impl BotService {
             Ok(options) => options,
             Err(err) => return failed(err),
         };
+        // H's numbers solve more MILPs (`chip_gains`): budgeted and panic-isolated too. P and
+        // H come before V6, which is only logged.
+        if over_budget() {
+            return failed(BUDGET_SKIP.to_string());
+        }
+        let mut calls = match guarded(|| compute_chip_calls(plan, &options, None)) {
+            Ok(calls) => calls,
+            Err(err) => return failed(err),
+        };
         let mut v6_error = None;
-        let v6 = if kind == "alert24" && context.gw_index >= V6_FROM_GW_INDEX {
+        if kind == "alert24" && context.gw_index >= V6_FROM_GW_INDEX {
             let result = if over_budget() {
                 Err(BUDGET_SKIP.to_string())
             } else {
                 guarded(|| (self.v6_planner)(self.fpl.as_ref(), entry_id, context, ft, &made))
             };
             match result {
-                Ok(v6) => Some(v6),
+                // as `compute_chip_calls` reads V6's search
+                Ok(v6) => calls.v6 = Some(v6.plans.best().first().chip.clone()),
                 Err(err) => {
                     warn!("GW{} V6 chip call for user {} failed: {err}", context.gw, user.user_id);
                     v6_error = Some(format!("v6: {err}"));
-                    None
                 }
             }
-        } else {
-            None
-        };
-        match compute_chip_calls(plan, &options, v6.as_ref()) {
-            Ok(calls) => ChipStep::Calls {
-                calls: Box::new(calls),
-                scenarios: chip_scenarios_json(&options),
-                v6_error,
-            },
-            Err(err) => failed(format!("{err:#}")),
+        }
+        ChipStep::Calls {
+            calls: Box::new(calls),
+            scenarios: chip_scenarios_json(&options),
+            v6_error,
         }
     }
 

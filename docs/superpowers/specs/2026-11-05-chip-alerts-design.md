@@ -24,7 +24,7 @@ The 24-hour alert (`alert24`) gets a chip section above the transfer plan, for e
 ```
 Chip this week: play Bench Boost (+7.4 xP vs keeping it)
   Simple rules agree: bench xP 11.6 ≥ 10.9
-Unused chips: Free Hit (expires after GW19, best GW: GW16), Bench Boost (GW19, playing now)
+Unused chips: Free Hit (expires after GW19, best GW: GW16), Bench Boost (until GW19, playing now)
 Evidence: on 2023/24 and 2024/25 this planner scored +4.2 pts/GW over playing no chips;
 not proven better than the simple rules.
 ```
@@ -55,8 +55,12 @@ not proven better than the simple rules.
 
 - Each unused chip whose window is open lists its last GW and its best GW, or "playing now".
 - **Warning:** from 4 GWs before a window closes (`stop − gw ≤ 3`), the chip gets "expires after GW<stop>".
-- **Forced:** when H's last-chance rule fires, the planner line becomes "play <chip> now, or lose it", whatever P says.
-  - P's terminal value for a chip whose window ends in the horizon is already 0, so P rarely disagrees.
+- **Forced:** H's last-chance rule fires when a window has more chips left than GWs. It picks a chip by priority, which need not be the one P would play, so it never overrides P:
+  - **P plays a chip:** P's line stays, followed by "<n> chips left and <m> GWs to GW<last>: play one each GW" (n: the open chips ending with the forced chip's window; m: its GWs left, this one included). For example at GW18 with Bench Boost and Free Hit left until GW19, P may play Bench Boost now and Free Hit in GW19.
+  - **P holds:** the line becomes "play <chip> now (<n> chips left, <m> GWs to GW<last>)", with the /chips pointer for a Free Hit or Wildcard.
+  - H's line gives "last chance before the window closes" as its reason.
+  - P's terminal value for a chip whose window ends in the horizon is already 0, so P rarely holds then.
+- When P holds, a chip's best GW is not shown if it is this GW.
 
 ### 4. The evidence line
 
@@ -67,11 +71,13 @@ It is fixed text, as above. It stays until a chip policy passes the full gate.
 - **Chip call changed** (P's or H's) since this GW's `alert24` call: the update shows the chip section.
 - **Nothing changed:** the update leaves the chip section out.
 - **Silent alert:** if the chip call and the transfer plan are both unchanged, the update stays silent, as now.
+- `alert2` also shows the section when it is the user's first alert this GW, or when `alert24`'s chip calculation failed; an `alert2` whose own chip check fails shows nothing extra.
 
 ### 6. Failure
 
 - If the chip search fails or times out for a user, the section is one line: "Chip check failed this time: try /chips".
 - The transfer alert still goes out. A chip failure never fails an alert.
+- On `alert2` the failure line appears only when that `alert2` is the user's first alert this GW; otherwise a failed chip check adds nothing.
 
 ## Logging (also the chip-policy-2 shadow log)
 
