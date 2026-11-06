@@ -76,8 +76,14 @@ impl XpFrame {
 
 /// A candidate: `price` the buy price, `sell_price` what his first sale earns; `xp[t]` his
 /// xP in horizon GW t. `price_path[t]`, when set, is his expected price at horizon GW t's
-/// deadline (tenths, fractional; `[0]` is today's price) and replaces `price`/`sell_price`
-/// in the money flows; `purchase_price` is an owned player's purchase price.
+/// deadline (tenths, fractional) and replaces `price`/`sell_price` in the money flows from
+/// GW 1 on; `[0]` is today's `price` (`set_price_paths` overwrites it), and GW 0 always
+/// trades at the exact integer `price`/`sell_price` FPL charges and pays. `purchase_price`
+/// is an owned player's purchase price.
+///
+/// Two approximations: `selling_value` uses FPL's half-the-rise (0.5) rather than
+/// `rules.sell_on_fee`, and a Free Hit GW's later sale credits the path's price, not the
+/// selling value of the GW he was bought in (no cohorts in a Free Hit GW).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Player {
     pub player_key: i64,
@@ -96,16 +102,20 @@ pub struct Player {
 pub const PATH_MOVES: f64 = 0.05;
 
 impl Player {
-    /// What buying him in horizon GW t costs.
+    /// What buying him in horizon GW t costs: `price` in GW 0 or without a path.
     pub fn buy_price(&self, t: usize) -> f64 {
-        self.price_path.as_ref().map_or(self.price as f64, |p| p[t])
+        match &self.price_path {
+            Some(p) if t > 0 => p[t],
+            _ => self.price as f64,
+        }
     }
 
-    /// What an owned player's first sale in GW t earns: FPL's selling rule on the path's
-    /// price, not floored (expected prices are fractional); `sell_price` without a path.
+    /// What an owned player's first sale in GW t earns: from GW 1 on, FPL's selling rule on
+    /// the path's price, not floored (expected prices are fractional); `sell_price` (FPL's
+    /// exact, floored value) in GW 0 or without a path.
     pub fn first_sale_value(&self, t: usize) -> f64 {
         match (&self.price_path, self.purchase_price) {
-            (Some(p), Some(purchase)) => selling_value(purchase as f64, p[t]),
+            (Some(p), Some(purchase)) if t > 0 => selling_value(purchase as f64, p[t]),
             _ => self.sell_price as f64,
         }
     }
@@ -119,7 +129,8 @@ impl Player {
     }
 }
 
-/// FPL's selling rule without the floor: bought at `bought`, now `now`.
+/// FPL's selling rule without the floor: bought at `bought`, now `now` (half the rise: 0.5
+/// hard-coded, not `rules.sell_on_fee`).
 pub fn selling_value(bought: f64, now: f64) -> f64 {
     if now > bought { bought + 0.5 * (now - bought) } else { now }
 }
@@ -152,7 +163,8 @@ pub struct PlanInput {
 
 impl PlanInput {
     /// Set each candidate's price path (`None` keeps today's prices). Paths must have one
-    /// entry per horizon GW.
+    /// entry per horizon GW; entry 0 is replaced by today's `price` (GW 0 trades at FPL's
+    /// exact prices).
     pub fn set_price_paths(&mut self, mut path: impl FnMut(&Player) -> Option<Vec<f64>>) {
         let n = self.gws.len();
         for p in &mut self.players {
@@ -165,6 +177,10 @@ impl PlanInput {
                     p.player_key,
                     v.len()
                 );
+            }
+            let price = p.price as f64;
+            if let Some(first) = p.price_path.as_mut().and_then(|v| v.first_mut()) {
+                *first = price;
             }
         }
     }

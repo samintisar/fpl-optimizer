@@ -52,7 +52,8 @@ impl GwPlan {
 }
 
 /// A solved plan (fields as Python's `Plan`; `objective` excludes the chip terminal value
-/// and the end-of-horizon money value λ·M, `money_value`, 0 unless `price_value_k` > 0).
+/// and the end-of-horizon money value's change λ·(M − M₀), `money_value`, 0 unless
+/// `price_value_k` > 0).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     pub gws: Vec<GwPlan>,

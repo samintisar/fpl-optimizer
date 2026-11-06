@@ -9,7 +9,11 @@
 //! Not in Python: candidates' price paths (`PlanInput::set_price_paths`; a moving path's
 //! later sales become per-buy-GW cohort sales) and the end-of-horizon money value λ·M
 //! (`price_value_k`). Without paths and with `price_value_k` 0 the model is the one above,
-//! column for column and row for row (pinned by `tests/model.rs`).
+//! column for column and row for row (pinned by `tests/model.rs`). Approximations: a Free
+//! Hit GW's later sale (`fh_sell_later`) credits the path's full price, not the selling
+//! value of the GW the player was bought in; `selling_value` hard-codes FPL's 0.5 rather
+//! than `rules.sell_on_fee`; GW 0 trades at the exact integer prices, later GWs at the
+//! path's fractional ones.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
@@ -844,21 +848,22 @@ impl<'a> Model<'a> {
         self.problem.gws.last().map_or(0.0, |g| self.params.money_rate(g.gw_index))
     }
 
-    /// λ·M as (variable, coefficient) terms (not merged) and a constant, M the money at the
-    /// horizon's end (not decayed): the persistent bank after the last GW T, plus each
-    /// player held then at his selling value in GW T — owned players at FPL's rule on their
-    /// purchase price (the constant, less on each first sale), players bought within the
+    /// λ·(M − M₀) as (variable, coefficient) terms (not merged) and a constant. M is the
+    /// money at the horizon's end (not decayed): the persistent bank after the last GW T,
+    /// plus each player held then at his selling value in GW T — owned players at FPL's
+    /// rule on their purchase price (less on each first sale), players bought within the
     /// plan by their cohort's buy price (moving paths) or at their GW T price (on each buy,
-    /// less on each later sale).
+    /// less on each later sale). M₀ = the starting bank + every owned player's GW T value
+    /// (M's constant part), so only the change is counted and the constant is −λ·bank.
     fn money_terms(&self, lambda: f64) -> (Vec<(usize, f64)>, f64) {
         let last = self.t_len - 1;
         let mut terms = vec![(self.bank[last], lambda)];
-        let mut constant = 0.0;
+        // Held all along, an owned player's value cancels with his share of M₀.
+        let constant = -lambda * self.problem.bank as f64;
         for p in &self.problem.players {
             let k = p.player_key;
             if p.owned {
                 let value = lambda * p.first_sale_value(last);
-                constant += value;
                 for t in 0..self.t_len {
                     if let Some(&v) = self.sell_first.get(&(k, t)) {
                         terms.push((v, -value));
@@ -891,7 +896,7 @@ impl<'a> Model<'a> {
         (terms, constant)
     }
 
-    /// λ·M at solution `x`, from the same terms as the objective; 0 when λ is 0.
+    /// λ·(M − M₀) at solution `x`, from the same terms as the objective; 0 when λ is 0.
     fn money_value(&self, x: &[f64]) -> f64 {
         let lambda = self.money_rate();
         if lambda <= 0.0 {

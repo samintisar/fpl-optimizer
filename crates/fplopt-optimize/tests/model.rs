@@ -462,6 +462,48 @@ fn moving_prices_under_a_free_hit() {
 }
 
 #[test]
+fn gw0_trades_at_fpl_exact_prices() {
+    // A bought at 50, now 53: FPL pays 51 (floored), not 51.5, for his GW0 sale, whatever
+    // the path says. C's path starts at 49 but he costs his price 50 in GW0, and his GW0
+    // cohort sells by that 50.
+    let rules = rules();
+    let (state, mut pool, xp, a, c) = churn_instance();
+    pool.iter_mut().find(|p| p.player_key == a).unwrap().price = 53;
+    let state = make_state(
+        &pool,
+        &state.player_keys(),
+        StateOpts {
+            ft: 2,
+            bank: Some(14),
+            purchase: HashMap::from([(a, 50)]),
+            ..Default::default()
+        },
+    );
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let mut problem = problem(&state, &pool, &xp, &params, &rules);
+    problem.set_price_paths(|p| match p.player_key {
+        k if k == a => Some(vec![53.0, 55.0, 57.0]),
+        k if k == c => Some(vec![49.0, 52.0, 54.0]),
+        _ => None,
+    });
+    assert_eq!(player(&problem, a).first_sale_value(0), 51.0);
+    assert_eq!(player(&problem, a).first_sale_value(1), 52.5);
+    assert_eq!(player(&problem, c).buy_price(0), 50.0);
+    assert_eq!(player(&problem, c).price_path.as_ref().unwrap()[0], 50.0);
+    let plan = solve(&problem, &params);
+    let moves: Vec<(Vec<i64>, Vec<i64>)> =
+        plan.gws.iter().map(|g| (transfers_out(g), transfers_in(g))).collect();
+    assert_eq!(moves, vec![(vec![a], vec![c]), (vec![c], vec![a]), (vec![a], vec![c])]);
+    // GW0: 14 + 51 - 50 = 15 (exact, what apply_decision books; 51.5 would leave 15.5,
+    // reported as 16)
+    // GW1: + 51 (C bought at 50, sold at 52) - 55 (A) = 11
+    // GW2: + 56 (A bought at 55, sold at 57) - 54 (C) = 13
+    assert_eq!(plan.gws.iter().map(|g| g.bank).collect::<Vec<_>>(), vec![15, 11, 13]);
+    apply_first(&state, &plan, &pool, &rules);
+}
+
+#[test]
 fn a_cohort_sells_by_its_own_buy_price() {
     // C bought in GW0 at 50 and sold in GW2 at 54 earns 52 (FPL's rule on his GW0 price),
     // not 54 (his GW2 price) nor 53 (the rule on his GW1 price).
@@ -559,13 +601,14 @@ fn money_value_prefers_the_riser_only_when_k_is_positive() {
     assert_eq!(money, 0.0);
     let (ins, money, bank) = riser_plan(1.0, 5);
     assert_eq!(ins, vec![c]);
-    // λ = 0.395 · 0.93 · (38 − 7) / 10; C held at the end is worth 50 + (54 − 50)/2 = 52
+    // λ = 0.395 · 0.93 · (38 − 7) / 10, times the money's change M − M₀:
+    // M₀ = bank 10 + 15 owned players at 45 = 685;
+    // M = 14 kept players at 45 + bank 5 (10 + 45 − 50) + C held at 50 + (54 − 50)/2 = 52,
+    // = 687 (swapping C for D in GW2, 0.01 more xP, leaves M the same: bank 5 + 52 − 50 = 7
+    // plus D's 50). So money_value = 2λ: C's half of his 4-tenth rise.
     let lambda = 0.395 * 0.93 * 31.0 / 10.0;
-    assert!(money > lambda * 52.0); // plus the bank and the rest of the squad
-    // M = 14 kept players at 45 + bank 5 (10 + 45 − 50) + C's 52; swapping C for D in GW2
-    // (0.01 more xP) leaves M the same: bank 5 + 52 − 50 = 7 plus D's 50.
     assert!([5, 7].contains(&bank), "{bank}");
-    assert!(approx(money, lambda * (14.0 * 45.0 + 57.0), 1e-6), "{money}");
+    assert!(approx(money, 2.0 * lambda, 1e-6), "{money}");
 }
 
 #[test]
@@ -611,8 +654,10 @@ fn without_paths_the_model_is_unchanged() {
 
 #[test]
 fn the_no_path_model_is_pinned() {
-    // Hashes of the LP (columns, rows, objective) taken before price paths reached the
-    // model: without paths it must not change. decay 0.5 keeps the objective's powers exact.
+    // Hashes of the LP (columns, rows, objective) without paths: it must not change. The
+    // same 5 hashes come out of the pre-feature model (commit e8e707d, a19e165's parent,
+    // with only `model_fingerprint` and this test back-ported, checked 2026-11-06).
+    // decay 0.5 keeps the objective's powers exact.
     let rules = rules();
     let (state, pool, xp, _, _) = churn_instance();
     let params =
