@@ -126,3 +126,85 @@ def test_decision_thresholds():
     d = sizing.decide(planning_points=19.9, timing_points=10.0)
     assert d == {"planning": False, "timing": True}
     assert sizing.decide(20.0, 9.9) == {"planning": True, "timing": False}
+
+
+def test_deadline_prices_use_last_snapshot_before_deadline():
+    snap = pd.DataFrame(
+        {
+            "season": [2021] * 4,
+            "player_key": [1, 1, 1, 2],
+            "snapshot_at": pd.to_datetime(
+                ["2021-08-01", "2021-08-10", "2021-08-14", "2021-08-10"], utc=True
+            ),
+            "now_cost": [50, 51, 99, 60],
+        }
+    )
+    deadlines = {(2021, 1): pd.Timestamp("2021-08-13 17:30", tz="UTC")}
+    out = timing.deadline_prices(deadlines, snap, fallback={(2021, 1, 1): 1, (2021, 1, 3): 70})
+    assert out == {(2021, 1, 1): 51, (2021, 1, 2): 60, (2021, 1, 3): 70}
+
+
+def _unit_gws(start_id, first_gw, transfers, chips=None):
+    n = len(transfers)
+    return pd.DataFrame(
+        {
+            "season": [2021] * n,
+            "start_id": [start_id] * n,
+            "gw": range(first_gw, first_gw + n),
+            "gw_index": range(first_gw, first_gw + n),
+            "deadline": pd.date_range("2021-09-01", periods=n, freq="7D", tz="UTC"),
+            "transfers": transfers,
+            "chip": chips or [None] * n,
+        }
+    )
+
+
+def test_summarise_means_only_full_season_units_and_counts_empty_units():
+    gws = pd.concat(
+        [
+            _unit_gws("template@1", 1, ["[]", "[[1, 2]]"]),
+            _unit_gws("random0@1", 1, ["[]", "[]"]),
+            _unit_gws("template@20", 20, ["[]", "[[1, 2]]"]),
+        ]
+    )
+    rows = [
+        {"season": 2021, "start_id": "template@1", "gw": 2, "sell_gain": 4, "buy_gain": 2},
+        {"season": 2021, "start_id": "template@20", "gw": 21, "sell_gain": 10, "buy_gain": 0},
+    ]
+    out = timing.summarise(rows, gws)
+    assert out["per_unit"]["2021 random0@1"] == 0
+    assert out["mean_per_season"] == pytest.approx(3.0)  # (6 + 0) / 2, the @20 unit excluded
+    assert out["mean_gw20_38"] == 10.0
+
+
+def test_replay_skips_first_row_freehit_and_missing_prices():
+    # @20 unit: the first row's transfers are not counted; GW22 is a Free Hit (skipped); GW21
+    # sells 1 with no GW20 price (skipped, counted); GW23 brings in 6 with no price (counted)
+    gws = _unit_gws(
+        "template@20",
+        20,
+        ["[[8, 9]]", "[[1, 3]]", "[[3, 5]]", "[[3, 6]]"],
+        chips=[None, None, "freehit", None],
+    )
+    price = {
+        (2021, 20, 8): 50,
+        (2021, 21, 3): 60,
+        (2021, 21, 1): 55,
+        (2021, 22, 3): 60,
+        (2021, 22, 5): 40,
+        (2021, 23, 3): 61,
+    }
+    stats = {}
+    rows = timing.replay(gws, price, {}, pd.Timedelta(hours=24), stats)
+    assert [r["gw"] for r in rows] == [21, 23]
+    assert stats["skipped"] == 2
+
+
+def test_value_gap_fpl_lag_shifts_managers_forward():
+    managers = pd.DataFrame(
+        {"group": ["top10k"] * 2, "entry": [1, 1], "gw": [1, 2], "value": [1000, 1010]}
+    )
+    ours = pd.DataFrame({"gw": [1, 2, 3], "market_value": [1000, 1005, 1007]})
+    g = gap.value_gap(managers, ours, n_gws=38, fpl_lag=1)["top10k"]
+    # managers' event 2 (1010) is compared with our row 3 (1007)
+    assert g["gw"] == 3 and g["median"] == 1010 and g["ours"] == 1007 and g["gap"] == 3

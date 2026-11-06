@@ -19,7 +19,7 @@ from scipy import stats
 
 PLANNING_MIN = 20.0  # points a season (spec §3, fixed before any number was seen)
 TIMING_MIN = 10.0
-GAP_GROUP = "top10k"  # the upper bound uses the larger, top-10k gap
+GAP_GROUPS = ("top10k", "10k-100k")  # the upper bound uses the larger gap_season
 
 
 def _totals(gws: pd.DataFrame) -> pd.Series:
@@ -33,6 +33,9 @@ def points_per_million(base: pd.DataFrame, bank: pd.DataFrame, extra_bank: int) 
     m.index = pd.MultiIndex.from_tuples(
         [(s, i.replace(f"+bank{extra_bank}", "")) for s, i in m.index], names=b.index.names
     )
+    only = sorted(set(b.index) ^ set(m.index))
+    if only:
+        print(f"units present in only one run (dropped): {only}")
     diff = (m - b).dropna() * 10 / extra_bank
     out = {}
     for gw, d in diff.groupby(diff.index.get_level_values("start_id").str.split("@").str[1]):
@@ -67,9 +70,15 @@ def main() -> None:
     )
     # GW1 starts before 2021/22 fall back to gw_index 2; pool them with GW1 as the season rate
     early = [v for k, v in rate.items() if k in ("1", "2")]
+    if not early:
+        raise SystemExit(
+            f"no full-season start groups ('1' or '2') in the runs; found {sorted(rate)}"
+        )
     n = sum(v["n"] for v in early)
     season_rate = sum(v["mean"] * v["n"] for v in early) / n
-    gap = json.loads(args.gap.read_text())[GAP_GROUP]
+    gaps = json.loads(args.gap.read_text())
+    gap_group = max(GAP_GROUPS, key=lambda g: gaps[g]["gap_season"])
+    gap = gaps[gap_group]
     timing = json.loads(args.timing.read_text())
     planning_points = gap["gap_season"] / 10 * season_rate
     timing_points = timing["24h"]["mean_per_season"] / 10 * season_rate
@@ -77,6 +86,10 @@ def main() -> None:
         "points_per_million": rate,
         "season_rate": season_rate,
         "gap": gap,
+        "gap_group_used": gap_group,
+        "gaps": {g: gaps[g] for g in GAP_GROUPS},
+        "ci_note": "the CI treats (season, start) units as independent, although starts "
+        "within a season share outcomes, so it is too narrow",
         "planning_points": planning_points,
         "timing_points_24h": timing_points,
         "timing_points_week": timing["week"]["mean_per_season"] / 10 * season_rate,

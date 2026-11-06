@@ -63,17 +63,23 @@ def get_cached(path: Path, url: str, pause: float) -> dict:
 
 def fetch(out: Path, seed: int, pause: float) -> pd.DataFrame:
     rows = []
+    seen: set[int] = set()  # an entry drawn twice (or in both groups) counts once
     for group, ranks in sample_ranks(seed).items():
         for i, rank in enumerate(ranks):
+            page_path = out / "standings" / f"{page_of(rank)}.json.gz"
             page = get_cached(
-                out / "standings" / f"{page_of(rank)}.json.gz",
+                page_path,
                 f"leagues-classic/314/standings/?page_standings={page_of(rank)}",
                 pause,
             )
             entry = page["standings"]["results"][slot_of(rank)]["entry"]
+            if entry in seen:
+                continue
+            seen.add(entry)
             history = get_cached(
                 out / "history" / f"{entry}.json.gz", f"entry/{entry}/history/", pause
             )
+            fetched_at = pd.Timestamp(page_path.stat().st_mtime, unit="s", tz="UTC")
             for h in history["current"]:
                 rows.append(
                     {
@@ -83,6 +89,7 @@ def fetch(out: Path, seed: int, pause: float) -> pd.DataFrame:
                         "gw": h["event"],
                         "value": h["value"],
                         "bank": h["bank"],
+                        "page_fetched_at": fetched_at,
                     }
                 )
             if i % 50 == 0:
@@ -92,9 +99,17 @@ def fetch(out: Path, seed: int, pause: float) -> pd.DataFrame:
     return managers
 
 
-def value_gap(managers: pd.DataFrame, ours: pd.DataFrame, n_gws: int = 38) -> dict:
+def value_gap(
+    managers: pd.DataFrame, ours: pd.DataFrame, n_gws: int = 38, fpl_lag: int = 0
+) -> dict:
     """Per group: the group's median `value` at the last GW both sides have, ours
-    (`market_value` of our row for that GW), the gap and the gap scaled to n_gws."""
+    (`market_value` of our row for that GW), the gap and the gap scaled to n_gws.
+
+    fpl_lag: 0 if FPL's history `value` for event g is the squad priced at g's deadline,
+    like our row g (verified on entry 4570069, GW3-6: value[g] = squad at g's prices + bank);
+    1 if it is priced at g+1's deadline, then the managers' event g is compared with our
+    row g+1 (their gw is shifted by +1)."""
+    managers = managers.assign(gw=managers["gw"] + fpl_lag)
     out = {}
     for group, m in managers.groupby("group"):
         gw = int(min(m["gw"].max(), ours["gw"].max()))
@@ -131,7 +146,8 @@ def main() -> None:
         return
     managers = pd.read_parquet(args.managers / "managers.parquet")
     gws = pd.read_parquet(args.ours / "gws.parquet")
-    ours = gws[gws["start_id"].str.startswith("template")].sort_values("gw")
+    ours = gws[gws["start_id"].str.match(r"^template@\d+$")].sort_values("gw")
+    assert ours["start_id"].nunique() == 1, ours["start_id"].unique()
     result = value_gap(managers, ours[["gw", "market_value"]])
     history = get_cached(
         args.managers / "history" / f"{args.entry}.json.gz", f"entry/{args.entry}/history/", 1.0
