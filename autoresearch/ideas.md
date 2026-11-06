@@ -426,6 +426,14 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 
 ## Needs the user (not the loop's to do)
 
+- **2026-11-06: no experiments tonight.** `last_checked_gw` is still 9 (bootstrap
+  2026-11-06T023113Z; the GW10 deadline is 18:30Z today), so there was no monitor. The next
+  run should do the GW10 report. `sync.sh raw` copied 42 new files. The harness hash is
+  still adeb6c64 (new head baseline `4b343e96c5-adeb6c64`), so the crowd (idea 13,
+  b3a642b) is still unscoreable. The calibration table still blocks `optimizer:v1` decision
+  runs (idea 5). No open model line has an untried variant with a mechanism behind it, so
+  I spent no variants. The ledger is unchanged: 54 scored (14 KEEP, 40 DISCARD), 4 ERROR.
+
 - **2026-11-05**: `last_checked_gw` still 9 (GW10 deadline 2026-11-06 18:30Z), so no
   monitor; the next report is GW10. Harness hash unchanged (adeb6c64; baseline
   `043aa3bc2a-adeb6c64`), so the crowd (idea 13, b3a642b) is still unscoreable, and the
