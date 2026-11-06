@@ -35,7 +35,7 @@ const CI_LEVEL: f64 = 0.8;
 const EP_NEXT_FIRST_SEASON: i64 = 2021;
 const EP_NEXT_MODELS: [&str; 2] = ["ep_next", "ep_next_fade"];
 
-fn default_jobs() -> usize {
+pub(crate) fn default_jobs() -> usize {
     std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).max(1)
 }
 

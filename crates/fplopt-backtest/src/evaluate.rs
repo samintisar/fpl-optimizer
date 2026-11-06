@@ -65,7 +65,7 @@ impl StartSpec {
         }
     }
 
-    fn build(
+    pub(crate) fn build(
         &self,
         store: &DataStore,
         season: i64,
@@ -161,7 +161,7 @@ pub fn parse_start_specs(text: &str) -> Result<Vec<StartSpec>> {
     Ok(specs)
 }
 
-fn refused(err: &anyhow::Error) -> bool {
+pub(crate) fn refused(err: &anyhow::Error) -> bool {
     err.downcast_ref::<StartStateError>().is_some()
 }
 
@@ -276,7 +276,7 @@ pub fn run_units<T: Send>(
     Ok(out)
 }
 
-fn refuse_holdout(seasons: &[i64]) -> Result<()> {
+pub(crate) fn refuse_holdout(seasons: &[i64]) -> Result<()> {
     let holdout: Vec<String> = seasons
         .iter()
         .filter(|s| HOLDOUT_SEASONS.contains(&(**s as i32)))

@@ -10,6 +10,7 @@ pub mod chip_values;
 pub mod eval;
 pub mod evaluate;
 pub mod gw_score;
+pub mod money_value;
 pub mod outcomes;
 pub mod policies;
 pub mod probes;

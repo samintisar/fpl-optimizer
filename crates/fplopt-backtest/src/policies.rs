@@ -25,7 +25,7 @@ use fplopt_optimize::chips::make_scenario;
 use fplopt_optimize::model::{SolveError, solve_plan};
 use fplopt_optimize::plans::{GwPlan, Plan};
 use fplopt_optimize::state::best_xi;
-use fplopt_optimize::{OptimizerParams, PlanInput, Search, XpFrame, optimize, py_sum};
+use fplopt_optimize::{OptimizerParams, PlanInput, PlanSet, Search, XpFrame, optimize, py_sum};
 use fplopt_store::{AsOfView, Table};
 use sha1::{Digest, Sha1};
 
@@ -424,9 +424,7 @@ impl Policy {
                 let lineup = best_lineup(&squad, &target_xp(ctx.frame), ctx.rules)?;
                 Ok(Decision { transfers, lineup, ..Decision::default() })
             }
-            Policy::Optimizer { params, chips, extra, .. } => {
-                self.decide_optimizer(ctx, params, *chips, extra)
-            }
+            Policy::Optimizer { extra, .. } => self.decide_optimizer(ctx, extra),
             Policy::ChipGains { params, .. } => {
                 let (problem, plans) = no_chip_plan(ctx, params)?;
                 let gains = chip_gains(ctx, &problem, params, plans.best())?;
@@ -467,13 +465,15 @@ impl Policy {
         }
     }
 
-    fn decide_optimizer(
+    /// The optimizer policy's planner input, parameters and plans at a context: what
+    /// `decide` executes the first GW of plan #1 from (before the rule Triple Captain).
+    pub fn optimizer_plans(
         &self,
         ctx: &DecisionContext,
-        params: &OptimizerParams,
-        chips: bool,
-        extra: &ChipPolicy2,
-    ) -> Result<Decision> {
+    ) -> Result<(PlanInput, OptimizerParams, PlanSet)> {
+        let Policy::Optimizer { params, chips, extra, .. } = self else {
+            bail!("optimizer_plans: {} is not an optimizer policy", self.name());
+        };
         let mut params = params.clone();
         if let Some(tables) = &extra.season_tables {
             let Some(table) = tables.get(&ctx.state.season) else {
@@ -486,7 +486,12 @@ impl Policy {
         if let Some(lead) = extra.double_lead {
             problem.doubles = known_doubles(ctx.view, ctx.state.season, ctx.state.gw_index, lead)?;
         }
-        let plans = optimize(&problem, &params, 1, chips, false, Search::Bound)?;
+        let plans = optimize(&problem, &params, 1, *chips, false, Search::Bound)?;
+        Ok((problem, params, plans))
+    }
+
+    fn decide_optimizer(&self, ctx: &DecisionContext, extra: &ChipPolicy2) -> Result<Decision> {
+        let (problem, params, plans) = self.optimizer_plans(ctx)?;
         let status = plans.solver_status();
         if status != "Optimal" {
             log::warn!(
