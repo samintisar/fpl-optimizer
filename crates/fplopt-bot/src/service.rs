@@ -15,15 +15,17 @@ use log::warn;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::chip_calls::{ChipCalls, V6_FROM_GW_INDEX, compute_chip_calls, v6_params};
 use crate::context::{ContextStore, PlanContext, with_live_prices};
 use crate::messages::{
-    MAX_MESSAGE, changes_text, chips_text, recommendation_text, split_message, squad_text,
+    MAX_MESSAGE, changes_text, chip_failure_section, chip_section, chips_text, recommendation_text,
+    split_message, squad_text,
 };
 use crate::planner::{
     BotFpl, ChipOptions, UnknownTeam, UserPlan, chip_options, chip_params, decision_summary,
     entry_message, import_user_squad, is_not_found, live_params, plan_user, plans_json, rules_for,
 };
-use crate::store::{Record, User, UserStore, dumps, ordered_object};
+use crate::store::{ChipCallRow, Record, User, UserStore, dumps, ordered_object};
 use crate::util::{casefold, escape as e, is_digits, py_repr_str, py_split, uk_time};
 
 pub const HELP: &str = "<b>FPL optimizer</b>: transfer plans for your FPL team, from the model that passed its 2025/26 test. You make the final call.
@@ -143,6 +145,32 @@ pub fn default_chip_planner() -> ChipPlanner {
     })
 }
 
+/// The alerts' V6 planner (chip policy 2's frozen V6, logged from GW20): `chip_options` with
+/// `v6_params()` (read when the bot starts; if that fails, every call returns the error).
+pub fn default_v6_planner() -> ChipPlanner {
+    let params = v6_params().map_err(|err| format!("{err:#}"));
+    Box::new(move |fpl, entry, context, ft, made| match &params {
+        Ok(params) => chip_options(fpl, entry, context, ft, params, made),
+        Err(err) => Err(anyhow::anyhow!("V6 settings unavailable: {err}")),
+    })
+}
+
+/// One alert run's chip calls and P's scenarios as `chip_checks` stores them, or why the
+/// calculation failed.
+enum ChipStep {
+    Calls { calls: ChipCalls, scenarios: String },
+    Failed(String),
+}
+
+impl ChipStep {
+    fn calls(&self) -> Option<&ChipCalls> {
+        match self {
+            ChipStep::Calls { calls, .. } => Some(calls),
+            ChipStep::Failed(_) => None,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct SavedSquad<'a> {
     players: Vec<[i64; 2]>,
@@ -190,6 +218,11 @@ pub struct BotService {
     pub now: Clock,
     pub planner: Planner,
     pub chip_planner: ChipPlanner,
+    /// Alerts carry the chip section and log `chip_calls` (spec 2026-11-05-chip-alerts; on in
+    /// `bot run` / `live tick`, off by default so `bot replay` matches Python's golden).
+    pub chip_alerts: bool,
+    /// V6's chip search for the `chip_calls` log (alert24 from GW20).
+    pub v6_planner: ChipPlanner,
     prices: RefCell<Option<LivePrices>>,
 }
 
@@ -208,6 +241,8 @@ impl BotService {
             now: Box::new(Utc::now),
             planner: default_planner(),
             chip_planner: default_chip_planner(),
+            chip_alerts: false,
+            v6_planner: default_v6_planner(),
             prices: RefCell::new(None),
         }
     }
@@ -741,16 +776,44 @@ impl BotService {
             decision: Some(dumps(&decision)?),
             ..Record::default()
         };
+        let chips = (self.chip_alerts && (kind == "alert24" || kind == "alert2"))
+            .then(|| self.chip_step(user, &plan, kind));
+        let section = match (&chips, kind) {
+            (None, _) => None,
+            (Some(step), "alert24") => {
+                Some(step.calls().map_or_else(chip_failure_section, chip_section))
+            }
+            (Some(step), _) => match step.calls() {
+                // alert2: only when the call changed since this GW's alert24 call
+                Some(calls) => self
+                    .users
+                    .chip_call(user.user_id, context.season, context.gw, "alert24")?
+                    .filter(|logged| shown_call(logged) != shown_call(&chip_call_row(calls)))
+                    .map(|_| chip_section(calls)),
+                None => None,
+            },
+        };
+        let record_chips = |kind: &str| -> Result<()> {
+            match &chips {
+                Some(step) => self.record_chip_step(user, &plan, kind, step),
+                None => Ok(()),
+            }
+        };
         let text = match (kind, &last) {
             ("alert2", Some(last)) => {
                 let changes = changes_text(last.decision.as_ref(), &decision, &context.names());
-                if changes.is_empty() {
+                if changes.is_empty() && section.is_none() {
                     self.users.record(user.user_id, context.season, context.gw, kind, &base)?;
+                    record_chips(kind)?;
                     return Ok(AlertOutcome::Silent);
                 }
                 recommendation_text(&plan, Some(&format!("GW{} update", context.gw)), &changes)
             }
             _ => recommendation_text(&plan, None, &[]),
+        };
+        let text = match &section {
+            Some(section) => format!("{section}\n\n{text}"),
+            None => text,
         };
         if let Err(err) = send_pieces(send, user.chat_id, &text) {
             if !err.permanent {
@@ -771,6 +834,7 @@ impl BotService {
                     ..base
                 },
             )?;
+            record_chips(kind)?;
             return Ok(AlertOutcome::Undeliverable);
         }
         self.users.record(
@@ -780,7 +844,81 @@ impl BotService {
             kind,
             &Record { message: Some(text), sent: true, ..base },
         )?;
+        record_chips(kind)?;
         Ok(AlertOutcome::Sent)
+    }
+
+    /// The chip calls for `plan`'s alert (spec 2026-11-05-chip-alerts §1-3): P's search on the
+    /// same priced context, free transfers and made transfers as the plan, and on `alert24`
+    /// from GW20 V6's (logged only). A failure is logged and gives no calls (the failure
+    /// line); a V6 failure only leaves V6 out. Never an error.
+    fn chip_step(&self, user: &User, plan: &UserPlan, kind: &str) -> ChipStep {
+        let context = &plan.context;
+        let failed = |err: anyhow::Error| {
+            warn!("GW{} {kind} chip calls for user {} failed: {err:#}", context.gw, user.user_id);
+            ChipStep::Failed(format!("{err:#}"))
+        };
+        let inputs = (|| -> Result<_> {
+            let entry_id = user.entry_id.context("chip calls: the user has no team")?;
+            let ft = self.users.free_transfers(user.user_id, context.season, context.gw)?;
+            let made = self.users.transfers(user.user_id, context.season, context.gw)?;
+            Ok((entry_id, ft, made))
+        })();
+        let (entry_id, ft, made) = match inputs {
+            Ok(inputs) => inputs,
+            Err(err) => return failed(err),
+        };
+        let options = match (self.chip_planner)(self.fpl.as_ref(), entry_id, context, ft, &made) {
+            Ok(options) => options,
+            Err(err) => return failed(err),
+        };
+        let v6 = if kind == "alert24" && context.gw_index >= V6_FROM_GW_INDEX {
+            match (self.v6_planner)(self.fpl.as_ref(), entry_id, context, ft, &made) {
+                Ok(v6) => Some(v6),
+                Err(err) => {
+                    warn!(
+                        "GW{} V6 chip call for user {} failed: {err:#}",
+                        context.gw, user.user_id
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        match compute_chip_calls(plan, &options, v6.as_ref()) {
+            Ok(calls) => ChipStep::Calls { calls, scenarios: chip_scenarios_json(&options) },
+            Err(err) => failed(err),
+        }
+    }
+
+    /// Log one alert run's chip calls (or their failure) in `chip_calls`.
+    fn record_chip_step(
+        &self,
+        user: &User,
+        plan: &UserPlan,
+        kind: &str,
+        step: &ChipStep,
+    ) -> Result<()> {
+        let context = &plan.context;
+        let row = match step {
+            ChipStep::Calls { calls, scenarios } => ChipCallRow {
+                gains: dumps(&calls.gains)?,
+                scenarios: scenarios.clone(),
+                ..chip_call_row(calls)
+            },
+            ChipStep::Failed(err) => {
+                ChipCallRow { error: Some(err.clone()), ..chip_call_row_base() }
+            }
+        };
+        self.users.record_chip_call(&ChipCallRow {
+            user_id: user.user_id,
+            season: context.season,
+            gw: context.gw,
+            kind: kind.to_string(),
+            context_id: Some(context.context_id.clone()),
+            ..row
+        })
     }
 }
 
@@ -803,6 +941,47 @@ fn py_int(v: &Value) -> Option<i64> {
         Value::Bool(b) => Some(i64::from(*b)),
         _ => None,
     }
+}
+
+/// An empty `chip_calls` row: every call `"none"`, no gains or scenarios (the caller fills in
+/// the user, GW and calls).
+fn chip_call_row_base() -> ChipCallRow {
+    ChipCallRow {
+        user_id: 0,
+        season: 0,
+        gw: 0,
+        kind: String::new(),
+        context_id: None,
+        planner_call: "none".to_string(),
+        planner_gain: None,
+        rules_call: "none".to_string(),
+        forced: None,
+        v6_call: None,
+        gains: "{}".to_string(),
+        scenarios: "{}".to_string(),
+        error: None,
+        created_at: String::new(),
+    }
+}
+
+/// `calls` as a `chip_calls` row's call columns (`"none"` for hold; `forced` null when no
+/// chip is forced; `v6_call` null when V6 wasn't computed).
+fn chip_call_row(calls: &ChipCalls) -> ChipCallRow {
+    let name = |c: &Option<String>| c.clone().unwrap_or_else(|| "none".to_string());
+    ChipCallRow {
+        planner_call: name(&calls.planner),
+        planner_gain: Some(calls.planner_gain),
+        rules_call: name(&calls.rules),
+        forced: calls.forced.clone(),
+        v6_call: calls.v6.as_ref().map(name),
+        ..chip_call_row_base()
+    }
+}
+
+/// The call the user sees (planner, rules, forced; `"none"` for None): an `alert2` shows the
+/// chip section only if it differs from this GW's `alert24` call.
+fn shown_call(row: &ChipCallRow) -> (&str, &str, &str) {
+    (&row.planner_call, &row.rules_call, row.forced.as_deref().unwrap_or("none"))
 }
 
 /// `{**objectives, **singles}` as stored (re-exported for tests).

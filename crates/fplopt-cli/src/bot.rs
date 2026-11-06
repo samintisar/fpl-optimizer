@@ -87,12 +87,15 @@ pub fn bot_service(settings: &Settings) -> Result<BotService> {
         Some(a) => Some(a.trim().parse::<i64>().context("TELEGRAM_ADMIN_CHAT_ID: not an integer")?),
         None => None,
     };
-    Ok(BotService::new(
+    let mut service = BotService::new(
         UserStore::new(database_path(&settings.state_dir))?,
         ContextStore::new(settings.state_dir.join("context")),
         Box::new(FplBot::new()?),
         admin,
-    ))
+    );
+    // Live alerts carry the chip section (docs/superpowers/specs/2026-11-05-chip-alerts-design.md).
+    service.chip_alerts = true;
+    Ok(service)
 }
 
 /// `bot run` (Python `_bot_run`): Ok when stopped by SIGTERM.
