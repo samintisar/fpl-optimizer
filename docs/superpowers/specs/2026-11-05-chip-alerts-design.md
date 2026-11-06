@@ -75,7 +75,7 @@ It is fixed text, as above. It stays until a chip policy passes the full gate.
 
 ## Logging (also the chip-policy-2 shadow log)
 
-**New table** `chip_calls`, written in the same transaction as the alert's `recommendations` row. Columns:
+**New table** `chip_calls`, written right after the alert's `recommendations` row. Columns:
 
 - `user_id`, `season`, `gw`, `kind`, `context_id`, `created_at`;
 - `planner_call`, `rules_call`, `v6_call` (chip name or `none`);
