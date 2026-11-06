@@ -151,6 +151,7 @@ fn solve_at(
     let pool = caches.pool(&view)?;
     let state = refresh(state, &pool);
     let xp = caches.xp(policy.xp_model(), &view)?;
+    let future = caches.future_prices_for(policy, store, state.season)?;
     let ctx = DecisionContext {
         view: &view,
         state: &state,
@@ -158,6 +159,7 @@ fn solve_at(
         pool: &pool,
         xp: &xp.table,
         frame: &xp.frame,
+        future: future.as_deref(),
     };
     let (_, _, plans) = policy.optimizer_plans(&ctx)?;
     let status = plans.solver_status();

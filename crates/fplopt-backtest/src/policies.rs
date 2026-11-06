@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use fplopt_build::scoring::Rules;
 use fplopt_core::pyjson::py_float_repr;
 use fplopt_features::baseline::pool_coverage;
@@ -30,6 +30,7 @@ use fplopt_store::{AsOfView, Table};
 use sha1::{Digest, Sha1};
 
 use crate::gw_score::Lineup;
+use crate::oracle::FuturePrices;
 use crate::state::{
     Decision, GOALKEEPER, PoolPlayer, SquadState, Transfer, chip_available, chip_window, refresh,
     selling_price,
@@ -49,6 +50,9 @@ pub struct DecisionContext<'a> {
     pub pool: &'a [PoolPlayer],
     pub xp: &'a Table,
     pub frame: &'a XpFrame,
+    /// The season's future deadline prices, set only by the backtester's decision paths
+    /// for a policy that wants them (`Policy::wants_future_prices`, `prices=oracle`).
+    pub future: Option<&'a FuturePrices>,
 }
 
 // --- xP helpers ---------------------------------------------------------------------------
@@ -490,7 +494,7 @@ impl Policy {
         &self,
         ctx: &DecisionContext,
     ) -> Result<(PlanInput, OptimizerParams, PlanSet)> {
-        let Policy::Optimizer { params, chips, extra, .. } = self else {
+        let Policy::Optimizer { params, chips, extra, prices, .. } = self else {
             bail!("optimizer_plans: {} is not an optimizer policy", self.name());
         };
         let mut params = params.clone();
@@ -504,6 +508,14 @@ impl Policy {
             PlanInput::from_context(ctx.state, ctx.pool, ctx.frame, ctx.rules, &params)?;
         if let Some(lead) = extra.double_lead {
             problem.doubles = known_doubles(ctx.view, ctx.state.season, ctx.state.gw_index, lead)?;
+        }
+        if *prices == PriceSource::Oracle {
+            let future = ctx.future.context(
+                "prices=oracle needs the future deadline prices, which only the backtester's                  decision paths provide (DecisionContext.future is None)",
+            )?;
+            let season = ctx.state.season;
+            let gws = problem.gws.clone();
+            problem.set_price_paths(|p| Some(future.path(season, p, &gws)));
         }
         let plans = optimize(&problem, &params, 1, *chips, false, Search::Bound)?;
         Ok((problem, params, plans))

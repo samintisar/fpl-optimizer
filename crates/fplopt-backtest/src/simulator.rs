@@ -23,6 +23,7 @@ use fplopt_optimize::start::{FAR_FUTURE, pool_players};
 use fplopt_store::{AsOfView, DataStore, Micros, Table};
 
 use crate::gw_score::score_gameweek;
+use crate::oracle::FuturePrices;
 use crate::outcomes::{GwOutcomes, read_outcomes};
 use crate::policies::{CHIP_DIAGNOSTICS, DecisionContext, Policy, best_lineup};
 use crate::state::{
@@ -70,6 +71,7 @@ pub struct Caches {
     fits: OnceMap<(String, Micros), V1Fit>,
     pools: OnceMap<Micros, Vec<PoolPlayer>>,
     outcomes: OnceMap<(i64, i64, String), GwOutcomes>,
+    future: OnceMap<i64, FuturePrices>,
 }
 
 impl Caches {
@@ -108,6 +110,20 @@ impl Caches {
             let frame = XpFrame::from_table(&table)?;
             Ok(Xp { table, frame })
         })
+    }
+
+    /// The season's future deadline prices when `policy` wants them (`prices=oracle`;
+    /// read once per season), else None. **Reads the future: backtest only.**
+    pub fn future_prices_for(
+        &self,
+        policy: &Policy,
+        store: &DataStore,
+        season: i64,
+    ) -> Result<Option<Arc<FuturePrices>>> {
+        if !policy.wants_future_prices() {
+            return Ok(None);
+        }
+        self.future.get_or_compute(season, || FuturePrices::load(store, season)).map(Some)
     }
 
     pub fn outcomes(
@@ -258,6 +274,7 @@ pub fn decide_step(
         Decider::Policy(policy) => policy,
     };
     let xp = caches.xp(policy.xp_model(), &view)?;
+    let future = caches.future_prices_for(policy, store, state.season)?;
     let ctx = DecisionContext {
         view: &view,
         state: &state,
@@ -265,6 +282,7 @@ pub fn decide_step(
         pool: &pool,
         xp: &xp.table,
         frame: &xp.frame,
+        future: future.as_deref(),
     };
     let decision = policy.decide(&ctx)?;
     Ok(Step { state, pool, decision })

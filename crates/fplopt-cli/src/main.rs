@@ -413,6 +413,9 @@ fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
         fmt_micros(last),
         builders.len()
     );
+    for (name, why) in fplopt_backtest::oracle::LEAKAGE_EXCLUDED {
+        log::info!("not checked (reads future prices by design): {name} ({why})");
+    }
     let leaks = check_leakage(tables, &deadlines, seed, &builders)?;
     if let Some(leak) = leaks.first() {
         for leak in &leaks {

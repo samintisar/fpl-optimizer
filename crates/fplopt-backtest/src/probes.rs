@@ -91,6 +91,7 @@ pub fn run_probe(view: &AsOfView, policy: &Policy, start: Start) -> Result<Table
         pool: &pool,
         xp: &xp,
         frame: &xp_frame,
+        future: None,
     };
     let decision = policy.decide(&ctx)?;
     apply_decision(&state, &decision, &pool, &rules)?;
