@@ -298,6 +298,7 @@ mod tests {
             gain_vs_roll: None,
             bound: 0.0,
             n_nodes: 0,
+            money_value: 0.0,
         };
         let s = plan_outcome(&plan, 4);
         assert_eq!(s.xp_net, 145.5 - 12.0); // bench xP not counted

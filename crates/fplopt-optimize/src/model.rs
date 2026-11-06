@@ -5,6 +5,11 @@
 //! coefficients computed with the same float operations (repeated variables merged in
 //! first-seen order), handed over in bulk as Python's `_BulkHiGHS` does, with the same
 //! HiGHS options. Same input, same HiGHS version and `threads=1` → the same plan.
+//!
+//! Not in Python: candidates' price paths (`PlanInput::set_price_paths`; a moving path's
+//! later sales become per-buy-GW cohort sales) and the end-of-horizon money value λ·M
+//! (`price_value_k`). Without paths and with `price_value_k` 0 the model is the one above,
+//! column for column and row for row (pinned by `tests/model.rs`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
@@ -812,6 +817,13 @@ impl<'a> Model<'a> {
                 }
             }
         }
+        // After every other term, so their merge order is unchanged.
+        let lambda = self.money_rate();
+        if lambda > 0.0 {
+            let (money, money_constant) = self.money_terms(lambda);
+            terms.extend(money);
+            constant += money_constant;
+        }
         let mut merged: Vec<(usize, f64)> = Vec::new();
         let mut position: HashMap<usize, usize> = HashMap::new();
         for (v, c) in terms {
@@ -825,6 +837,68 @@ impl<'a> Model<'a> {
         }
         merged.retain(|(_, c)| *c != 0.0);
         (merged, constant)
+    }
+
+    /// λ for this horizon (`OptimizerParams::money_rate` at its last GW).
+    fn money_rate(&self) -> f64 {
+        self.problem.gws.last().map_or(0.0, |g| self.params.money_rate(g.gw_index))
+    }
+
+    /// λ·M as (variable, coefficient) terms (not merged) and a constant, M the money at the
+    /// horizon's end (not decayed): the persistent bank after the last GW T, plus each
+    /// player held then at his selling value in GW T — owned players at FPL's rule on their
+    /// purchase price (the constant, less on each first sale), players bought within the
+    /// plan by their cohort's buy price (moving paths) or at their GW T price (on each buy,
+    /// less on each later sale).
+    fn money_terms(&self, lambda: f64) -> (Vec<(usize, f64)>, f64) {
+        let last = self.t_len - 1;
+        let mut terms = vec![(self.bank[last], lambda)];
+        let mut constant = 0.0;
+        for p in &self.problem.players {
+            let k = p.player_key;
+            if p.owned {
+                let value = lambda * p.first_sale_value(last);
+                constant += value;
+                for t in 0..self.t_len {
+                    if let Some(&v) = self.sell_first.get(&(k, t)) {
+                        terms.push((v, -value));
+                    }
+                }
+            }
+            if p.path_moves() {
+                for tb in 0..self.t_len {
+                    let Some(&b) = self.buy.get(&(k, tb)) else { continue };
+                    let value = lambda * selling_value(p.buy_price(tb), p.buy_price(last));
+                    terms.push((b, value));
+                    for s in tb + 1..self.t_len {
+                        if let Some(&v) = self.cohort.get(&(k, tb, s)) {
+                            terms.push((v, -value));
+                        }
+                    }
+                }
+            } else {
+                let value = lambda * p.buy_price(last);
+                for t in 0..self.t_len {
+                    if let Some(&v) = self.buy.get(&(k, t)) {
+                        terms.push((v, value));
+                    }
+                    if let Some(&v) = self.sell_later.get(&(k, t)) {
+                        terms.push((v, -value));
+                    }
+                }
+            }
+        }
+        (terms, constant)
+    }
+
+    /// λ·M at solution `x`, from the same terms as the objective; 0 when λ is 0.
+    fn money_value(&self, x: &[f64]) -> f64 {
+        let lambda = self.money_rate();
+        if lambda <= 0.0 {
+            return 0.0;
+        }
+        let (terms, constant) = self.money_terms(lambda);
+        constant + terms.iter().map(|&(v, c)| c * x[v]).sum::<f64>()
     }
 
     /// The model handed to HiGHS in bulk (Python `_BulkHiGHS.buildSolverModel`): columns
@@ -950,6 +1024,7 @@ pub fn solve_plan(
     let x = highs.col_values();
     let gws = read_plan(&model, &x);
     let objective = py_sum(gws.iter().map(|g| g.objective));
+    let money_value = model.money_value(&x);
     Ok(Plan {
         gws,
         objective,
@@ -962,7 +1037,8 @@ pub fn solve_plan(
         scenario: scenario.label.clone(),
         terminal_value: terminal,
         gain_vs_roll: None,
-        bound: bound.max(objective + terminal),
+        bound: bound.max(objective + terminal + money_value),
+        money_value,
     })
 }
 

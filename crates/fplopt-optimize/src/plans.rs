@@ -51,7 +51,8 @@ impl GwPlan {
     }
 }
 
-/// A solved plan (fields as Python's `Plan`; `objective` excludes the chip terminal value).
+/// A solved plan (fields as Python's `Plan`; `objective` excludes the chip terminal value
+/// and the end-of-horizon money value λ·M, `money_value`, 0 unless `price_value_k` > 0).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     pub gws: Vec<GwPlan>,
@@ -66,6 +67,7 @@ pub struct Plan {
     pub gain_vs_roll: Option<f64>,
     pub bound: f64,
     pub n_nodes: i64,
+    pub money_value: f64,
 }
 
 impl Plan {
@@ -78,7 +80,7 @@ impl Plan {
     }
 
     pub fn total_objective(&self) -> f64 {
-        self.objective + self.terminal_value
+        self.objective + self.terminal_value + self.money_value
     }
 }
 

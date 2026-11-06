@@ -492,6 +492,105 @@ fn a_cohort_sells_by_its_own_buy_price() {
     assert_eq!(plan.gws.iter().map(|g| g.bank).collect::<Vec<_>>(), vec![20, 20, 5]);
 }
 
+/// One owned MID X (xP 0) to replace; candidates C (rising) and D (flat, 0.01 more xP).
+fn riser_instance(gw_index: i64) -> (SquadState, Vec<PoolPlayer>, XpFrame, i64, i64) {
+    let clubs = 1..=5;
+    let mut rows = Vec::new();
+    for c in clubs.clone() {
+        for et in 1..=4 {
+            rows.push((key(c, et, 0), et, c, 45));
+        }
+    }
+    rows.extend(clubs.clone().map(|c| (key(c, 3, 1), 3, c, 45)));
+    rows.extend(clubs.clone().map(|c| (key(c, 2, 1), 2, c, 45)));
+    rows.extend([1, 2].map(|c| (key(c, 4, 1), 4, c, 45)));
+    rows.push((key(1, 1, 1), 1, 1, 45));
+    let (c_key, d_key) = (key(6, 3, 0), key(7, 3, 0));
+    rows.extend([(c_key, 3, 6, 50), (d_key, 3, 7, 50)]);
+    let pool = make_pool(rows);
+    let mut owned = vec![key(1, 1, 0), key(2, 1, 0)];
+    owned.extend(clubs.clone().map(|c| key(c, 2, 0)));
+    owned.extend([1, 2, 3, 4, 5].map(|c| key(c, 3, 0)));
+    owned.extend([1, 2, 3].map(|c| key(c, 4, 0)));
+    let mut values: BTreeMap<i64, Vec<f64>> =
+        pool.iter().map(|p| (p.player_key, vec![0.5; 3])).collect();
+    for k in &owned {
+        // Above C and D: X is the only player worth replacing (at 1.0, as in churn_instance,
+        // the plan would replace a second MID with D or C too).
+        values.insert(*k, vec![6.0; 3]);
+    }
+    let x = key(5, 3, 0); // the owned MID worth replacing
+    values.insert(x, vec![0.0; 3]);
+    values.insert(c_key, vec![5.0, 5.0, 5.0]);
+    values.insert(d_key, vec![5.0, 5.0, 5.01]);
+    let xp = xp_frame(&values, gw_index);
+    let state = make_state(
+        &pool,
+        &owned,
+        StateOpts { gw_index, ft: 1, bank: Some(10), ..Default::default() },
+    );
+    (state, pool, xp, c_key, d_key)
+}
+
+/// (GW0's ins, the money value, the plan's last bank) with C rising 50 → 54.
+fn riser_plan(k: f64, gw_index: i64) -> (Vec<i64>, f64, i64) {
+    let rules = rules();
+    let (state, pool, xp, c, _) = riser_instance(gw_index);
+    let params = OptimizerParams {
+        horizon: 3,
+        ft_value: BTreeMap::new(),
+        itb_value: 0.0,
+        price_value_k: k,
+        ..exact()
+    };
+    let mut problem = problem(&state, &pool, &xp, &params, &rules);
+    problem.set_price_paths(|p| (p.player_key == c).then(|| vec![50.0, 52.0, 54.0]));
+    let plan = solve(&problem, &params);
+    // The LP's own optimum (its dual bound at gap 0) is the readout's total, money included.
+    assert!(approx(plan.bound, plan.total_objective(), 1e-6), "{plan:?}");
+    (transfers_in(&plan.gws[0]), plan.money_value, plan.gws[2].bank)
+}
+
+#[test]
+fn money_value_prefers_the_riser_only_when_k_is_positive() {
+    let (c, d) = (key(6, 3, 0), key(7, 3, 0));
+    let (ins, money, _) = riser_plan(0.0, 5);
+    assert_eq!(ins, vec![d]);
+    assert_eq!(money, 0.0);
+    let (ins, money, bank) = riser_plan(1.0, 5);
+    assert_eq!(ins, vec![c]);
+    // λ = 0.395 · 0.93 · (38 − 7) / 10; C held at the end is worth 50 + (54 − 50)/2 = 52
+    let lambda = 0.395 * 0.93 * 31.0 / 10.0;
+    assert!(money > lambda * 52.0); // plus the bank and the rest of the squad
+    // M = 14 kept players at 45 + bank 5 (10 + 45 − 50) + C's 52; swapping C for D in GW2
+    // (0.01 more xP) leaves M the same: bank 5 + 52 − 50 = 7 plus D's 50.
+    assert!([5, 7].contains(&bank), "{bank}");
+    assert!(approx(money, lambda * (14.0 * 45.0 + 57.0), 1e-6), "{money}");
+}
+
+#[test]
+fn money_value_is_zero_late_in_the_season() {
+    // The horizon ends at gw_index 38: λ = 0, so the flat D wins on xP as with k = 0.
+    let d = key(7, 3, 0);
+    let (ins, money, _) = riser_plan(1.0, 36);
+    assert_eq!(ins, vec![d]);
+    assert_eq!(money, 0.0);
+}
+
+#[test]
+fn money_rate_follows_the_weeks_left() {
+    let params = OptimizerParams { price_value_k: 2.0, ..Default::default() };
+    assert!(approx(params.money_rate(8), 2.0 * 0.395 * 0.93 * 30.0 / 10.0, 1e-12));
+    assert_eq!(params.money_rate(38), 0.0);
+    assert_eq!(params.money_rate(40), 0.0);
+    assert_eq!(OptimizerParams::default().money_rate(8), 0.0);
+    let bad = OptimizerParams { price_value_k: -1.0, ..Default::default() };
+    assert!(bad.validate().unwrap_err().to_string().contains("price_value_k"));
+    let parsed =
+        fplopt_optimize::io::params_from_json(&serde_json::json!({"price_value_k": 0.5})).unwrap();
+    assert_eq!(parsed.price_value_k, 0.5);
+}
+
 #[test]
 fn without_paths_the_model_is_unchanged() {
     // same columns, rows and coefficients as before the feature: compare the HiGHS model
