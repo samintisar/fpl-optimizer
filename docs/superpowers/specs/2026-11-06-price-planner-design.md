@@ -101,9 +101,9 @@ Each stage gets its own implementation plan.
 ## Stage C: tuning and the pre-registered check
 
 - **Tuning (develop 2022/23 only, forecast prices from Stage B's develop fit):**
-  - choose k ∈ {0.25, 0.5, 1} for `prices=forecast,price_k=k`;
+  - choose k ∈ {0, 0.25, 0.5, 1} for `prices=forecast,price_k=k` (0 added on 2026-11-06 after Gate A, before any forecast existed: the money value alone cost 10.5 points, `docs/research/2026-11-price-planner-gate-a.md`);
   - the criterion is season points net, with team value as the tie-break;
-  - the family is deflated for 3 variants (mean − SE·√(2 ln 3)) and logged as family `price planner`;
+  - the family is deflated for 4 variants (mean − SE·√(2 ln 4)) and logged as family `price planner`;
   - the chosen settings are written to `config/prices/settings.json` and tagged `price-check` before the check runs.
 - **Gate C (check 2023/24–2024/25):** starts as in Gate A; the forecast planner (chosen k) vs L.
   - **Team value:** the forecast planner must end seasons with higher team value than L: mean difference > 0, one-sided t-test over (season, start) units, p < 0.10.
