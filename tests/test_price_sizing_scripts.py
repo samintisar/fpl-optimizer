@@ -99,3 +99,30 @@ def test_replay_tracks_purchase_prices():
     # GW3: player 2 bought at 60, 62 on the night before the deadline, 61 at the deadline:
     # selling price 61 vs 60 -> 1 tenth; nothing on the buy side
     assert [(r["gw"], r["sell_gain"], r["buy_gain"]) for r in rows] == [(2, 0, 0), (3, 1, 0)]
+
+
+sizing = _load("price_sizing")
+
+
+def _gws(start_ids, points):
+    rows = []
+    for sid, pts in zip(start_ids, points, strict=True):
+        for gw, p in enumerate(pts, start=1):
+            rows.append({"season": 2020, "start_id": sid, "gw": gw, "net_points": p})
+    return pd.DataFrame(rows)
+
+
+def test_points_per_million_pairs_by_start():
+    base = _gws(["template@1", "random0@1", "template@20"], [[50, 50], [40, 40], [30]])
+    bank = _gws(
+        ["template+bank10@1", "random0+bank10@1", "template+bank10@20"], [[52, 51], [41, 42], [30]]
+    )
+    out = sizing.points_per_million(base, bank, extra_bank=10)
+    assert out["1"]["n"] == 2 and out["1"]["mean"] == pytest.approx((3 + 3) / 2)
+    assert out["20"]["n"] == 1 and out["20"]["mean"] == 0
+
+
+def test_decision_thresholds():
+    d = sizing.decide(planning_points=19.9, timing_points=10.0)
+    assert d == {"planning": False, "timing": True}
+    assert sizing.decide(20.0, 9.9) == {"planning": True, "timing": False}
