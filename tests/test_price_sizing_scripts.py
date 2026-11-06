@@ -51,3 +51,51 @@ def test_value_gap_at_last_common_gw():
     assert g["gw"] == 2
     assert g["median"] == 1020 and g["ours"] == 1005 and g["gap"] == 15
     assert g["gap_season"] == pytest.approx(15 * 38 / 2)
+
+
+timing = _load("price_timing")
+
+
+def test_selling_price_rule():
+    assert timing.sell_price(50, 53) == 51  # half the rise, rounded down
+    assert timing.sell_price(50, 54) == 52
+    assert timing.sell_price(50, 48) == 48  # a fall is taken in full
+    assert timing.sell_price(50, 50) == 50
+
+
+def test_timing_gain_sell_before_drop_buy_before_rise():
+    # sold player: purchase 50, was 52 in the window, 50 at the deadline -> sell at 51 not 50
+    # bought player: 60 in the window, 61 at the deadline -> 1 saved
+    assert timing.timing_gain(50, [52, 51], 50, [60, 61], 61) == (1, 1)
+
+
+def test_timing_gain_is_zero_without_changes():
+    assert timing.timing_gain(50, [50, 50], 50, [60, 60], 60) == (0, 0)
+    assert timing.timing_gain(50, [], 50, [], 60) == (0, 0)
+
+
+def test_replay_tracks_purchase_prices():
+    gws = pd.DataFrame(
+        {
+            "season": [2021, 2021, 2021],
+            "start_id": ["template@1"] * 3,
+            "gw": [1, 2, 3],
+            "gw_index": [1, 2, 3],
+            "deadline": pd.to_datetime(
+                ["2021-08-13 17:30", "2021-08-21 10:00", "2021-08-28 10:00"], utc=True
+            ),
+            "transfers": ["[]", "[[1, 2]]", "[[2, 3]]"],
+        }
+    )
+    deadline_price = {
+        (2021, 1, 1): 50,
+        (2021, 2, 1): 50,
+        (2021, 2, 2): 60,
+        (2021, 3, 2): 61,
+        (2021, 3, 3): 70,
+    }
+    snaps = {1: [], 2: [(pd.Timestamp("2021-08-28 01:30", tz="UTC"), 62)], 3: []}
+    rows = timing.replay(gws, deadline_price, snaps, window=pd.Timedelta(hours=24))
+    # GW3: player 2 bought at 60, 62 on the night before the deadline, 61 at the deadline:
+    # selling price 61 vs 60 -> 1 tenth; nothing on the buy side
+    assert [(r["gw"], r["sell_gain"], r["buy_gain"]) for r in rows] == [(2, 0, 0), (3, 1, 0)]
