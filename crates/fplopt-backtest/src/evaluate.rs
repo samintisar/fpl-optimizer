@@ -97,8 +97,7 @@ pub fn parse_start_specs(text: &str) -> Result<Vec<StartSpec>> {
     for item in text.split(',').map(str::trim) {
         let bad = || {
             anyhow::anyhow!(
-                "bad start spec '{item}': expected template@<gw>, random@<gw>, random:<n>@<gw> \
-                 squad:<file>@<gw>,                  each optionally with +bank<n> before the @"
+                "bad start spec '{item}': expected template@<gw>, random@<gw>, random:<n>@<gw> or \n                 squad:<file>@<gw>, each optionally with +bank<n> before the @"
             )
         };
         let (kind, gw) = item.rsplit_once('@').ok_or_else(bad)?;

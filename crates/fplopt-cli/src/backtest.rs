@@ -507,7 +507,7 @@ fn season_totals_by_start(results: &[GridRow], specs: &[StartSpec]) -> Vec<BySta
             let totals = col(|r| r.total);
             let template: Vec<f64> = runs
                 .iter()
-                .filter(|r| r.start_id.starts_with("template"))
+                .filter(|r| r.start_id.starts_with("template") && !r.start_id.contains("+bank"))
                 .map(|r| r.total)
                 .collect();
             let xg = col(|r| r.xg_total);
