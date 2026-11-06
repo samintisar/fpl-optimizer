@@ -68,3 +68,19 @@
 
 - Rust: the bank modifier's unit test (start state) and a parse test for `template+bank10@1`, `random:3+bank10@20`; `cargo test --workspace`, `cargo clippy`.
 - Scripts: a small unit test of the timing gain on a hand-made price series (sell before a drop, buy before a rise, no change → 0).
+
+## Addendum (2026-11-06): re-measuring points per £1m
+
+**Why.** §1b's paired backtests were too noisy to read. +£1m changed the season total by −7.8 (GW1 starts, n 20, SE 10.0), +19.3 (GW2, n 8, SE 22.8) and +10.6 (GW20, n 28, SE 10.2), because one extra £1m changes every later decision and the two runs drift apart. The pooled rate came out at −0.07 points per £1m, which makes the planning upside zero by construction. The user chose (2026-11-06) to re-measure the rate without the drift, before reading the planning result. Timing stays a no (24 h: £0.78m a season; it would need > 13 points per £1m).
+
+**Measurement.**
+- States: fresh template and `random:3` squads at gw_index 1, 8, 15, 22 and 29 of 2016/17–2022/23. Template GW1 states refused before 2021/22 are skipped, not moved to GW2. About 130 states.
+- At each state, the live planner (v1 xP, `live_params`: `optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2`, no chips) solves twice: as is, and with the bank + 10 (£1.0m).
+- v = (plan #1's undecayed expected points over its horizon GWs, net of hits, with £1m) − (the same without), divided by the number of horizon GWs.
+- Reported per gw_index; GW1 (free rebuild) separately from GW8–29 (money spent through normal transfers). **The decision uses the mean v over GW8–29.**
+
+**Conversion (fixed before the numbers).**
+- Discount c = the realized-on-predicted transfer-gain slope of `results/price-sizing-base` (all units), clipped to [0, 1].
+- Exposure E = Σ over GW1–38 of the gap: the measured top-10k median gap for GW1–9 (`gap.json`), then held at the GW9 gap (£3.9m) for GW10–38. About 130 £m·GW.
+- Planning upside = v × c × E. Build the full foresight design if ≥ 20 points a season (§3 unchanged).
+- Reported, not decided on: E with the gap growing linearly to `gap_season` at GW38.
