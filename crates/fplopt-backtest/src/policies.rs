@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use fplopt_build::scoring::Rules;
 use fplopt_core::pyjson::py_float_repr;
 use fplopt_features::baseline::pool_coverage;
@@ -29,6 +29,7 @@ use fplopt_optimize::{OptimizerParams, PlanInput, PlanSet, Search, XpFrame, opti
 use fplopt_store::{AsOfView, Table};
 use sha1::{Digest, Sha1};
 
+use crate::forecast_prices::ForecastPrices;
 use crate::gw_score::Lineup;
 use crate::oracle::FuturePrices;
 use crate::state::{
@@ -50,9 +51,17 @@ pub struct DecisionContext<'a> {
     pub pool: &'a [PoolPlayer],
     pub xp: &'a Table,
     pub frame: &'a XpFrame,
-    /// The season's future deadline prices, set only by the backtester's decision paths
-    /// for a policy that wants them (`Policy::wants_future_prices`, `prices=oracle`).
-    pub future: Option<&'a FuturePrices>,
+    /// The price paths' source for a policy that plans on moving prices
+    /// (`Policy::price_source`), set only by the backtester's decision paths.
+    pub prices: Option<PriceInput<'a>>,
+}
+
+/// What a non-fixed `PriceSource` plans on: the season's future deadline prices
+/// (`prices=oracle`) or its fitted price forecast (`prices=forecast`).
+#[derive(Clone, Copy)]
+pub enum PriceInput<'a> {
+    Oracle(&'a FuturePrices),
+    Forecast(&'a ForecastPrices),
 }
 
 // --- xP helpers ---------------------------------------------------------------------------
@@ -253,13 +262,26 @@ pub struct ChipPolicy2 {
 }
 
 /// Where the optimizer's candidate prices come from: `Fixed` (today's prices over the whole
-/// horizon, the default) or `Oracle` (the real deadline prices of the horizon's GWs, read
-/// from the future: a backtest-only foresight bound, `crate::oracle`).
+/// horizon, the default), `Oracle` (the real deadline prices of the horizon's GWs, read
+/// from the future: a backtest-only foresight bound, `crate::oracle`) or `Forecast` (the
+/// price forecast's expected paths, `crate::forecast_prices`; v1 xP only).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PriceSource {
     #[default]
     Fixed,
     Oracle,
+    Forecast,
+}
+
+impl PriceSource {
+    /// The `prices=` value.
+    pub fn label(self) -> &'static str {
+        match self {
+            PriceSource::Fixed => "fixed",
+            PriceSource::Oracle => "oracle",
+            PriceSource::Forecast => "forecast",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -324,8 +346,14 @@ impl Policy {
                 }
                 Ok(())
             }
-            Policy::Optimizer { xp_model, params, chips, extra, .. } => {
+            Policy::Optimizer { xp_model, params, chips, extra, prices } => {
                 check_model(xp_model)?;
+                if *prices == PriceSource::Forecast && xp_model != crate::price_eval::XP_MODEL {
+                    bail!(
+                        "prices=forecast with {xp_model} xP: the price forecast uses {} xP",
+                        crate::price_eval::XP_MODEL
+                    );
+                }
                 params.validate()?;
                 check_horizon(params.horizon)?;
                 if extra.tc_rule.is_some()
@@ -365,9 +393,13 @@ impl Policy {
         }
     }
 
-    /// Whether deciding needs the future deadline prices (`DecisionContext::future`).
-    pub fn wants_future_prices(&self) -> bool {
-        matches!(self, Policy::Optimizer { prices: PriceSource::Oracle, .. })
+    /// Where deciding takes candidate prices from (`DecisionContext::prices` for a source
+    /// other than `Fixed`); `Fixed` for every policy but the optimizer.
+    pub fn price_source(&self) -> PriceSource {
+        match self {
+            Policy::Optimizer { prices, .. } => *prices,
+            _ => PriceSource::Fixed,
+        }
     }
 
     /// Python's policy names (the experiment log keys on them).
@@ -396,8 +428,8 @@ impl Policy {
                     format!("m={}", r(params.hit_margin)),
                 ];
                 parts.extend(optimizer_extras(params));
-                if *prices == PriceSource::Oracle {
-                    parts.push("oracle".to_owned());
+                if *prices != PriceSource::Fixed {
+                    parts.push(prices.label().to_owned());
                 }
                 if let Some(tables) = &extra.season_tables {
                     parts.push(format!("loso#{}", season_tables_tag(tables)));
@@ -509,14 +541,29 @@ impl Policy {
         if let Some(lead) = extra.double_lead {
             problem.doubles = known_doubles(ctx.view, ctx.state.season, ctx.state.gw_index, lead)?;
         }
-        if *prices == PriceSource::Oracle {
-            let future = ctx.future.context(
-                "prices=oracle needs the future deadline prices, which only the backtester's \
-                 decision paths provide (DecisionContext.future is None)",
-            )?;
-            let season = ctx.state.season;
-            let gws = problem.gws.clone();
-            problem.set_price_paths(|p| Some(future.path(season, p, &gws)));
+        match (*prices, ctx.prices) {
+            (PriceSource::Fixed, _) => {}
+            (PriceSource::Oracle, Some(PriceInput::Oracle(future))) => {
+                let season = ctx.state.season;
+                let gws = problem.gws.clone();
+                problem.set_price_paths(|p| Some(future.path(season, p, &gws)));
+            }
+            (PriceSource::Forecast, Some(PriceInput::Forecast(forecast))) => {
+                if forecast.season != ctx.state.season {
+                    bail!(
+                        "prices=forecast: the forecast is {}'s, the decision is in {}",
+                        forecast.season,
+                        ctx.state.season
+                    );
+                }
+                let paths = forecast.paths(ctx.view, ctx.xp, &problem.gws)?;
+                problem.set_price_paths(|p| paths.get(&p.player_key).cloned());
+            }
+            (source, _) => bail!(
+                "prices={} needs its price paths, which only the backtester's decision paths \
+                 provide (DecisionContext.prices is not {0})",
+                source.label()
+            ),
         }
         let plans = optimize(&problem, &params, 1, *chips, false, Search::Bound)?;
         Ok((problem, params, plans))

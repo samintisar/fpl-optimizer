@@ -170,7 +170,7 @@ fn parse_value(kind: Kind, raw: &str) -> Option<Value> {
     }
 }
 
-/// `prices=` values: `fixed` (default) and `oracle`; `forecast` is reserved (Stage B).
+/// `prices=` values: `fixed` (default), `oracle` and `forecast` (v1 xP only).
 const PRICE_SOURCES: [&str; 3] = ["fixed", "oracle", "forecast"];
 
 /// A policy spec: name, xP model and the parameters given (sorted by key).
@@ -322,10 +322,10 @@ impl PolicySpec {
                 let prices = match params.remove("prices") {
                     None | Some(Value::Text("fixed")) => PriceSource::Fixed,
                     Some(Value::Text("oracle")) => PriceSource::Oracle,
-                    Some(Value::Text("forecast")) => {
-                        bail!("prices=forecast arrives with Stage B")
+                    Some(Value::Text("forecast")) => PriceSource::Forecast,
+                    Some(other) => {
+                        bail!("prices={other}: not a price source (fixed, oracle, forecast)")
                     }
-                    Some(other) => bail!("prices={other}: not a price source (fixed, oracle)"),
                 };
                 let mut extra = ChipPolicy2::default();
                 if !(0..CHIP_SPLITS.len() as i64).contains(&split) {
@@ -551,7 +551,7 @@ mod tests {
         );
         let policy = spec.build().unwrap();
         assert_eq!(policy.name(), "optimizer(v1,mh=1,m=2.0,d=0.75,pk=1.0,oracle)");
-        assert!(policy.wants_future_prices());
+        assert_eq!(policy.price_source(), PriceSource::Oracle);
         let Policy::Optimizer { params, prices, .. } = &policy else { panic!("not an optimizer") };
         assert_eq!((params.price_value_k, *prices), (1.0, PriceSource::Oracle));
         // defaults are dropped: same spec, same name as without the keys
@@ -559,9 +559,15 @@ mod tests {
         let bare = parse_policy_spec(base).unwrap();
         assert_eq!(plain, bare);
         assert_eq!(plain.build().unwrap().name(), bare.build().unwrap().name());
-        assert!(!bare.build().unwrap().wants_future_prices());
-        let err = parse_policy_spec("optimizer:v1:prices=forecast").unwrap_err().to_string();
-        assert!(err.contains("prices=forecast arrives with Stage B"), "{err}");
+        assert_eq!(bare.build().unwrap().price_source(), PriceSource::Fixed);
+        // the price forecast's paths: optimizer on v1 xP only
+        let forecast = parse_policy_spec(&format!("{base},prices=forecast,price_k=0.5")).unwrap();
+        let policy = forecast.build().unwrap();
+        assert_eq!(policy.name(), "optimizer(v1,mh=1,m=2.0,d=0.75,pk=0.5,forecast)");
+        assert_eq!(policy.price_source(), PriceSource::Forecast);
+        let err = parse_policy_spec("optimizer:rolling:prices=forecast").unwrap_err().to_string();
+        assert!(err.contains("the price forecast uses v1 xP"), "{err}");
+        assert!(parse_policy_spec("chipgains:v1:prices=forecast").is_err());
         assert!(parse_policy_spec("optimizer:v1:prices=bogus").is_err());
         assert!(parse_policy_spec("optimizer:v1:price_k=-1").is_err());
         // price_k on the chip study's planners; prices only on the optimizer

@@ -9,6 +9,7 @@ pub mod bench;
 pub mod chip_values;
 pub mod eval;
 pub mod evaluate;
+pub mod forecast_prices;
 pub mod gw_score;
 pub mod money_value;
 pub mod oracle;
