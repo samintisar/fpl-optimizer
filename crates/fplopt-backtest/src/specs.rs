@@ -334,6 +334,9 @@ impl PolicySpec {
                 }
                 let jitter = (sigma > 0.0)
                     .then(|| crate::jitter::XpJitter { sigma, seed: seed.unwrap_or(0) as u64 });
+                if jitter.is_some() && tc_rule.is_some() {
+                    bail!("xp_jitter can't be combined with tc_rule (the rule reads the true xP)");
+                }
                 let prices = match params.remove("prices") {
                     None | Some(Value::Text("fixed")) => PriceSource::Fixed,
                     Some(Value::Text("oracle")) => PriceSource::Oracle,
@@ -610,6 +613,10 @@ mod tests {
         assert!(parse_policy_spec(&format!("{base},xp_jitter=-0.1")).is_err());
         assert!(parse_policy_spec(&format!("{base},xp_jitter=0.05,jitter_seed=-1")).is_err());
         assert!(parse_policy_spec("chipgains:v1:xp_jitter=0.05").is_err());
+        // tc_rule reads the true xP, so it can't be combined with the wobble
+        let err =
+            parse_policy_spec("optimizer:v1:tc_rule=8,xp_jitter=0.05").unwrap_err().to_string();
+        assert!(err.contains("xp_jitter can't be combined with tc_rule"), "{err}");
         // seed defaults to 0
         let s0 = parse_policy_spec(&format!("{base},xp_jitter=0.05")).unwrap().build().unwrap();
         assert!(s0.name().ends_with("jit=0.05/0)"), "{}", s0.name());
