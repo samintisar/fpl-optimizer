@@ -129,7 +129,7 @@ Written before any Stage B code, after mapping the code (plan `docs/superpowers/
   - the family is deflated for 4 variants (mean − SE·√(2 ln 4)) and logged as family `price planner develop`;
   - the chosen settings are written to `config/prices/planner.json` and tagged `price-check` before the check runs.
 - **Gate C (check 2023/24–2024/25):** starts as in Gate A; the forecast planner (chosen k) vs L.
-  - **Team value:** the forecast planner must end seasons with higher team value than L: mean difference > 0, one-sided t-test over (season, start) units, p < 0.10.
+  - **Team value:** the forecast planner must end seasons with higher team value than L: mean difference > 0, one-sided t-test over (season, start) units, p < 0.10. Team value is `market_value + bank` at the last GW (FPL's `value`, as in the sizing). Amended 2026-11-07 after the develop runs and before any freeze or check: the first version used `market_value` alone, which a planner passes by spending its bank (develop k = 0: market value +2.25 tenths, with the bank −7.75).
   - **Points:** the 80% lower bound of the season-points difference (GW-block bootstrap, as `backtest compare` does) must be > −10.
   - **Rules for the run:**
     - It is run once, logged before printing, and refused if the log already holds it.

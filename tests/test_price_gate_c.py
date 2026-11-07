@@ -59,6 +59,7 @@ def _gws(policy_vals):
                         "gw_index": gw,
                         "net_points": 50,
                         "market_value": 1000 if gw == 1 else end,
+                        "bank": 0,
                     }
                 )
     return pd.DataFrame(rows)
@@ -71,6 +72,17 @@ def test_team_value_test():
     df = _gws({"A:forecast": [990, 1010, 1000, 1000], "B": [1000, 1000, 1000, 1000]})
     mean, p, n = gate.team_value_test(df, "A:forecast", "B")
     assert mean == 0.0 and 0.4 < p < 0.6
+
+
+def test_team_value_counts_the_bank():
+    # A spends its bank on the squad: market value up 20, bank down 20 -> no team value gain.
+    df = _gws({"A:forecast": [1020, 1020, 1020], "B": [1000, 1000, 1000]})
+    df.loc[(df["policy"] == "A:forecast") & (df["gw_index"] == 2), "bank"] = 0
+    df.loc[(df["policy"] == "B") & (df["gw_index"] == 2), "bank"] = 20
+    mean, _, n = gate.team_value_test(df, "A:forecast", "B")
+    assert mean == 0.0 and n == 3
+    u = gate.units(df[df["policy"] == "B"])
+    assert list(u["end_value"]) == [1020, 1020, 1020]
 
 
 def test_verdict_boundaries():

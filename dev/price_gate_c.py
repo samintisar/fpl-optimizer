@@ -54,6 +54,20 @@ LOWER_BOUND_PATH = "summary.comparisons[method=full_run, split=all, metric=reali
 # ---- pure functions ----
 
 
+def units(gws: pd.DataFrame) -> pd.DataFrame:
+    """Per (season, start): season net points and end team value = market_value + bank at the
+    last GW (tenths). Counting the bank keeps a planner from raising the value just by spending it;
+    it matches FPL's `value` used in the sizing. Gate A's `units` (market_value only) stays as
+    it was run."""
+    g = gws.sort_values("gw_index").groupby(["season", "start_id"])
+    return pd.DataFrame(
+        {
+            "points": g["net_points"].sum(),
+            "end_value": g["market_value"].last() + g["bank"].last(),
+        }
+    )
+
+
 def refusal(log_families, dirty, head, tag, out_nonempty) -> str | None:
     if FAMILY in set(log_families):
         return f"the experiment log already holds family '{FAMILY}': Gate C runs once"
@@ -92,8 +106,9 @@ def tune_choice(results: dict) -> dict:
 
 
 def team_value_test(gws: pd.DataFrame, a: str, b: str) -> tuple[float, float, int]:
-    """Mean end market_value difference (A - B) over paired units and the one-sided t-test p."""
-    u = {p: gate_a.units(gws[gws["policy"] == p]) for p in (a, b)}
+    """Mean end team value (market_value + bank) difference (A - B) over paired units and the
+    one-sided t-test p."""
+    u = {p: units(gws[gws["policy"] == p]) for p in (a, b)}
     joined = u[a].join(u[b], lsuffix="_a", rsuffix="_b", how="inner")
     d = joined["end_value_a"] - joined["end_value_b"]
     n = int(d.size)
@@ -127,7 +142,7 @@ def points_lower_bound(summary: dict) -> float:
 
 def cmd_tune(args) -> None:
     def load(p: Path) -> pd.DataFrame:
-        return gate_a.units(pd.read_parquet(p / "gws.parquet"))
+        return units(pd.read_parquet(p / "gws.parquet"))
 
     base = load(args.base)
     if len(base) != TUNE_UNITS:
