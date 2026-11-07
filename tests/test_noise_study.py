@@ -119,14 +119,26 @@ def test_season_clustered_se_uses_windows_per_season():
     assert se == pytest.approx(10.0)
 
 
+N = 10_000  # large n: the t distribution is the normal, z unchanged
+
+
 def test_z_sd_and_rms():
-    assert ns.z_sd([(1.0, 1.0), (-1.0, 1.0)]) == pytest.approx(math.sqrt(2))
-    assert ns.z_rms([(1.0, 1.0), (-1.0, 1.0)]) == pytest.approx(1.0)
-    biased = [(1.5, 1.0)] * 4  # sd about the mean hides the bias, rms does not
-    assert ns.z_sd(biased) == pytest.approx(0.0) and ns.z_rms(biased) == pytest.approx(1.5)
-    assert math.isnan(ns.z_sd([(1.0, 0.0)])) and math.isnan(ns.z_rms([(1.0, 0.0)]))
-    assert math.isnan(ns.z_rms([(1.0, 1.0)]))
-    assert ns.z_count([(1.0, 1.0), (1.0, 0.0), (1.0, float("nan")), (2.0, 2.0)]) == 2
+    assert ns.z_sd([(1.0, 1.0, N), (-1.0, 1.0, N)]) == pytest.approx(math.sqrt(2), rel=1e-3)
+    assert ns.z_rms([(1.0, 1.0, N), (-1.0, 1.0, N)]) == pytest.approx(1.0, rel=1e-3)
+    biased = [(1.5, 1.0, N)] * 4  # sd about the mean hides the bias, rms does not
+    assert ns.z_sd(biased) == pytest.approx(0.0, abs=1e-6)
+    assert ns.z_rms(biased) == pytest.approx(1.5, rel=1e-3)
+    assert math.isnan(ns.z_sd([(1.0, 0.0, N)])) and math.isnan(ns.z_rms([(1.0, 0.0, N)]))
+    assert math.isnan(ns.z_rms([(1.0, 1.0, N)]))
+    pairs = [(1.0, 1.0, N), (1.0, 0.0, N), (1.0, float("nan"), N), (2.0, 2.0, N), (1.0, 1.0, 2)]
+    assert ns.z_count(pairs) == 2  # zero / NaN SE and n < 3 are unusable
+
+
+def test_z_is_a_normal_score_of_the_t_statistic():
+    # the t_9 97.5% point is 2.262: a normal score of 1.96
+    (z,) = ns._zs([(2.262, 1.0, 10)])
+    assert z == pytest.approx(1.96, abs=0.01)
+    assert ns.z_rms([(2.262, 1.0, 10), (-2.262, 1.0, 10)]) == pytest.approx(1.96, abs=0.01)
 
 
 def _row(method, c1, c2, z, minutes):
@@ -147,6 +159,11 @@ def test_choose():
     assert ns.choose([_row("nanse", float("nan"), 4.0, 1.0, 5)]) is None
     assert ns.choose([_row("zero", 0.0, 4.0, 1.0, 5)]) is None
     assert ns.choose([_row("zero2", 4.0, 0.0, 1.0, 5)]) is None
+    assert ns.choose([_row("notime", 4.0, 4.0, 1.0, float("nan"))]) is None
+    assert (
+        ns.choose([_row("notime", 4.0, 4.0, 1.0, float("nan")), _row("ok", 4.0, 4.0, 1.0, 9)])
+        == "ok"
+    )
 
 
 def _write_run(d: Path, k, diff_a: float):
@@ -170,6 +187,8 @@ def _write_run(d: Path, k, diff_a: float):
                 "gw_index": [1, 1, 1 + k, 1 + k, 1 + 2 * k, 1 + 2 * k],
                 "diff": [1.0, 2.0, 3.0, 1.0, 0.0, 2.0],
                 "diff_xg": [1.0, 2.0, 3.0, 1.0, 0.0, 2.0],
+                "transfers_a": [1, 1, 2, 1, 0, 1],
+                "transfers_b": [1, 1, 2, 1, 0, 1],
             }
         )
         dec.to_parquet(d / "per_decision.parquet")
@@ -178,9 +197,10 @@ def _write_run(d: Path, k, diff_a: float):
 def test_method_rows(tmp_path):
     times = {}
     for cid in ns.comparisons():
-        for k in (None, *ns.KS):
+        for k in ns.runs_for(cid):
             _write_run(tmp_path / cid / ns.run_name(k), k, 1.0)
             times[f"{cid}/{ns.run_name(k)}"] = 60.0
+    assert not (tmp_path / "P1" / "full").exists()
     (tmp_path / "times.json").write_text(json.dumps(times))
     rows = ns.method_rows(tmp_path)
     assert [r["method"] for r in rows] == [
@@ -198,4 +218,34 @@ def test_method_rows(tmp_path):
     assert k2["n_C1"] == 3 and k2["mean_C1"] == pytest.approx(1.5 * 19)
     assert k2["minutes"] == pytest.approx(2.0)  # C1 + C2 run times, 60 s each
     assert k2["z_count"] == 10 and k2["z_rms"] > 0
+    assert k2["placebo_dtransfers"] == pytest.approx(0.0)
+    assert math.isnan(rows[0]["placebo_dtransfers"])
+    assert rows[0]["z_count"] == 0  # placebo whole season read from k1 (zero SE here)
     assert k2["pass"] == ns.passes(k2)
+
+
+def test_runs_for():
+    assert ns.runs_for("C1") == (None, 1, 2, 4) and ns.runs_for("C2") == (None, 1, 2, 4)
+    assert ns.runs_for("P1") == (1, 2, 4) and ns.runs_for("P10") == (1, 2, 4)
+
+
+def test_warmup_cmd():
+    cmd = ns.warmup_cmd("bin", Path("o"), jobs=7)
+    assert cmd[:3] == ["bin", "backtest", "run"]
+    assert cmd[cmd.index("--spec") + 1] == ns.LIVE
+    assert cmd[cmd.index("--seasons") + 1] == "2021,2022"
+    assert cmd[cmd.index("--starts") + 1] == "template@1"
+    assert cmd[cmd.index("--jobs") + 1] == "7"
+    assert cmd[cmd.index("--family") + 1] == "noise study warmup"
+    assert Path(cmd[cmd.index("--experiments") + 1]) == Path("o") / "warmup" / "experiments.csv"
+    assert Path(cmd[cmd.index("--out") + 1]) == Path("o") / "warmup"
+
+
+def test_method_rows_with_missing_runs(tmp_path):
+    for cid in ("C1", *[c for c in ns.comparisons() if c.startswith("P")]):
+        for k in ns.runs_for(cid):
+            _write_run(tmp_path / cid / ns.run_name(k), k, 1.0)
+    rows = ns.method_rows(tmp_path)  # no C2 at all
+    assert len(rows) == 8 and not any(r["pass"] for r in rows)
+    assert all(math.isnan(r["se_C2"]) and r["n_C2"] == 0 for r in rows)
+    assert ns.choose(rows) is None

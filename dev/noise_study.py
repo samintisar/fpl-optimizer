@@ -9,7 +9,14 @@ P1-P10 placebo pairs): once without per-decision (the whole-season method's cost
 window length k (1, 2, 4; each arm continues its own plan, states from B). Resumable: a run whose
 summary.json exists is skipped. Wall times go to OUT/times.json. `report` puts the 8 methods
 (whole season, per decision k = 1, 2, 4; realized and xG-scored points) on one scale, points per
-season, and picks the cheapest with SE <= 4.5 on C1 and C2 and placebo z RMS <= 1.25.
+season, and picks the cheapest with SE <= 4.5 on C1 and C2 and placebo z RMS <= 1.25 (each placebo
+z is mapped to a normal score through its t distribution, n - 1 df).
+
+Only C1 and C2 get a `full` (whole-season) run, for its timing; every k run writes the same
+paired.parquet, so the placebos' whole-season measurement reads P*/k1. Before the timed runs
+`run` does one untimed warmup `backtest run` so the disk xP cache (keyed by the binary) is warm
+and the first runs do not pay for the models. Wall times on a shared server are noisy: run when
+the box is quiet, and treat close minutes as ties.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ import time
 from pathlib import Path
 
 import pandas as pd
+from scipy import stats
 
 LIVE = "optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2"
 STARTS = (
@@ -121,36 +129,49 @@ def season_clustered_se(dec_or_paired: pd.DataFrame, k: int | None, col: str) ->
     return float(per.std(ddof=1) / math.sqrt(per.size)) if per.size > 1 else float("nan")
 
 
-def _zs(pairs: list[tuple[float, float]]) -> list[float]:
-    return [m / s for m, s in pairs if s and not math.isnan(s) and s > 0]
+def _zs(triples: list[tuple[float, float, int]]) -> list[float]:
+    """Normal scores of the placebo t statistics: z = mean / SE over n cells is t with n - 1 df,
+    mapped through norm.ppf(t.cdf(z)) so methods with few cells are not penalised. Unusable (SE
+    zero or NaN, n < 3) are skipped."""
+    out = []
+    for m, s, n in triples:
+        if n < 3 or not s or math.isnan(s) or s <= 0 or math.isnan(m):
+            continue
+        out.append(float(stats.norm.ppf(stats.t.cdf(m / s, df=n - 1))))
+    return out
 
 
-def z_count(pairs: list[tuple[float, float]]) -> int:
-    """Usable placebo pairs (SE positive and not NaN)."""
-    return len(_zs(pairs))
+def z_count(triples: list[tuple[float, float, int]]) -> int:
+    """Usable placebo pairs."""
+    return len(_zs(triples))
 
 
-def z_sd(pairs: list[tuple[float, float]]) -> float:
-    """Diagnostic: sd of z = mean / SE over placebo pairs, about their own mean (hides a bias)."""
-    zs = _zs(pairs)
+def z_sd(triples: list[tuple[float, float, int]]) -> float:
+    """Diagnostic: sd of the placebo normal scores about their own mean (hides a bias)."""
+    zs = _zs(triples)
     if len(zs) < 2:
         return float("nan")
     mu = sum(zs) / len(zs)
     return math.sqrt(sum((z - mu) ** 2 for z in zs) / (len(zs) - 1))
 
 
-def z_rms(pairs: list[tuple[float, float]]) -> float:
+def z_rms(triples: list[tuple[float, float, int]]) -> float:
     """sqrt(mean z^2) about 0: honest, unbiased SEs give about 1; a biased method shows here."""
-    zs = _zs(pairs)
+    zs = _zs(triples)
     if len(zs) < 2:
         return float("nan")
     return math.sqrt(sum(z * z for z in zs) / len(zs))
 
 
 def passes(row: dict) -> bool:
-    """The rule: 0 < se_C1, se_C2 <= TARGET_SE and z_rms <= Z_MAX (an SE of exactly 0 is
-    degenerate, never a pass; NaN never passes)."""
-    return 0 < row["se_C1"] <= TARGET_SE and 0 < row["se_C2"] <= TARGET_SE and row["z_rms"] <= Z_MAX
+    """The rule: 0 < se_C1, se_C2 <= TARGET_SE, z_rms <= Z_MAX and a finite time (an SE of
+    exactly 0 is degenerate, never a pass; NaN never passes; a missing time never wins)."""
+    return (
+        0 < row["se_C1"] <= TARGET_SE
+        and 0 < row["se_C2"] <= TARGET_SE
+        and row["z_rms"] <= Z_MAX
+        and math.isfinite(row["minutes"])
+    )
 
 
 def choose(rows: list[dict]) -> str | None:
@@ -163,21 +184,47 @@ def run_name(k: int | None) -> str:
     return "full" if k is None else f"k{k}"
 
 
+def runs_for(cid: str) -> tuple[int | None, ...]:
+    """The runs of a comparison: C* also gets the whole-season run (None), for its timing."""
+    return (None, *KS) if cid.startswith("C") else KS
+
+
 def _method_runs():
     yield "whole", None
     for k in KS:
         yield f"k{k}", k
 
 
+def _run_dir(out: Path, cid: str, k: int | None) -> Path:
+    """Where a method reads its data: placebos have no full run, so their whole-season
+    measurement reads k1's paired.parquet (every k run writes the same one)."""
+    if k is None and not cid.startswith("C"):
+        return out / cid / run_name(1)
+    return out / cid / run_name(k)
+
+
 def _measure(run_dir: Path, k: int | None, col: str) -> tuple[float, float, int]:
+    src = run_dir / ("paired.parquet" if k is None else "per_decision.parquet")
+    if not src.exists():
+        return float("nan"), float("nan"), 0
     if k is None:
-        return whole_season(pd.read_parquet(run_dir / "paired.parquet"), col)
-    return per_decision(pd.read_parquet(run_dir / "per_decision.parquet"), k, col)
+        return whole_season(pd.read_parquet(src), col)
+    return per_decision(pd.read_parquet(src), k, col)
+
+
+def _dtransfers(run_dir: Path) -> float:
+    src = run_dir / "per_decision.parquet"
+    if not src.exists():
+        return float("nan")
+    d = pd.read_parquet(src)
+    return float((d["transfers_a"] - d["transfers_b"]).mean())
 
 
 def method_rows(out: Path) -> list[dict]:
     """One row per method: C1 and C2 mean / SE / n per season, placebo z RMS (plus z sd, mean z
-    and count as diagnostics), C2's season-clustered SE (diagnostic), minutes (C1 + C2 runs)."""
+    and count as diagnostics), C2's season-clustered SE (diagnostic), the placebos' mean
+    transfers A - B per decision (per-decision methods; A decides off B's trajectory, so it may
+    churn more), minutes (C1 + C2 runs). Missing runs give NaN and never pass."""
     times_path = out / "times.json"
     times = json.loads(times_path.read_text()) if times_path.exists() else {}
     placebos = [c for c in comparisons() if c.startswith("P")]
@@ -186,18 +233,22 @@ def method_rows(out: Path) -> list[dict]:
         for score, col in SCORES.items():
             row = {"method": f"{name}/{score}"}
             for cid in ("C1", "C2"):
-                mean, se, n = _measure(out / cid / run_name(k), k, col)
+                mean, se, n = _measure(_run_dir(out, cid, k), k, col)
                 row |= {f"mean_{cid}": mean, f"se_{cid}": se, f"n_{cid}": n}
-            src = "paired.parquet" if k is None else "per_decision.parquet"
-            row["se_C2_season_clustered"] = season_clustered_se(
-                pd.read_parquet(out / "C2" / run_name(k) / src), k, col
+            fname = "paired.parquet" if k is None else "per_decision.parquet"
+            src = _run_dir(out, "C2", k) / fname
+            row["se_C2_season_clustered"] = (
+                season_clustered_se(pd.read_parquet(src), k, col) if src.exists() else float("nan")
             )
-            pairs = [_measure(out / p / run_name(k), k, col)[:2] for p in placebos]
-            zs = _zs(pairs)
-            row["z_rms"] = z_rms(pairs)
-            row["z_sd"] = z_sd(pairs)
+            triples = [_measure(_run_dir(out, p, k), k, col) for p in placebos]
+            zs = _zs(triples)
+            row["z_rms"] = z_rms(triples)
+            row["z_sd"] = z_sd(triples)
             row["z_mean"] = sum(zs) / len(zs) if zs else float("nan")
-            row["z_count"] = z_count(pairs)
+            row["z_count"] = z_count(triples)
+            dts = [] if k is None else [_dtransfers(out / p / run_name(k)) for p in placebos]
+            dts = [x for x in dts if not math.isnan(x)]
+            row["placebo_dtransfers"] = sum(dts) / len(dts) if dts else float("nan")
             row["minutes"] = (
                 sum(times.get(f"{c}/{run_name(k)}", float("nan")) for c in ("C1", "C2")) / 60
             )
@@ -206,16 +257,36 @@ def method_rows(out: Path) -> list[dict]:
     return rows
 
 
+def warmup_cmd(binary, out: Path, jobs: int) -> list[str]:
+    """One untimed live-policy run that fills the disk xP cache for both comparison seasons."""
+    w = out / "warmup"
+    cmd = [str(binary), "backtest", "run", "--spec", LIVE, "--seasons", "2021,2022"]
+    cmd += ["--starts", "template@1", "--jobs", str(jobs), "--family", "noise study warmup"]
+    cmd += ["--experiments", str(w / "experiments.csv"), "--out", str(w)]
+    return cmd
+
+
 def cmd_run(args) -> int:
     out: Path = args.out
     out.mkdir(parents=True, exist_ok=True)
     times_path = out / "times.json"
     times = json.loads(times_path.read_text()) if times_path.exists() else {}
     only = set(args.only.split(",")) if args.only else None
+    warm = out / "warmup"
+    if not (warm / "summary.json").exists():
+        warm.mkdir(parents=True, exist_ok=True)
+        print("warmup (untimed) ...", flush=True)
+        with (warm / "run.log").open("w", encoding="utf-8") as log:
+            r = subprocess.run(
+                warmup_cmd(args.binary, out, args.jobs), stdout=log, stderr=subprocess.STDOUT
+            )
+        if r.returncode != 0:
+            print(f"warmup failed ({r.returncode}); see {warm / 'run.log'}")
+            return r.returncode
     for cid, comp in comparisons().items():
         if only and cid not in only:
             continue
-        for k in (None, *KS):
+        for k in runs_for(cid):
             run_dir = out / cid / run_name(k)
             if (run_dir / "summary.json").exists():
                 continue
@@ -247,12 +318,13 @@ def cmd_report(args) -> int:
     }
     (args.out / "noise.json").write_text(json.dumps(payload, indent=2))
     head = f"{'method':<14} {'C1 mean':>8} {'C1 se':>6} {'C2 mean':>8} {'C2 se':>6} {'C2 se/s':>7}"
-    print(head + f" {'z rms':>5} {'z sd':>5} {'z mean':>6} {'z n':>3} {'min':>6} pass")
+    print(head + f" {'z rms':>5} {'z sd':>5} {'z mean':>6} {'z n':>3} {'dtr':>5} {'min':>6} pass")
     for r in rows:
         print(
             f"{r['method']:<14} {r['mean_C1']:>8.1f} {r['se_C1']:>6.2f} {r['mean_C2']:>8.1f} "
             f"{r['se_C2']:>6.2f} {r['se_C2_season_clustered']:>7.2f} {r['z_rms']:>5.2f} "
-            f"{r['z_sd']:>5.2f} {r['z_mean']:>6.2f} {r['z_count']:>3d} {r['minutes']:>6.1f} "
+            f"{r['z_sd']:>5.2f} {r['z_mean']:>6.2f} {r['z_count']:>3d} "
+            f"{r['placebo_dtransfers']:>5.2f} {r['minutes']:>6.1f} "
             f"{'yes' if r['pass'] else 'no'}"
         )
     print(f"chosen: {chosen}")
