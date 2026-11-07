@@ -420,8 +420,7 @@ import pandas as pd
 
 LIVE = "optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2"
 STARTS = (
-    "template@1,random:3@1,template@10,random:3@10,"
-    "template@20,random:3@20,template@29,random:3@29"
+    "template@1,random:3@1,template@10,random:3@10,template@20,random:3@20,template@29,random:3@29"
 )
 KS = (1, 2, 4)
 SEASON_GWS = 38
@@ -437,11 +436,19 @@ SCORES = {"realized": "diff", "xg": "diff_xg"}
 def comparisons() -> dict[str, dict]:
     out = {
         "C1": {"a": LIVE + ",prices=forecast,price_k=0.5", "b": LIVE, "seasons": "2022"},
-        "C2": {"a": LIVE.replace("hit_margin=2", "hit_margin=3"), "b": LIVE, "seasons": "2021,2022"},
+        "C2": {
+            "a": LIVE.replace("hit_margin=2", "hit_margin=3"),
+            "b": LIVE,
+            "seasons": "2021,2022",
+        },
     }
     for s in range(1, N_PLACEBO + 1):
         jit = f",xp_jitter={SIGMA},jitter_seed="
-        out[f"P{s}"] = {"a": f"{LIVE}{jit}{2 * s - 1}", "b": f"{LIVE}{jit}{2 * s}", "seasons": "2022"}
+        out[f"P{s}"] = {
+            "a": f"{LIVE}{jit}{2 * s - 1}",
+            "b": f"{LIVE}{jit}{2 * s}",
+            "seasons": "2022",
+        }
     return out
 
 
@@ -575,8 +582,14 @@ def test_method_rows(tmp_path):
     (tmp_path / "times.json").write_text(json.dumps(times))
     rows = ns.method_rows(tmp_path)
     assert [r["method"] for r in rows] == [
-        "whole/realized", "whole/xg", "k1/realized", "k1/xg",
-        "k2/realized", "k2/xg", "k4/realized", "k4/xg",
+        "whole/realized",
+        "whole/xg",
+        "k1/realized",
+        "k1/xg",
+        "k2/realized",
+        "k2/xg",
+        "k4/realized",
+        "k4/xg",
     ]
     k2 = rows[4]
     assert k2["n_C1"] == 3 and k2["mean_C1"] == pytest.approx(1.5 * 19)
@@ -630,7 +643,9 @@ def method_rows(out: Path) -> list[dict]:
             row["z_sd"] = z_sd(pairs)
             zs = [m / s for m, s in pairs if s and s > 0]
             row["z_mean"] = sum(zs) / len(zs) if zs else float("nan")
-            row["minutes"] = sum(times.get(f"{c}/{run_name(k)}", float("nan")) for c in ("C1", "C2")) / 60
+            row["minutes"] = (
+                sum(times.get(f"{c}/{run_name(k)}", float("nan")) for c in ("C1", "C2")) / 60
+            )
             row["pass"] = (
                 row["se_C1"] <= TARGET_SE and row["se_C2"] <= TARGET_SE and row["z_sd"] <= Z_SD_MAX
             )
