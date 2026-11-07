@@ -67,8 +67,8 @@ def _decisions(k):
 
 def test_per_decision_scale_and_se():
     mean, se, n = ns.per_decision(_decisions(2), 2, "diff")
-    assert n == 3 and mean == pytest.approx(4 * 3)  # 3 windows in one season
-    assert se == pytest.approx(2 / math.sqrt(3) * 3)
+    assert n == 3 and mean == pytest.approx(4 * 19)  # grid scale at k=2
+    assert se == pytest.approx(2 / math.sqrt(3) * 19)
     mean, se, n = ns.per_decision(_decisions(2), 2, "diff_xg")  # all null -> no windows
     assert n == 0 and math.isnan(mean) and math.isnan(se)
 
@@ -102,10 +102,10 @@ def test_per_decision_pools_seasons_not_gw_index():
     ]
     mean, se, n = ns.per_decision(pd.DataFrame(rows), 2, "diff")
     assert n == 4  # not merged by gw_index
-    assert mean == pytest.approx((2 + 4 + 12 + 14) / 4 * 2)  # 2 windows a season
+    assert mean == pytest.approx((2 + 4 + 12 + 14) / 4 * 19)  # grid scale at k=2
     xs = [2, 4, 12, 14]
     sd = math.sqrt(sum((x - 8) ** 2 for x in xs) / 3)
-    assert se == pytest.approx(sd / math.sqrt(4) * 2)
+    assert se == pytest.approx(sd / math.sqrt(4) * 19)
 
 
 def test_season_clustered_se_uses_windows_per_season():
@@ -115,9 +115,8 @@ def test_season_clustered_se_uses_windows_per_season():
         for g in (1, 5, 9)
     ]
     se = ns.season_clustered_se(pd.DataFrame(rows), 4, "diff")
-    assert se == pytest.approx(
-        math.sqrt(2) / math.sqrt(2) * 3
-    )  # per-season (3, 9): sd sqrt(18)/sqrt(2)
+    # per-season means (1, 3) x grid scale 10 = (10, 30): sd sqrt(200) / sqrt(2) = 10
+    assert se == pytest.approx(10.0)
 
 
 def test_z_sd_and_rms():
@@ -195,8 +194,8 @@ def test_method_rows(tmp_path):
         "k4/xg",
     ]
     k2 = rows[4]
-    # windows at gw_index 1, 3, 5 of one season: window means 1.5, 2, 1; scale 3 windows a season
-    assert k2["n_C1"] == 3 and k2["mean_C1"] == pytest.approx(1.5 * 3)
+    # windows at gw_index 1, 3, 5: window means 1.5, 2, 1 (mean 1.5); grid scale 19 at k=2
+    assert k2["n_C1"] == 3 and k2["mean_C1"] == pytest.approx(1.5 * 19)
     assert k2["minutes"] == pytest.approx(2.0)  # C1 + C2 run times, 60 s each
     assert k2["z_count"] == 10 and k2["z_rms"] > 0
     assert k2["pass"] == ns.passes(k2)

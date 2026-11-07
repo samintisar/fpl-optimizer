@@ -97,26 +97,26 @@ def _windows(dec: pd.DataFrame, col: str) -> pd.Series:
     return d.groupby(["season", "gw_index"])[col].mean()
 
 
-def _windows_per_season(windows: pd.Series) -> float:
-    n_seasons = windows.index.get_level_values("season").nunique()
-    return windows.size / n_seasons if n_seasons else float("nan")
+def windows_per_season(k: int) -> int:
+    """Decisions a season on the grid GW 1, 1 + k, ...: 38, 19, 10 for k = 1, 2, 4."""
+    return math.ceil(SEASON_GWS / k)
 
 
 def per_decision(dec: pd.DataFrame, k: int, col: str) -> tuple[float, float, int]:
     """Each decision window's A - B (summed over its k GWs) averaged over the starts live in it;
     windows of all seasons pooled (keyed by season and gw_index); mean and SE over windows,
-    scaled by the windows a season (n windows / n seasons; decisions sit at GW 1, 1 + k, ..., so
-    k = 4 gives 10, not 38 / 4)."""
+    scaled by the windows a season on the decision grid (windows_per_season(k)), not by the
+    windows found in the data."""
     windows = _windows(dec, col)
-    return _stats(windows, _windows_per_season(windows))
+    return _stats(windows, windows_per_season(k))
 
 
 def season_clustered_se(dec_or_paired: pd.DataFrame, k: int | None, col: str) -> float:
     """Diagnostic: SE over per-season means (C2 has 2 seasons, so this is rough). Per decision
-    the scale is the windows a season, as in per_decision."""
+    the scale is windows_per_season(k), as in per_decision."""
     d = dec_or_paired.dropna(subset=[col])
     windows = d.groupby(["season", "gw_index"])[col].mean()
-    scale = SEASON_GWS if k is None else _windows_per_season(windows)
+    scale = SEASON_GWS if k is None else windows_per_season(k)
     per = windows.groupby("season").mean() * scale
     return float(per.std(ddof=1) / math.sqrt(per.size)) if per.size > 1 else float("nan")
 
