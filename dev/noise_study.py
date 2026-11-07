@@ -14,7 +14,11 @@ season, and picks the cheapest with SE <= 4.5 on C1 and C2 and placebo z RMS <= 
 
 from __future__ import annotations
 
+import argparse
+import json
 import math
+import subprocess
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -143,12 +147,132 @@ def z_rms(pairs: list[tuple[float, float]]) -> float:
     return math.sqrt(sum(z * z for z in zs) / len(zs))
 
 
+def passes(row: dict) -> bool:
+    """The rule: 0 < se_C1, se_C2 <= TARGET_SE and z_rms <= Z_MAX (an SE of exactly 0 is
+    degenerate, never a pass; NaN never passes)."""
+    return 0 < row["se_C1"] <= TARGET_SE and 0 < row["se_C2"] <= TARGET_SE and row["z_rms"] <= Z_MAX
+
+
 def choose(rows: list[dict]) -> str | None:
-    """The cheapest method (minutes) with 0 < se_C1, se_C2 <= TARGET_SE and z_rms <= Z_MAX
-    (an SE of exactly 0 is degenerate, never a pass; NaN never passes)."""
-    ok = [
-        r
-        for r in rows
-        if 0 < r["se_C1"] <= TARGET_SE and 0 < r["se_C2"] <= TARGET_SE and r["z_rms"] <= Z_MAX
-    ]
+    """The cheapest method (minutes) that passes."""
+    ok = [r for r in rows if passes(r)]
     return min(ok, key=lambda r: r["minutes"])["method"] if ok else None
+
+
+def run_name(k: int | None) -> str:
+    return "full" if k is None else f"k{k}"
+
+
+def _method_runs():
+    yield "whole", None
+    for k in KS:
+        yield f"k{k}", k
+
+
+def _measure(run_dir: Path, k: int | None, col: str) -> tuple[float, float, int]:
+    if k is None:
+        return whole_season(pd.read_parquet(run_dir / "paired.parquet"), col)
+    return per_decision(pd.read_parquet(run_dir / "per_decision.parquet"), k, col)
+
+
+def method_rows(out: Path) -> list[dict]:
+    """One row per method: C1 and C2 mean / SE / n per season, placebo z RMS (plus z sd, mean z
+    and count as diagnostics), C2's season-clustered SE (diagnostic), minutes (C1 + C2 runs)."""
+    times_path = out / "times.json"
+    times = json.loads(times_path.read_text()) if times_path.exists() else {}
+    placebos = [c for c in comparisons() if c.startswith("P")]
+    rows = []
+    for name, k in _method_runs():
+        for score, col in SCORES.items():
+            row = {"method": f"{name}/{score}"}
+            for cid in ("C1", "C2"):
+                mean, se, n = _measure(out / cid / run_name(k), k, col)
+                row |= {f"mean_{cid}": mean, f"se_{cid}": se, f"n_{cid}": n}
+            src = "paired.parquet" if k is None else "per_decision.parquet"
+            row["se_C2_season_clustered"] = season_clustered_se(
+                pd.read_parquet(out / "C2" / run_name(k) / src), k, col
+            )
+            pairs = [_measure(out / p / run_name(k), k, col)[:2] for p in placebos]
+            zs = _zs(pairs)
+            row["z_rms"] = z_rms(pairs)
+            row["z_sd"] = z_sd(pairs)
+            row["z_mean"] = sum(zs) / len(zs) if zs else float("nan")
+            row["z_count"] = z_count(pairs)
+            row["minutes"] = (
+                sum(times.get(f"{c}/{run_name(k)}", float("nan")) for c in ("C1", "C2")) / 60
+            )
+            row["pass"] = passes(row)
+            rows.append(row)
+    return rows
+
+
+def cmd_run(args) -> int:
+    out: Path = args.out
+    out.mkdir(parents=True, exist_ok=True)
+    times_path = out / "times.json"
+    times = json.loads(times_path.read_text()) if times_path.exists() else {}
+    only = set(args.only.split(",")) if args.only else None
+    for cid, comp in comparisons().items():
+        if only and cid not in only:
+            continue
+        for k in (None, *KS):
+            run_dir = out / cid / run_name(k)
+            if (run_dir / "summary.json").exists():
+                continue
+            cmd = compare_cmd(args.binary, comp, k, run_dir, args.jobs, args.experiments)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            t0 = time.monotonic()
+            with (run_dir / "compare.log").open("w", encoding="utf-8") as log:
+                r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT)
+            if r.returncode != 0:
+                print(f"{cid}/{run_name(k)} failed ({r.returncode}); see {run_dir / 'compare.log'}")
+                return r.returncode
+            times[f"{cid}/{run_name(k)}"] = time.monotonic() - t0
+            times_path.write_text(json.dumps(times, indent=2))
+            print(f"{cid}/{run_name(k)}: {times[f'{cid}/{run_name(k)}'] / 60:.1f} min", flush=True)
+    return 0
+
+
+def cmd_report(args) -> int:
+    rows = method_rows(args.out)
+    chosen = choose(rows)
+    payload = {
+        "target_se": TARGET_SE,
+        "z_max": Z_MAX,
+        "n_placebo": N_PLACEBO,
+        "sigma": SIGMA,
+        "starts": STARTS,
+        "methods": rows,
+        "chosen": chosen,
+    }
+    (args.out / "noise.json").write_text(json.dumps(payload, indent=2))
+    head = f"{'method':<14} {'C1 mean':>8} {'C1 se':>6} {'C2 mean':>8} {'C2 se':>6} {'C2 se/s':>7}"
+    print(head + f" {'z rms':>5} {'z sd':>5} {'z mean':>6} {'z n':>3} {'min':>6} pass")
+    for r in rows:
+        print(
+            f"{r['method']:<14} {r['mean_C1']:>8.1f} {r['se_C1']:>6.2f} {r['mean_C2']:>8.1f} "
+            f"{r['se_C2']:>6.2f} {r['se_C2_season_clustered']:>7.2f} {r['z_rms']:>5.2f} "
+            f"{r['z_sd']:>5.2f} {r['z_mean']:>6.2f} {r['z_count']:>3d} {r['minutes']:>6.1f} "
+            f"{'yes' if r['pass'] else 'no'}"
+        )
+    print(f"chosen: {chosen}")
+    return 0
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run")
+    r.add_argument("--out", type=Path, required=True)
+    r.add_argument("--binary", type=Path, default=Path("target/release/fplopt-rs"))
+    r.add_argument("--jobs", type=int, default=14)
+    r.add_argument("--experiments", type=Path, default=Path("results/experiments.csv"))
+    r.add_argument("--only", help="comma-separated comparison ids, e.g. C1,P3")
+    p = sub.add_parser("report")
+    p.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+    raise SystemExit(cmd_run(args) if args.cmd == "run" else cmd_report(args))
+
+
+if __name__ == "__main__":
+    main()

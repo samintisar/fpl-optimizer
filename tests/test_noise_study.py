@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import math
 import sys
 from pathlib import Path
@@ -147,3 +148,55 @@ def test_choose():
     assert ns.choose([_row("nanse", float("nan"), 4.0, 1.0, 5)]) is None
     assert ns.choose([_row("zero", 0.0, 4.0, 1.0, 5)]) is None
     assert ns.choose([_row("zero2", 4.0, 0.0, 1.0, 5)]) is None
+
+
+def _write_run(d: Path, k, diff_a: float):
+    d.mkdir(parents=True)
+    (d / "summary.json").write_text("{}")
+    paired = pd.DataFrame(
+        {
+            "season": 2022,
+            "start_id": ["s0"] * 8 + ["s1"] * 8,
+            "gw_index": list(range(1, 9)) * 2,
+            "diff": [diff_a, -diff_a] * 8,
+            "diff_xg": [diff_a / 2, -diff_a / 2] * 8,
+        }
+    )
+    paired.to_parquet(d / "paired.parquet")
+    if k is not None:
+        dec = pd.DataFrame(
+            {
+                "season": 2022,
+                "start_id": ["s0", "s1"] * 3,
+                "gw_index": [1, 1, 1 + k, 1 + k, 1 + 2 * k, 1 + 2 * k],
+                "diff": [1.0, 2.0, 3.0, 1.0, 0.0, 2.0],
+                "diff_xg": [1.0, 2.0, 3.0, 1.0, 0.0, 2.0],
+            }
+        )
+        dec.to_parquet(d / "per_decision.parquet")
+
+
+def test_method_rows(tmp_path):
+    times = {}
+    for cid in ns.comparisons():
+        for k in (None, *ns.KS):
+            _write_run(tmp_path / cid / ns.run_name(k), k, 1.0)
+            times[f"{cid}/{ns.run_name(k)}"] = 60.0
+    (tmp_path / "times.json").write_text(json.dumps(times))
+    rows = ns.method_rows(tmp_path)
+    assert [r["method"] for r in rows] == [
+        "whole/realized",
+        "whole/xg",
+        "k1/realized",
+        "k1/xg",
+        "k2/realized",
+        "k2/xg",
+        "k4/realized",
+        "k4/xg",
+    ]
+    k2 = rows[4]
+    # windows at gw_index 1, 3, 5 of one season: window means 1.5, 2, 1; scale 3 windows a season
+    assert k2["n_C1"] == 3 and k2["mean_C1"] == pytest.approx(1.5 * 3)
+    assert k2["minutes"] == pytest.approx(2.0)  # C1 + C2 run times, 60 s each
+    assert k2["z_count"] == 10 and k2["z_rms"] > 0
+    assert k2["pass"] == ns.passes(k2)
