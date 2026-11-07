@@ -60,19 +60,27 @@ pub fn refuse_holdout(seasons: &[i64]) -> Result<()> {
     Ok(())
 }
 
-/// The view's gameweeks: (season, gw_index) → (gw, deadline). A (season, gw) listed more than
-/// once takes its newest visible row.
+/// The view's gameweeks: (season, gw_index) → (gw, deadline). A (season, gw_index) listed
+/// more than once takes its newest visible row (largest `available_at`; on a tie, the later
+/// row in table order).
 fn calendar(view: &AsOfView) -> Result<HashMap<(i64, i64), (i64, Option<Micros>)>> {
-    let t = view.table("gameweek", Some(&["season", "gw", "gw_index", "deadline_time"]))?;
+    let t = view
+        .table("gameweek", Some(&["season", "gw", "gw_index", "deadline_time", "available_at"]))?;
     let (seasons, gws, indices) = (t.opt_i64("season")?, t.opt_i64("gw")?, t.opt_i64("gw_index")?);
-    let deadlines = t.opt_i64("deadline_time")?;
-    let mut out = HashMap::new();
+    let (deadlines, available) = (t.opt_i64("deadline_time")?, t.opt_i64("available_at")?);
+    let mut newest: HashMap<(i64, i64), (Option<Micros>, i64, Option<Micros>)> = HashMap::new();
     for i in 0..t.height() {
         if let (Some(season), Some(gw), Some(index)) = (seasons[i], gws[i], indices[i]) {
-            out.insert((season, index), (gw, deadlines[i]));
+            let row = (available[i], gw, deadlines[i]);
+            match newest.get(&(season, index)) {
+                Some(kept) if kept.0 > row.0 => {}
+                _ => {
+                    newest.insert((season, index), row);
+                }
+            }
         }
     }
-    Ok(out)
+    Ok(newest.into_iter().map(|(k, (_, gw, d))| (k, (gw, d))).collect())
 }
 
 /// Deadline prices (`player_gw.value`, tenths of £m) visible in the view: (season, gw,
@@ -707,6 +715,25 @@ mod tests {
         assert_eq!(n1.f64("dp").unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let (_, n1) = baseline_changes(&store.as_of(d[0]), &[1]).unwrap();
         assert!(n1.f64("dp").unwrap().iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn calendar_takes_the_newest_visible_row() {
+        // gw_index 1 listed twice, the newer row (a moved deadline) first in table order.
+        let gameweek = Table::new()
+            .with("season", Column::I64(vec![2021, 2021, 2021]))
+            .with("gw", Column::I64(vec![1, 1, 2]))
+            .with("gw_index", Column::I64(vec![1, 1, 2]))
+            .with("deadline_time", Column::Ts(vec![aug(14, 10, 0), aug(13, 17, 30), aug(21, 0, 0)]))
+            .with("available_at", Column::Ts(vec![2 * DAY, DAY, 0]));
+        let store =
+            DataStore::from_tables(HashMap::from([("gameweek".to_string(), gameweek)])).unwrap();
+        let newest = calendar(&store.as_of(aug(1, 0, 0))).unwrap();
+        assert_eq!(newest[&(2021, 1)], (1, Some(aug(14, 10, 0))));
+        assert_eq!(newest[&(2021, 2)], (2, Some(aug(21, 0, 0))));
+        // Before the newer row is visible, the older one is kept.
+        let older = calendar(&store.as_of(DAY + DAY / 2)).unwrap();
+        assert_eq!(older[&(2021, 1)], (1, Some(aug(13, 17, 30))));
     }
 
     #[test]

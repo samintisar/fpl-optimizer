@@ -19,7 +19,7 @@ use fplopt_backtest::simulator::Caches;
 use fplopt_backtest::specs::parse_policy_spec;
 use fplopt_backtest::xp_cache;
 use fplopt_build::table::write_parquet;
-use fplopt_core::experiments::{family_variants, log_experiment};
+use fplopt_core::experiments::{family_variants, log_experiment, read_experiments};
 use fplopt_core::pyjson::{Ordered, dumps_indent};
 use fplopt_core::seasons::{HOLDOUT_SEASONS, season_label};
 use fplopt_core::settings::Settings;
@@ -55,15 +55,111 @@ pub struct PriceEvalArgs {
     /// Threads over seasons (default: CPUs - 1); results equal --jobs 1.
     #[arg(long, default_value_t = default_jobs())]
     pub jobs: usize,
-    /// Experiment-log family (default 'price forecast').
+    /// Experiment-log family (default 'price forecast'; 'price forecast gate b' is the gate's
+    /// run: once, from a clean checkout at the tag `price-forecast-gate-b`).
     #[arg(long)]
     pub family: Option<String>,
     #[arg(long, default_value = "results/experiments.csv")]
     pub experiments: PathBuf,
+    /// The data directory (default FPLOPT_DATA_DIR or data).
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
     #[arg(long)]
     pub out: PathBuf,
     #[command(flatten)]
     pub xp_cache: XpCacheArgs,
+}
+
+/// The snapshot features start in 2021/22: an earlier fit would train on all-NaN snapshots.
+pub const FIRST_FIT_MIN: i64 = 2021;
+/// The family of Gate B's run, which may run once (`gate_refusal`).
+pub const GATE_FAMILY: &str = "price forecast gate b";
+/// The tag of the commit Gate B's run is made from.
+pub const GATE_TAG: &str = "price-forecast-gate-b";
+/// Changes `git status` may show in a gate run's checkout (the log it appends to).
+const LOG_FILES: [&str; 1] = ["results/experiments.csv"];
+
+/// The code checkout as git sees it, for Gate B's refusals.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Checkout {
+    /// `git status --porcelain` lines, without `LOG_FILES` (empty: clean).
+    pub dirty: Vec<String>,
+    /// `git rev-parse HEAD`.
+    pub head: String,
+    /// The commit `GATE_TAG` points at, if the tag exists.
+    pub tag: Option<String>,
+    /// The commit this binary was built from (`experiments::GIT_SHA`).
+    pub built: String,
+}
+
+/// Why a `GATE_FAMILY` run must not run (None: it may; other families are never refused):
+/// the log already holds a row of the family, the checkout is dirty, HEAD isn't the tagged
+/// commit, or the binary wasn't built from HEAD.
+pub fn gate_refusal(
+    family: &str,
+    log: &[Vec<(String, String)>],
+    checkout: &Checkout,
+) -> Option<String> {
+    if family != GATE_FAMILY {
+        return None;
+    }
+    if log.iter().any(|row| row.iter().any(|(k, v)| k == "family" && v == family)) {
+        return Some(format!("the experiment log already holds a '{family}' run; it runs once"));
+    }
+    if !checkout.dirty.is_empty() {
+        return Some(format!(
+            "the checkout has uncommitted changes ({}); the gate runs from a clean checkout",
+            checkout.dirty.join("; ")
+        ));
+    }
+    match &checkout.tag {
+        None => return Some(format!("no tag {GATE_TAG} (git fetch --tags?)")),
+        Some(tag) if *tag != checkout.head => {
+            return Some(format!(
+                "HEAD {} is not the commit tagged {GATE_TAG} ({tag})",
+                checkout.head
+            ));
+        }
+        Some(_) => {}
+    }
+    if checkout.built != checkout.head {
+        return Some(format!(
+            "this binary was built from {}, not HEAD {} (rebuild)",
+            checkout.built, checkout.head
+        ));
+    }
+    None
+}
+
+fn git(root: &std::path::Path, args: &[&str]) -> Result<(bool, String)> {
+    let out = std::process::Command::new("git").args(args).current_dir(root).output();
+    match out {
+        Ok(o) => Ok((o.status.success(), String::from_utf8_lossy(&o.stdout).into_owned())),
+        Err(e) => usage(format!("can't check the checkout at {} with git: {e}", root.display())),
+    }
+}
+
+/// The checkout this binary's source lives in (the workspace root), as git sees it.
+fn checkout() -> Result<Checkout> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let (ok, status) = git(&root, &["status", "--porcelain", "--untracked-files=normal"])?;
+    let (ok_head, head) = git(&root, &["rev-parse", "HEAD"])?;
+    if !ok || !ok_head {
+        return usage(format!("can't check the checkout at {} with git", root.display()));
+    }
+    let dirty = status
+        .lines()
+        .filter(|l| !LOG_FILES.contains(&l.get(3..).unwrap_or("").trim()))
+        .map(str::to_owned)
+        .collect();
+    let (has_tag, tag) =
+        git(&root, &["rev-parse", "--verify", "--quiet", &format!("{GATE_TAG}^{{commit}}")])?;
+    Ok(Checkout {
+        dirty,
+        head: head.trim().to_owned(),
+        tag: has_tag.then(|| tag.trim().to_owned()),
+        built: fplopt_core::experiments::GIT_SHA.to_owned(),
+    })
 }
 
 #[derive(Args, Debug)]
@@ -190,12 +286,26 @@ fn price_eval(args: &PriceEvalArgs) -> Result<()> {
         Ok(p) => p,
         Err(e) => return usage(format!("argument --params: {e}")),
     };
+    if args.first_fit < FIRST_FIT_MIN {
+        return usage(format!(
+            "argument --first-fit: {} or later (the snapshot features start in {}; an earlier \
+             fit would train on all-NaN snapshot features)",
+            FIRST_FIT_MIN,
+            season_label(FIRST_FIT_MIN as i32)
+        ));
+    }
     if let Err(e) = check_seasons(&seasons, args.first_fit) {
         return usage(format!("argument --seasons: {e}"));
     }
     let family = args.family.clone().unwrap_or_else(|| "price forecast".to_owned());
-    let settings = Settings::from_env();
-    let store = match DataStore::open(&settings.data_dir) {
+    if family == GATE_FAMILY {
+        let log = read_experiments(&args.experiments)?;
+        if let Some(reason) = gate_refusal(&family, &log, &checkout()?) {
+            return usage(format!("refusing the gate run: {reason}"));
+        }
+    }
+    let data_dir = args.data_dir.clone().unwrap_or_else(|| Settings::from_env().data_dir);
+    let store = match DataStore::open(&data_dir) {
         Ok(s) => s,
         Err(e) => return usage(format!("{e:#}")),
     };
@@ -211,7 +321,7 @@ fn price_eval(args: &PriceEvalArgs) -> Result<()> {
             missing.join(", ")
         ));
     }
-    let caches = args.xp_cache.caches()?;
+    let caches = args.xp_cache.caches_for(&data_dir)?;
     let began = std::time::Instant::now();
     let PriceEval { rows, metrics, timings } =
         evaluate_prices(&store, &caches, &seasons, args.first_fit, &params, args.jobs)?;
@@ -241,6 +351,15 @@ fn price_eval(args: &PriceEvalArgs) -> Result<()> {
         pair("metrics", metrics.clone()),
     ]);
     write_json(&args.out.join("metrics.json"), &payload)?;
+    // Logged before any result reaches stdout, so a run can't be seen and then not logged.
+    log_experiment(
+        &args.experiments,
+        &command,
+        &config.to_value(),
+        &metrics.to_value(),
+        n_variants,
+        &family,
+    )?;
     let (mse, dm) = price_tables(&metrics);
     println!(
         "price eval: {} ({}), fitted from {}; {} deadline(s), {} row(s), {} with a realized \
@@ -255,14 +374,7 @@ fn price_eval(args: &PriceEvalArgs) -> Result<()> {
         text(get(&metrics, "n_scored")),
         args.out.display()
     );
-    log_experiment(
-        &args.experiments,
-        &command,
-        &config.to_value(),
-        &metrics.to_value(),
-        n_variants,
-        &family,
-    )
+    Ok(())
 }
 
 fn money_value(args: &MoneyValueArgs) -> Result<()> {
@@ -428,6 +540,62 @@ mod tests {
         assert!(
             Cli::try_parse_from(["x", "price-eval", "--seasons", "2022", "--out", "o"]).is_err()
         );
+        assert!(d.data_dir.is_none());
+    }
+
+    fn log_row(family: &str) -> Vec<(String, String)> {
+        vec![("command".to_owned(), "c".to_owned()), ("family".to_owned(), family.to_owned())]
+    }
+
+    fn clean() -> Checkout {
+        Checkout { dirty: vec![], head: "abc".into(), tag: Some("abc".into()), built: "abc".into() }
+    }
+
+    #[test]
+    fn gate_runs_once_from_the_tagged_clean_build() {
+        let other = vec![log_row("price forecast"), log_row("price forecast develop")];
+        assert_eq!(gate_refusal(GATE_FAMILY, &other, &clean()), None);
+        // Already logged.
+        let once = vec![log_row("price forecast"), log_row(GATE_FAMILY)];
+        let r = gate_refusal(GATE_FAMILY, &once, &clean()).unwrap();
+        assert!(r.contains("already"), "{r}");
+        // Dirty checkout.
+        let dirty = Checkout { dirty: vec![" M src/x.rs".into()], ..clean() };
+        let r = gate_refusal(GATE_FAMILY, &other, &dirty).unwrap();
+        assert!(r.contains("uncommitted") && r.contains("src/x.rs"), "{r}");
+        // HEAD not the tagged commit, or no tag at all.
+        let moved = Checkout { head: "def".into(), built: "def".into(), ..clean() };
+        let r = gate_refusal(GATE_FAMILY, &other, &moved).unwrap();
+        assert!(r.contains("not the commit tagged") && r.contains(GATE_TAG), "{r}");
+        let untagged = Checkout { tag: None, ..clean() };
+        assert!(gate_refusal(GATE_FAMILY, &other, &untagged).unwrap().contains("no tag"));
+        // A binary built from another commit.
+        let stale = Checkout { built: "old".into(), ..clean() };
+        assert!(gate_refusal(GATE_FAMILY, &other, &stale).unwrap().contains("rebuild"));
+        // Other families are never refused, whatever the checkout and log.
+        let worst = Checkout { dirty: vec!["?? a".into()], tag: None, ..moved };
+        assert_eq!(gate_refusal("price forecast", &once, &worst), None);
+    }
+
+    #[test]
+    fn first_fit_before_the_snapshots_is_a_usage_error() {
+        let cli = Cli::try_parse_from([
+            "x",
+            "price-eval",
+            "--seasons",
+            "2022",
+            "--params",
+            "p1",
+            "--first-fit",
+            "2020",
+            "--out",
+            "o",
+        ])
+        .unwrap();
+        let ResearchJob::PriceEval(a) = cli.job else { panic!("not price-eval") };
+        let err = price_eval(&a).unwrap_err();
+        let usage = err.downcast_ref::<crate::optimize_plan::Usage>().expect("a usage error");
+        assert!(usage.to_string().contains("2021"), "{usage}");
     }
 
     #[test]

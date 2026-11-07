@@ -86,11 +86,15 @@ pub struct XpCacheArgs {
 
 impl XpCacheArgs {
     pub fn caches(&self) -> Result<Caches> {
+        self.caches_for(&Settings::from_env().data_dir)
+    }
+
+    /// The caches for xP frames built from `data_dir` (the disk cache is keyed by it).
+    pub fn caches_for(&self, data_dir: &Path) -> Result<Caches> {
         if self.no_xp_cache {
             return Ok(Caches::default());
         }
-        let disk = xp_cache::DiskCache::open(&self.xp_cache, &Settings::from_env().data_dir)?;
-        Ok(Caches::with_disk(disk))
+        Ok(Caches::with_disk(xp_cache::DiskCache::open(&self.xp_cache, data_dir)?))
     }
 }
 
