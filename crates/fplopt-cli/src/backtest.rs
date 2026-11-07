@@ -35,7 +35,7 @@ const CI_LEVEL: f64 = 0.8;
 const EP_NEXT_FIRST_SEASON: i64 = 2021;
 const EP_NEXT_MODELS: [&str; 2] = ["ep_next", "ep_next_fade"];
 
-fn default_jobs() -> usize {
+pub(crate) fn default_jobs() -> usize {
     std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).max(1)
 }
 
@@ -52,7 +52,8 @@ pub struct Common {
     /// Start years: 2016-2024, 2021,2023, 2021-22 or a mix (the holdout is refused).
     #[arg(long)]
     pub seasons: String,
-    /// Start states.
+    /// Start states: template@G, random[:N]@G, squad:FILE@G; any kind takes `+bank<n>` before the
+    /// `@` (n tenths of £m added to the bank, e.g. template+bank10@1; Rust only).
     #[arg(long, default_value = DEFAULT_STARTS)]
     pub starts: String,
     /// Output directory (default results/<UTC time>-<command>).
@@ -85,11 +86,15 @@ pub struct XpCacheArgs {
 
 impl XpCacheArgs {
     pub fn caches(&self) -> Result<Caches> {
+        self.caches_for(&Settings::from_env().data_dir)
+    }
+
+    /// The caches for xP frames built from `data_dir` (the disk cache is keyed by it).
+    pub fn caches_for(&self, data_dir: &Path) -> Result<Caches> {
         if self.no_xp_cache {
             return Ok(Caches::default());
         }
-        let disk = xp_cache::DiskCache::open(&self.xp_cache, &Settings::from_env().data_dir)?;
-        Ok(Caches::with_disk(disk))
+        Ok(Caches::with_disk(xp_cache::DiskCache::open(&self.xp_cache, data_dir)?))
     }
 }
 
@@ -322,6 +327,7 @@ fn grid_table(results: &[GridRow]) -> Table {
         .with("bank", r(&|g| g.row.bank))
         .with("free_transfers", r(&|g| g.row.free_transfers))
         .with("squad_value", r(&|g| g.row.squad_value))
+        .with("market_value", r(&|g| g.row.market_value))
         .with("transfers", s(&|g| g.row.transfers.clone()))
         .with("autosubs", s(&|g| g.row.autosubs.clone()))
         .with("pred_gain", of(&|g| g.row.pred_gain))
@@ -506,7 +512,7 @@ fn season_totals_by_start(results: &[GridRow], specs: &[StartSpec]) -> Vec<BySta
             let totals = col(|r| r.total);
             let template: Vec<f64> = runs
                 .iter()
-                .filter(|r| r.start_id.starts_with("template"))
+                .filter(|r| r.start_id.starts_with("template") && !r.start_id.contains("+bank"))
                 .map(|r| r.total)
                 .collect();
             let xg = col(|r| r.xg_total);

@@ -22,11 +22,16 @@ use fplopt_optimize::XpFrame;
 use fplopt_optimize::start::{FAR_FUTURE, pool_players};
 use fplopt_store::{AsOfView, DataStore, Micros, Table};
 
+use crate::forecast_prices::{ForecastConfig, ForecastPrices};
 use crate::gw_score::score_gameweek;
+use crate::oracle::FuturePrices;
 use crate::outcomes::{GwOutcomes, read_outcomes};
-use crate::policies::{CHIP_DIAGNOSTICS, DecisionContext, Policy, best_lineup};
+use crate::policies::{
+    CHIP_DIAGNOSTICS, DecisionContext, Policy, PriceInput, PriceSource, best_lineup,
+};
 use crate::state::{
-    Decision, PoolPlayer, SquadState, apply_decision, next_state, refresh, squad_value,
+    Decision, PoolPlayer, SquadState, apply_decision, market_value, next_state, refresh,
+    squad_value,
 };
 use crate::xp_cache::DiskCache;
 
@@ -69,6 +74,24 @@ pub struct Caches {
     fits: OnceMap<(String, Micros), V1Fit>,
     pools: OnceMap<Micros, Vec<PoolPlayer>>,
     outcomes: OnceMap<(i64, i64, String), GwOutcomes>,
+    future: OnceMap<i64, FuturePrices>,
+    forecast: OnceMap<i64, ForecastPrices>,
+    forecast_config: OnceLock<std::result::Result<ForecastConfig, String>>,
+}
+
+/// A season's price paths' source, as `Caches::prices_for` hands it out.
+pub enum PriceData {
+    Oracle(Arc<FuturePrices>),
+    Forecast(Arc<ForecastPrices>),
+}
+
+impl PriceData {
+    pub fn input(&self) -> PriceInput<'_> {
+        match self {
+            PriceData::Oracle(f) => PriceInput::Oracle(f),
+            PriceData::Forecast(f) => PriceInput::Forecast(f),
+        }
+    }
 }
 
 impl Caches {
@@ -107,6 +130,44 @@ impl Caches {
             let frame = XpFrame::from_table(&table)?;
             Ok(Xp { table, frame })
         })
+    }
+
+    /// The season's price paths' source for `policy` (`Policy::price_source`): None for
+    /// fixed prices; the future deadline prices for `prices=oracle` (read once per season;
+    /// **reads the future: backtest only**); the price forecast for `prices=forecast`
+    /// (`forecast_prices_for`).
+    pub fn prices_for(
+        &self,
+        policy: &Policy,
+        store: &DataStore,
+        season: i64,
+    ) -> Result<Option<PriceData>> {
+        Ok(match policy.price_source() {
+            PriceSource::Fixed => None,
+            PriceSource::Oracle => Some(PriceData::Oracle(
+                self.future.get_or_compute(season, || FuturePrices::load(store, season))?,
+            )),
+            PriceSource::Forecast => {
+                Some(PriceData::Forecast(self.forecast_prices_for(store, season)?))
+            }
+        })
+    }
+
+    /// The season's price forecast, fitted once per season (`ForecastPrices::fit`) with the
+    /// frozen settings of `config/prices/forecast.json` (read once per `Caches`).
+    pub fn forecast_prices_for(
+        &self,
+        store: &DataStore,
+        season: i64,
+    ) -> Result<Arc<ForecastPrices>> {
+        let config = self
+            .forecast_config
+            .get_or_init(|| {
+                ForecastConfig::load(&ForecastConfig::default_path()).map_err(|e| format!("{e:#}"))
+            })
+            .clone()
+            .map_err(|e| anyhow!(e))?;
+        self.forecast.get_or_compute(season, || ForecastPrices::fit(store, self, season, &config))
     }
 
     pub fn outcomes(
@@ -211,6 +272,8 @@ pub struct GwRow {
     pub bank: i64,
     pub free_transfers: i64,
     pub squad_value: i64,
+    /// state::market_value of gw_state (Rust only; dev/backtest_parity.py ignores it).
+    pub market_value: i64,
     pub transfers: String,
     pub autosubs: String,
     pub pred_gain: Option<f64>,
@@ -255,6 +318,7 @@ pub fn decide_step(
         Decider::Policy(policy) => policy,
     };
     let xp = caches.xp(policy.xp_model(), &view)?;
+    let prices = caches.prices_for(policy, store, state.season)?;
     let ctx = DecisionContext {
         view: &view,
         state: &state,
@@ -262,6 +326,7 @@ pub fn decide_step(
         pool: &pool,
         xp: &xp.table,
         frame: &xp.frame,
+        prices: prices.as_ref().map(PriceData::input),
     };
     let decision = policy.decide(&ctx)?;
     Ok(Step { state, pool, decision })
@@ -349,6 +414,7 @@ pub fn play_step(
         bank: gw_state.bank,
         free_transfers: state.free_transfers,
         squad_value: squad_value(&gw_state, rules.sell_on_fee),
+        market_value: market_value(&gw_state),
         transfers: pairs_json(decision.transfers.iter().map(|t| (t.out_key, t.in_key))),
         autosubs: pairs_json(score.autosubs.iter().copied()),
         pred_gain: None,

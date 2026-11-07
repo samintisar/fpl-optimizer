@@ -32,56 +32,73 @@ use crate::stats::{
 // --- start states ---------------------------------------------------------------------------
 
 /// One start state: the template squad, a random squad with `seed`, or a real squad from a
-/// squad file (`squad`; Rust only), at `gw_index`.
+/// squad file (`squad`; Rust only), at `gw_index`, with `extra_bank` tenths of £m added to the
+/// bank (`+bank<n>`; Rust only, for the price sizing study).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartSpec {
     pub random: bool,
     pub gw_index: i64,
     pub seed: u64,
     pub squad: Option<PathBuf>,
+    pub extra_bank: i64,
+}
+
+/// The start state with `extra` tenths of £m more in the bank (nothing else changes).
+fn with_extra_bank(mut state: SquadState, extra: i64) -> SquadState {
+    state.bank += extra;
+    state
 }
 
 impl StartSpec {
     pub fn start_id(&self, gw_index: Option<i64>) -> String {
         let gw = gw_index.unwrap_or(self.gw_index);
+        let bank =
+            if self.extra_bank > 0 { format!("+bank{}", self.extra_bank) } else { String::new() };
         if let Some(path) = &self.squad {
             let stem = path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
-            return format!("squad:{stem}@{gw}");
+            return format!("squad:{stem}{bank}@{gw}");
         }
-        if self.random { format!("random{}@{gw}", self.seed) } else { format!("template@{gw}") }
+        if self.random {
+            format!("random{}{bank}@{gw}", self.seed)
+        } else {
+            format!("template{bank}@{gw}")
+        }
     }
 
-    fn build(
+    pub(crate) fn build(
         &self,
         store: &DataStore,
         season: i64,
         gw_index: i64,
         rules: &Rules,
     ) -> Result<SquadState> {
-        if let Some(path) = &self.squad {
-            return squad_file_state(store, season, gw_index, path, rules);
-        }
-        let deadline = season_schedule(store, season, gw_index)?[0].deadline;
-        let view = store.as_of(deadline);
-        if self.random {
-            random_state(&view, rules, self.seed, Some(MAX_BANK))
+        let state = if let Some(path) = &self.squad {
+            squad_file_state(store, season, gw_index, path, rules)?
         } else {
-            template_state(&view, rules)
-        }
+            let deadline = season_schedule(store, season, gw_index)?[0].deadline;
+            let view = store.as_of(deadline);
+            if self.random {
+                random_state(&view, rules, self.seed, Some(MAX_BANK))?
+            } else {
+                template_state(&view, rules)?
+            }
+        };
+        Ok(with_extra_bank(state, self.extra_bank))
     }
 }
 
 /// `"template@1,random:5@1,random:3@20"` -> the template at gw_index 1, random seeds 0-4 at
 /// 1 and seeds 0-2 at 20 (`random@g` = seed 0); `squad:FILE@g`: the squad file's squad at g
 /// (Rust only; at gw_index 1 every squad may be rebuilt for free, so a real GW1 squad starts
-/// at 2). Duplicates raise.
+/// at 2). Any kind takes `+bank<n>` before the `@`: `template+bank10@1` is the template at 1
+/// with £1.0m more in the bank (Rust only). Duplicates raise.
 pub fn parse_start_specs(text: &str) -> Result<Vec<StartSpec>> {
     let mut specs = Vec::new();
     for item in text.split(',').map(str::trim) {
         let bad = || {
             anyhow::anyhow!(
-                "bad start spec '{item}': expected template@<gw>, random@<gw>, random:<n>@<gw> \
-                 or squad:<file>@<gw>"
+                "bad start spec '{item}': expected template@<gw>, random@<gw>, random:<n>@<gw> or \
+                 squad:<file>@<gw>, each optionally with +bank<n> before the @"
             )
         };
         let (kind, gw) = item.rsplit_once('@').ok_or_else(bad)?;
@@ -92,14 +109,25 @@ pub fn parse_start_specs(text: &str) -> Result<Vec<StartSpec>> {
         if gw_index < 1 {
             bail!("bad start spec '{item}': gw_index must be >= 1");
         }
+        let (kind, extra_bank) = match kind.rsplit_once("+bank") {
+            None => (kind, 0),
+            Some((base, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+                let n: i64 = n.parse()?;
+                if n < 1 {
+                    bail!("bad start spec '{item}': +bank<n> needs n >= 1 (tenths of £m)");
+                }
+                (base, n)
+            }
+            Some(_) => return Err(bad()),
+        };
         if let Some(path) = kind.strip_prefix("squad:") {
             if path.is_empty() {
                 return Err(bad());
             }
             let squad = Some(PathBuf::from(path));
-            specs.push(StartSpec { random: false, gw_index, seed: 0, squad });
+            specs.push(StartSpec { random: false, gw_index, seed: 0, squad, extra_bank });
         } else if kind == "template" {
-            specs.push(StartSpec { random: false, gw_index, seed: 0, squad: None });
+            specs.push(StartSpec { random: false, gw_index, seed: 0, squad: None, extra_bank });
         } else if kind == "random" || kind.starts_with("random:") {
             let n: u64 = match kind.strip_prefix("random:") {
                 None => 1,
@@ -114,6 +142,7 @@ pub fn parse_start_specs(text: &str) -> Result<Vec<StartSpec>> {
                 gw_index,
                 seed,
                 squad: None,
+                extra_bank,
             }));
         } else {
             return Err(bad());
@@ -132,7 +161,7 @@ pub fn parse_start_specs(text: &str) -> Result<Vec<StartSpec>> {
     Ok(specs)
 }
 
-fn refused(err: &anyhow::Error) -> bool {
+pub(crate) fn refused(err: &anyhow::Error) -> bool {
     err.downcast_ref::<StartStateError>().is_some()
 }
 
@@ -247,7 +276,7 @@ pub fn run_units<T: Send>(
     Ok(out)
 }
 
-fn refuse_holdout(seasons: &[i64]) -> Result<()> {
+pub(crate) fn refuse_holdout(seasons: &[i64]) -> Result<()> {
     let holdout: Vec<String> = seasons
         .iter()
         .filter(|s| HOLDOUT_SEASONS.contains(&(**s as i32)))
@@ -1064,5 +1093,45 @@ mod tests {
         assert!(parse_start_specs("squad:@2").is_err());
         assert!(parse_start_specs("squad:a.toml").is_err());
         assert!(parse_start_specs("template@1,template@1").is_err());
+    }
+
+    #[test]
+    fn bank_modifier_parses_and_labels() {
+        let specs =
+            parse_start_specs("template+bank10@1,random:2+bank5@20,squad:dir/t.toml+bank10@2")
+                .unwrap();
+        let ids: Vec<String> = specs.iter().map(|s| s.start_id(None)).collect();
+        assert_eq!(
+            ids,
+            ["template+bank10@1", "random0+bank5@20", "random1+bank5@20", "squad:t+bank10@2"]
+        );
+        assert_eq!(specs[0].extra_bank, 10);
+        assert_eq!(specs[1].extra_bank, 5);
+        assert!(parse_start_specs("template+bank@1").is_err());
+        assert!(parse_start_specs("template+bank0@1").is_err());
+        assert!(parse_start_specs("template+bankx@1").is_err());
+        // a base start and its modified twin may run together
+        assert!(parse_start_specs("template@1,template+bank10@1").is_ok());
+        // no modifier: extra_bank 0, ids unchanged
+        let plain = parse_start_specs("template@1").unwrap();
+        assert_eq!(plain[0].extra_bank, 0);
+        assert_eq!(plain[0].start_id(None), "template@1");
+    }
+
+    #[test]
+    fn extra_bank_adds_to_the_bank_only() {
+        let state = SquadState {
+            season: 2020,
+            gw_index: 1,
+            holdings: Vec::new(),
+            bank: 7,
+            free_transfers: 1,
+            chips_used: Vec::new(),
+            freehit_backup: None,
+            freehit_bank: None,
+        };
+        let more = with_extra_bank(state.clone(), 10);
+        assert_eq!(more.bank, 17);
+        assert_eq!(SquadState { bank: 7, ..more }, state);
     }
 }

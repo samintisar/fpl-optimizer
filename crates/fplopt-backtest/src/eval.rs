@@ -154,7 +154,7 @@ fn gw_totals(
 
 /// Sorted player_keys in the union over the frames of each one's top `DEFAULT_PRUNE_N` pool
 /// players per position by horizon-summed xP (ties: smaller key first).
-fn candidate_keys(
+pub(crate) fn candidate_keys(
     frames: &[&crate::simulator::Xp],
     positions: &HashMap<i64, i64>,
 ) -> BTreeSet<i64> {
@@ -512,7 +512,7 @@ fn splits() -> [(&'static str, Option<Vec<i64>>); 3] {
     ]
 }
 
-fn split_parts<'a, T>(
+pub(crate) fn split_parts<'a, T>(
     rows: &[&'a T],
     season: impl Fn(&T) -> i64,
 ) -> Vec<(&'static str, Vec<&'a T>)> {
@@ -850,7 +850,10 @@ fn component_metrics(
 
 /// One-sided Diebold-Mariano test on paired losses clustered by deadline (Harvey-Leybourne-
 /// Newbold corrected, Student t on G − 1 df).
-fn diebold_mariano(loss: &[(Micros, f64, f64)], lag: usize) -> Vec<(&'static str, Ordered)> {
+pub(crate) fn diebold_mariano(
+    loss: &[(Micros, f64, f64)],
+    lag: usize,
+) -> Vec<(&'static str, Ordered)> {
     let mut clusters: BTreeMap<Micros, (f64, f64, usize)> = BTreeMap::new();
     for (d, a, b) in loss {
         let e = clusters.entry(*d).or_insert((0.0, 0.0, 0));

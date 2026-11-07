@@ -25,11 +25,13 @@ use fplopt_optimize::chips::make_scenario;
 use fplopt_optimize::model::{SolveError, solve_plan};
 use fplopt_optimize::plans::{GwPlan, Plan};
 use fplopt_optimize::state::best_xi;
-use fplopt_optimize::{OptimizerParams, PlanInput, Search, XpFrame, optimize, py_sum};
+use fplopt_optimize::{OptimizerParams, PlanInput, PlanSet, Search, XpFrame, optimize, py_sum};
 use fplopt_store::{AsOfView, Table};
 use sha1::{Digest, Sha1};
 
+use crate::forecast_prices::ForecastPrices;
 use crate::gw_score::Lineup;
+use crate::oracle::FuturePrices;
 use crate::state::{
     Decision, GOALKEEPER, PoolPlayer, SquadState, Transfer, chip_available, chip_window, refresh,
     selling_price,
@@ -49,6 +51,17 @@ pub struct DecisionContext<'a> {
     pub pool: &'a [PoolPlayer],
     pub xp: &'a Table,
     pub frame: &'a XpFrame,
+    /// The price paths' source for a policy that plans on moving prices
+    /// (`Policy::price_source`), set only by the backtester's decision paths.
+    pub prices: Option<PriceInput<'a>>,
+}
+
+/// What a non-fixed `PriceSource` plans on: the season's future deadline prices
+/// (`prices=oracle`) or its fitted price forecast (`prices=forecast`).
+#[derive(Clone, Copy)]
+pub enum PriceInput<'a> {
+    Oracle(&'a FuturePrices),
+    Forecast(&'a ForecastPrices),
 }
 
 // --- xP helpers ---------------------------------------------------------------------------
@@ -248,6 +261,29 @@ pub struct ChipPolicy2 {
     pub tc_rule: Option<f64>,
 }
 
+/// Where the optimizer's candidate prices come from: `Fixed` (today's prices over the whole
+/// horizon, the default), `Oracle` (the real deadline prices of the horizon's GWs, read
+/// from the future: a backtest-only foresight bound, `crate::oracle`) or `Forecast` (the
+/// price forecast's expected paths, `crate::forecast_prices`; v1 xP only).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PriceSource {
+    #[default]
+    Fixed,
+    Oracle,
+    Forecast,
+}
+
+impl PriceSource {
+    /// The `prices=` value.
+    pub fn label(self) -> &'static str {
+        match self {
+            PriceSource::Fixed => "fixed",
+            PriceSource::Oracle => "oracle",
+            PriceSource::Forecast => "forecast",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Policy {
     Roll {
@@ -265,6 +301,9 @@ pub enum Policy {
         params: OptimizerParams,
         chips: bool,
         extra: ChipPolicy2,
+        prices: PriceSource,
+        /// The noise study's placebo wobble on xP (`crate::jitter`); None for every real policy.
+        jitter: Option<crate::jitter::XpJitter>,
     },
     ChipGains {
         xp_model: String,
@@ -309,8 +348,14 @@ impl Policy {
                 }
                 Ok(())
             }
-            Policy::Optimizer { xp_model, params, chips, extra } => {
+            Policy::Optimizer { xp_model, params, chips, extra, prices, .. } => {
                 check_model(xp_model)?;
+                if *prices == PriceSource::Forecast && xp_model != crate::price_eval::XP_MODEL {
+                    bail!(
+                        "prices=forecast with {xp_model} xP: the price forecast uses {} xP",
+                        crate::price_eval::XP_MODEL
+                    );
+                }
                 params.validate()?;
                 check_horizon(params.horizon)?;
                 if extra.tc_rule.is_some()
@@ -350,6 +395,15 @@ impl Policy {
         }
     }
 
+    /// Where deciding takes candidate prices from (`DecisionContext::prices` for a source
+    /// other than `Fixed`); `Fixed` for every policy but the optimizer.
+    pub fn price_source(&self) -> PriceSource {
+        match self {
+            Policy::Optimizer { prices, .. } => *prices,
+            _ => PriceSource::Fixed,
+        }
+    }
+
     /// Python's policy names (the experiment log keys on them).
     pub fn name(&self) -> String {
         let r = |x: f64| py_float_repr(x);
@@ -368,7 +422,7 @@ impl Policy {
                 }
                 format!("greedy({xp_model},t={}{extra})", r(*threshold))
             }
-            Policy::Optimizer { xp_model, params, chips, extra } => {
+            Policy::Optimizer { xp_model, params, chips, extra, prices, jitter } => {
                 let max_hits = params.max_hits.map_or("inf".to_owned(), |h| h.to_string());
                 let mut parts = vec![
                     xp_model.clone(),
@@ -376,6 +430,12 @@ impl Policy {
                     format!("m={}", r(params.hit_margin)),
                 ];
                 parts.extend(optimizer_extras(params));
+                if *prices != PriceSource::Fixed {
+                    parts.push(prices.label().to_owned());
+                }
+                if let Some(j) = jitter {
+                    parts.push(format!("jit={}/{}", r(j.sigma), j.seed));
+                }
                 if let Some(tables) = &extra.season_tables {
                     parts.push(format!("loso#{}", season_tables_tag(tables)));
                 }
@@ -424,9 +484,7 @@ impl Policy {
                 let lineup = best_lineup(&squad, &target_xp(ctx.frame), ctx.rules)?;
                 Ok(Decision { transfers, lineup, ..Decision::default() })
             }
-            Policy::Optimizer { params, chips, extra, .. } => {
-                self.decide_optimizer(ctx, params, *chips, extra)
-            }
+            Policy::Optimizer { extra, .. } => self.decide_optimizer(ctx, extra),
             Policy::ChipGains { params, .. } => {
                 let (problem, plans) = no_chip_plan(ctx, params)?;
                 let gains = chip_gains(ctx, &problem, params, plans.best())?;
@@ -467,13 +525,15 @@ impl Policy {
         }
     }
 
-    fn decide_optimizer(
+    /// The optimizer policy's planner input, parameters and plans at a context: what
+    /// `decide` executes the first GW of plan #1 from (before the rule Triple Captain).
+    pub fn optimizer_plans(
         &self,
         ctx: &DecisionContext,
-        params: &OptimizerParams,
-        chips: bool,
-        extra: &ChipPolicy2,
-    ) -> Result<Decision> {
+    ) -> Result<(PlanInput, OptimizerParams, PlanSet)> {
+        let Policy::Optimizer { params, chips, extra, prices, jitter, .. } = self else {
+            bail!("optimizer_plans: {} is not an optimizer policy", self.name());
+        };
         let mut params = params.clone();
         if let Some(tables) = &extra.season_tables {
             let Some(table) = tables.get(&ctx.state.season) else {
@@ -481,12 +541,49 @@ impl Policy {
             };
             params.chip_value_left = Some(table.clone());
         }
-        let mut problem =
-            PlanInput::from_context(ctx.state, ctx.pool, ctx.frame, ctx.rules, &params)?;
+        let jittered;
+        let frame = match jitter {
+            Some(j) => {
+                jittered = j.apply(ctx.frame, ctx.state.season, ctx.state.gw_index);
+                &jittered
+            }
+            None => ctx.frame,
+        };
+        let mut problem = PlanInput::from_context(ctx.state, ctx.pool, frame, ctx.rules, &params)?;
         if let Some(lead) = extra.double_lead {
             problem.doubles = known_doubles(ctx.view, ctx.state.season, ctx.state.gw_index, lead)?;
         }
-        let plans = optimize(&problem, &params, 1, chips, false, Search::Bound)?;
+        match (*prices, ctx.prices) {
+            (PriceSource::Fixed, _) => {}
+            (PriceSource::Oracle, Some(PriceInput::Oracle(future))) => {
+                let season = ctx.state.season;
+                let gws = problem.gws.clone();
+                problem.set_price_paths(|p| Some(future.path(season, p, &gws)));
+            }
+            (PriceSource::Forecast, Some(PriceInput::Forecast(forecast))) => {
+                if forecast.season != ctx.state.season {
+                    bail!(
+                        "prices=forecast: the forecast is {}'s, the decision is in {}",
+                        forecast.season,
+                        ctx.state.season
+                    );
+                }
+                // The price forecast reads the true xP on purpose (both placebo arms get the same paths).
+                let paths = forecast.paths(ctx.view, ctx.xp, &problem.gws)?;
+                problem.set_price_paths(|p| paths.get(&p.player_key).cloned());
+            }
+            (source, _) => bail!(
+                "prices={} needs its price paths, which only the backtester's decision paths \
+                 provide (DecisionContext.prices is not {0})",
+                source.label()
+            ),
+        }
+        let plans = optimize(&problem, &params, 1, *chips, false, Search::Bound)?;
+        Ok((problem, params, plans))
+    }
+
+    fn decide_optimizer(&self, ctx: &DecisionContext, extra: &ChipPolicy2) -> Result<Decision> {
+        let (problem, params, plans) = self.optimizer_plans(ctx)?;
         let status = plans.solver_status();
         if status != "Optimal" {
             log::warn!(
@@ -566,6 +663,8 @@ fn inner_name(xp_model: &str, params: &OptimizerParams) -> String {
         params: params.clone(),
         chips: false,
         extra: ChipPolicy2::default(),
+        prices: PriceSource::Fixed,
+        jitter: None,
     }
     .name();
     name.trim_start_matches("optimizer(").trim_end_matches(')').to_owned()
@@ -696,6 +795,9 @@ fn optimizer_extras(params: &OptimizerParams) -> Vec<String> {
     }
     if params.fh_scale != d.fh_scale {
         parts.push(format!("fhs={}", r(params.fh_scale)));
+    }
+    if params.price_value_k != d.price_value_k {
+        parts.push(format!("pk={}", r(params.price_value_k)));
     }
     parts
 }

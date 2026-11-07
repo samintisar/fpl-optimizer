@@ -24,7 +24,7 @@ use fplopt_optimize::{OptimizerParams, XpFrame};
 use fplopt_store::AsOfView;
 
 use crate::evaluate::rules_for;
-use crate::policies::{ChipPolicy2, DecisionContext, Policy};
+use crate::policies::{ChipPolicy2, DecisionContext, Policy, PriceSource};
 use crate::state::{Decision, SquadState, apply_decision};
 
 type Row = (String, i64, i64, i64, String);
@@ -91,6 +91,7 @@ pub fn run_probe(view: &AsOfView, policy: &Policy, start: Start) -> Result<Table
         pool: &pool,
         xp: &xp,
         frame: &xp_frame,
+        prices: None,
     };
     let decision = policy.decide(&ctx)?;
     apply_decision(&state, &decision, &pool, &rules)?;
@@ -126,6 +127,8 @@ fn optimizer(xp: &str) -> Policy {
         params: probe_params(),
         chips: false,
         extra: ChipPolicy2::default(),
+        prices: PriceSource::Fixed,
+        jitter: None,
     }
 }
 

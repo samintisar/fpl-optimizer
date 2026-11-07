@@ -1,5 +1,5 @@
 //! Decisions applied under the FPL rules (Python `fplopt.backtest.state.apply_decision`,
-//! `squad_value`, `chip_available`; the state types, money, refresh, chip windows and
+//! `squad_value`, `market_value`, `chip_available`; the state types, money, refresh, chip windows and
 //! `next_state` are the planner's, `fplopt_optimize::state`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -60,6 +60,12 @@ impl Applied {
 /// Sum of the holdings' selling prices (what the squad would raise), bank excluded.
 pub fn squad_value(state: &SquadState, sell_on_fee: f64) -> i64 {
     state.holdings.iter().map(|h| selling_price(h, sell_on_fee)).sum()
+}
+
+/// FPL's team value: the holdings at their current prices plus the bank (what FPL's
+/// `entry/{id}/history/` reports as `value`; `squad_value` is the selling-price sum instead).
+pub fn market_value(state: &SquadState) -> i64 {
+    state.holdings.iter().map(|h| h.price).sum::<i64>() + state.bank
 }
 
 fn invalid<T>(msg: String) -> Result<T, InvalidDecision> {
@@ -209,4 +215,31 @@ fn apply(
         chip_id,
     };
     Ok((gw_state, applied))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn market_value_is_current_prices_plus_bank() {
+        let h = |key, purchase, price| Holding {
+            player_key: key,
+            element_type: 2,
+            team_key: 1,
+            purchase_price: purchase,
+            price,
+        };
+        let state = SquadState {
+            season: 2020,
+            gw_index: 5,
+            holdings: vec![h(1, 50, 53), h(2, 60, 58)],
+            bank: 12,
+            free_transfers: 1,
+            chips_used: Vec::new(),
+            freehit_backup: None,
+            freehit_bank: None,
+        };
+        assert_eq!(market_value(&state), 53 + 58 + 12);
+    }
 }

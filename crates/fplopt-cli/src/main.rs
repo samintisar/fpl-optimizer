@@ -20,6 +20,7 @@ mod models;
 mod models_eval;
 mod optimize;
 mod optimize_plan;
+mod research;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -111,6 +112,11 @@ enum Command {
     Chips {
         #[command(subcommand)]
         command: chips::ChipsJob,
+    },
+    /// Research measurements (Rust only).
+    Research {
+        #[command(subcommand)]
+        command: research::ResearchJob,
     },
     /// The holdout season's inputs (the Phase 6 run itself stays Python's).
     Holdout {
@@ -306,6 +312,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Chips { command } => {
             Ok(run_job("chips", |ctx| chips::run(&command, &ctx.settings.data_dir)))
         }
+        Command::Research { command } => research::run(&command),
         Command::Holdout { command: HoldoutJob::Check } => {
             Ok(run_job("holdout check", |ctx| holdout::check(&ctx.settings.data_dir)))
         }
@@ -406,6 +413,9 @@ fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
         fmt_micros(last),
         builders.len()
     );
+    for (name, why) in fplopt_backtest::oracle::LEAKAGE_EXCLUDED {
+        log::info!("not checked (reads future prices by design): {name} ({why})");
+    }
     let leaks = check_leakage(tables, &deadlines, seed, &builders)?;
     if let Some(leak) = leaks.first() {
         for leak in &leaks {

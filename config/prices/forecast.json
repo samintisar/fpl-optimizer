@@ -1,0 +1,8 @@
+{
+  "params": "p4",
+  "first_fit": 2021,
+  "horizons": [1, 2, 3, 4, 5, 6],
+  "clip_tenths_per_gw": 3,
+  "chosen_on": "develop 2022/23, lowest pooled MSE of p1-p6 (family 'price forecast develop'): p1 0.7526, p2 0.7626, p3 0.7594, p4 0.7468, p5 0.7659, p6 0.7588; N0 0.9327, N1 2.6017",
+  "frozen": "2026-11-07, before Gate B (2023/24-2024/25)"
+}
