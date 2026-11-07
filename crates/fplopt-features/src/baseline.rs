@@ -132,7 +132,8 @@ pub fn player_pool(view: &AsOfView) -> Result<Table> {
     Ok(pool)
 }
 
-fn pool(view: &AsOfView) -> Result<Table> {
+/// `player_pool` without the coverage warning.
+pub(crate) fn pool(view: &AsOfView) -> Result<Table> {
     let (season, gw, gw_index) = target(view)?;
     let snaps = newest_snapshot(view, season)?;
     if snaps.height() > 0 {
