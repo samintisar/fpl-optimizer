@@ -121,6 +121,8 @@ Written before any Stage B code, after mapping the code (plan `docs/superpowers/
 
 ## Stage C: tuning and the pre-registered check
 
+**Addendum (2026-11-07, before any Stage C number exists).** The points bound uses `backtest compare`'s GW-block bootstrap. Its 80% CI is on the mean per-GW difference, so the season-points lower bound is `ci_low × 38` (the realized full-run difference, split "all"). Gate C passes the points condition when that is > −10.
+
 - **Tuning (develop 2022/23 only, forecast prices from Stage B's develop fit):**
   - choose k ∈ {0, 0.25, 0.5, 1} for `prices=forecast,price_k=k` (0 added on 2026-11-06 after Gate A, before any forecast existed: the money value alone cost 10.5 points, `docs/research/2026-11-price-planner-gate-a.md`);
   - the criterion is season points net, with team value as the tie-break;
