@@ -14,7 +14,7 @@ The next experiments (the price planner re-judged, early transfers, a "move toni
 ## Goal and success
 
 - **Target:** a comparison method whose standard error of the A − B difference is **≤ 4.5 points a season**. A 10-point effect then clears one-sided p < 0.10 with ~80% power: (1.28 + 0.84) × 4.5 ≈ 9.5.
-- **Honest errors:** on placebo pairs (true difference 0), the method's standardized differences z = mean / SE must have a standard deviation of no more than 1.25 over the 10 pairs. Ten pairs give a rough check: the sd of 10 draws from N(0, 1) is below 1.25 about 90% of the time.
+- **Honest errors:** on placebo pairs (true difference 0), the method's standardized differences z = mean / SE must have a root mean square (about 0, so a bias counts too) of no more than 1.25 over the 10 pairs. Ten pairs give a rough check: the RMS of 10 draws from N(0, 1) is below 1.25 about 89% of the time. The sd of z is reported as a diagnostic. (Amended 2026-11-07 before any run: the first version used the sd, which hides a bias.)
 - **Cheapest wins:** among the methods that pass both, the one with the least server time per comparison.
 - **If none passes:** the note reports the best standard error reached, and we decide on approach B (new variance-reduction machinery) then.
 
@@ -40,12 +40,13 @@ Every comparison is run with `fplopt-rs backtest compare --continuation own --re
 **On one scale.** Every method is reported as points per season:
 
 - **Whole season:**
-  - the mean is the paired difference of season net points, averaged over starts within each season and then over seasons;
-  - the standard error comes from the per-GW differences (averaged over starts) with a one-sided season-level t-test, df = windows − 1. It uses non-overlapping 4-GW blocks, as PLAN §7's gate statistic does.
+  - the per-GW differences are averaged over the starts live in each GW, then over non-overlapping 4-GW blocks within each season (as PLAN §7's gate statistic does);
+  - mean and SE are taken over the blocks and scaled by 38.
+  - Starts begin at GW 1, 10, 20 and 29, so a block averages squads of different ages. That makes the block means uneven, so this method's SE is conservative and its mean is not exactly a full-season effect.
 - **Per decision (k):**
   - each decision window's difference is averaged over the starts live in it;
   - the windows of all seasons are pooled;
-  - mean and SE are taken over the windows, then scaled by 38/k (decisions in a season).
+  - mean and SE are taken over the windows, then scaled by the windows per season (38, 19 and 10 for k = 1, 2, 4; for k = 4 the last window covers GW37–38).
 
 The SE is the plain SE over windows, which treats windows as independent. The placebo check is what tests that assumption.
 
