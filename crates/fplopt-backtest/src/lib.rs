@@ -14,6 +14,7 @@ pub mod money_value;
 pub mod oracle;
 pub mod outcomes;
 pub mod policies;
+pub mod price_eval;
 pub mod probes;
 pub mod pyrepr;
 pub mod simulator;

@@ -90,6 +90,34 @@ fn deadline_prices(view: &AsOfView) -> Result<HashMap<(i64, i64, i64), f64>> {
     Ok(out)
 }
 
+/// Realized price changes as visible in a view: `dp(season, gw_index, key, h)` is the
+/// deadline price (`player_gw.value`) at gw_index + h minus the one at gw_index, NaN when
+/// either is missing (a blank GW, not yet visible, or past the season's end). The training
+/// targets (`training_rows`) and the evaluation's truth (`research price-eval`, from a view
+/// after the season) both use it, so they are one definition.
+pub struct RealizedChanges {
+    calendar: HashMap<(i64, i64), (i64, Option<Micros>)>,
+    values: HashMap<(i64, i64, i64), f64>,
+}
+
+impl RealizedChanges {
+    pub fn new(view: &AsOfView) -> Result<RealizedChanges> {
+        Ok(RealizedChanges { calendar: calendar(view)?, values: deadline_prices(view)? })
+    }
+
+    fn price(&self, season: i64, gw_index: i64, key: i64) -> Option<f64> {
+        let (gw, _) = self.calendar.get(&(season, gw_index))?;
+        self.values.get(&(season, *gw, key)).copied()
+    }
+
+    pub fn dp(&self, season: i64, gw_index: i64, key: i64, h: usize) -> f64 {
+        match (self.price(season, gw_index, key), self.price(season, gw_index + h as i64, key)) {
+            (Some(b), Some(l)) => l - b,
+            _ => f64::NAN,
+        }
+    }
+}
+
 /// One deadline's feature rows: price_features(view) joined with v1 xP features
 /// (`xp_1` = xP at horizon 0, `xp_3` = Σ horizons 0..3, `xp_rank_pos` = rank of xp_3 within
 /// element_type, 1 = best, ties by player_key) and calendar (`gw_index` of the target GW,
@@ -176,13 +204,13 @@ pub fn training_rows(
 ) -> Result<Table> {
     refuse_holdout(seasons)?;
     let at_cutoff = store.as_of(cutoff);
-    let calendar = calendar(&at_cutoff)?;
-    let values = deadline_prices(&at_cutoff)?;
-    let mut deadlines: Vec<(i64, i64, i64, Micros)> = calendar
+    let realized = RealizedChanges::new(&at_cutoff)?;
+    let mut deadlines: Vec<(i64, i64, Micros)> = realized
+        .calendar
         .iter()
         .filter(|((season, _), _)| seasons.contains(season))
-        .filter_map(|(&(season, index), &(gw, d))| d.map(|d| (season, index, gw, d)))
-        .filter(|r| r.3 < cutoff)
+        .filter_map(|(&(season, index), &(_, d))| d.map(|d| (season, index, d)))
+        .filter(|r| r.2 < cutoff)
         .collect();
     deadlines.sort_unstable();
 
@@ -191,7 +219,7 @@ pub fn training_rows(
     let mut key_col = Vec::new();
     let mut features: Vec<Vec<f64>> = vec![Vec::new(); FEATURES.len()];
     let mut targets: Vec<Vec<f64>> = vec![Vec::new(); HORIZONS.len()];
-    for (season, index, gw, deadline) in deadlines {
+    for (season, index, deadline) in deadlines {
         let view = store.as_of(deadline);
         let frame = deadline_features(&view, &xp_at(&view)?)?;
         let keys = frame.i64("player_key")?;
@@ -199,15 +227,8 @@ pub fn training_rows(
             column.extend_from_slice(frame.f64(name)?);
         }
         for &key in keys {
-            let base = values.get(&(season, gw, key));
             for (column, &h) in targets.iter_mut().zip(&HORIZONS) {
-                let later = calendar
-                    .get(&(season, index + h as i64))
-                    .and_then(|(gw, _)| values.get(&(season, *gw, key)));
-                column.push(match (base, later) {
-                    (Some(b), Some(l)) => l - b,
-                    _ => f64::NAN,
-                });
+                column.push(realized.dp(season, index, key, h));
             }
         }
         season_col.extend(std::iter::repeat_n(season, keys.len()));
