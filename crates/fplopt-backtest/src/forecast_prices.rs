@@ -127,18 +127,21 @@ impl ForecastPrices {
             .zip(features.f64("price")?.iter().copied())
             .filter(|(_, p)| p.is_finite())
             .collect();
-        paths_from_changes(&prices, &changes, gws.len())
+        let offsets: Vec<i64> = gws.iter().map(|g| g.gw_index - gws[0].gw_index).collect();
+        paths_from_changes(&prices, &changes, &offsets)
     }
 }
 
-/// Price paths of `n_gws` entries from `changes` (`player_key, h, dp`, h = 1..6): path[0] is
-/// a placeholder (0; the planner puts today's price there), path[t] = price + dp at h = t,
-/// h = 6's change carried forward past the forecast's horizons. A non-finite dp counts as no
-/// change. Players absent from `prices` or from `changes` get no path.
+/// Price paths from `changes` (`player_key, h, dp`, h = 1..6), one entry per horizon GW,
+/// `offsets[t]` being GW t's gw_index minus the target GW's (horizon GWs need not be
+/// contiguous: a GW without fixtures is left out). path[0] is a placeholder (0; the planner
+/// puts today's price there); path[t] = price + dp at h = offsets[t], clamped to 1..6 (h = 6's
+/// change carried forward past the forecast's horizons). A non-finite dp counts as no change.
+/// Players absent from `prices` or from `changes` get no path.
 pub fn paths_from_changes(
     prices: &HashMap<i64, f64>,
     changes: &Table,
-    n_gws: usize,
+    offsets: &[i64],
 ) -> Result<HashMap<i64, Vec<f64>>> {
     let (keys, hs, dps) = (changes.i64("player_key")?, changes.i64("h")?, changes.f64("dp")?);
     let mut by_key: HashMap<i64, [f64; HORIZONS.len()]> = HashMap::new();
@@ -154,8 +157,15 @@ pub fn paths_from_changes(
         .into_iter()
         .filter_map(|(key, dp)| {
             let price = *prices.get(&key)?;
-            let path = (0..n_gws)
-                .map(|t| if t == 0 { 0.0 } else { price + dp[t.min(HORIZONS.len()) - 1] })
+            let last = HORIZONS.len() as i64;
+            let path = offsets
+                .iter()
+                .enumerate()
+                .map(
+                    |(t, &o)| {
+                        if t == 0 { 0.0 } else { price + dp[(o.clamp(1, last) - 1) as usize] }
+                    },
+                )
                 .collect();
             Some((key, path))
         })
@@ -183,7 +193,7 @@ mod tests {
     #[test]
     fn paths_add_the_changes_to_todays_price() {
         let prices = HashMap::from([(1, 50.0), (3, 60.0)]);
-        let paths = paths_from_changes(&prices, &changes(), 4).unwrap();
+        let paths = paths_from_changes(&prices, &changes(), &[0, 1, 2, 3]).unwrap();
         assert_eq!(paths[&1], vec![0.0, 51.0, 52.0, 52.0]);
         // player 2 has no price, player 3 no changes: neither gets a path
         assert_eq!(paths.len(), 1);
@@ -192,9 +202,25 @@ mod tests {
     #[test]
     fn paths_carry_the_last_horizon_forward() {
         let prices = HashMap::from([(1, 50.0)]);
-        let paths = paths_from_changes(&prices, &changes(), 8).unwrap();
+        let offsets: Vec<i64> = (0..8).collect();
+        let paths = paths_from_changes(&prices, &changes(), &offsets).unwrap();
         assert_eq!(paths[&1], vec![0.0, 51.0, 52.0, 52.0, 53.0, 53.0, 54.0, 54.0]);
-        assert_eq!(paths_from_changes(&prices, &changes(), 1).unwrap()[&1], vec![0.0]);
+        assert_eq!(paths_from_changes(&prices, &changes(), &[0]).unwrap()[&1], vec![0.0]);
+    }
+
+    #[test]
+    fn paths_follow_the_gw_index_offsets() {
+        // dp = h, so each entry shows the h it used. A GW without fixtures left out: horizon
+        // GW 2 is 3 gw_indexes on, so h = 3, not 2; 7 on is past the forecast, so h = 6.
+        let changes = Table::new()
+            .with("player_key", Column::I64(vec![1; 6]))
+            .with("h", Column::I64((1..=6).collect()))
+            .with("dp", Column::F64((1..=6).map(f64::from).collect()));
+        let prices = HashMap::from([(1, 50.0)]);
+        let paths = paths_from_changes(&prices, &changes, &[0, 1, 3]).unwrap();
+        assert_eq!(paths[&1], vec![0.0, 51.0, 53.0]);
+        let paths = paths_from_changes(&prices, &changes, &[0, 2, 4, 7]).unwrap();
+        assert_eq!(paths[&1], vec![0.0, 52.0, 54.0, 56.0]);
     }
 
     #[test]
