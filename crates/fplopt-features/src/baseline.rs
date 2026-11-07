@@ -69,7 +69,7 @@ pub(crate) fn gameweeks(view: &AsOfView, season: i64) -> Result<Gameweeks> {
 }
 
 /// (season, gw, gw_index) of the gameweek whose deadline is the view's deadline.
-pub(crate) fn target(view: &AsOfView) -> Result<(i64, i64, i64)> {
+pub fn target(view: &AsOfView) -> Result<(i64, i64, i64)> {
     let (season, gw) = view.gameweek_for_deadline()?;
     let gameweeks = gameweeks(view, season)?;
     let Some(i) = gameweeks.gw.iter().position(|&g| g == gw) else {
@@ -133,7 +133,7 @@ pub fn player_pool(view: &AsOfView) -> Result<Table> {
 }
 
 /// `player_pool` without the coverage warning.
-pub(crate) fn pool(view: &AsOfView) -> Result<Table> {
+pub fn pool(view: &AsOfView) -> Result<Table> {
     let (season, gw, gw_index) = target(view)?;
     let snaps = newest_snapshot(view, season)?;
     if snaps.height() > 0 {

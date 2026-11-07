@@ -19,6 +19,7 @@ pub mod fitted;
 pub mod gbm;
 pub mod minutes;
 pub mod optim;
+pub mod price;
 pub mod shares;
 pub mod team;
 pub mod util;
