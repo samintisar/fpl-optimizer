@@ -1,8 +1,9 @@
 //! Price forecast (Stage B, `docs/superpowers/plans/2026-11-07-price-forecast-stage-b.md`):
 //! per deadline feature rows (snapshot price features, v1 xP, calendar) and training rows
-//! with the price change 1–6 deadlines ahead as targets.
+//! with the price change 1–6 deadlines ahead as targets; one LightGBM regression per
+//! horizon, clipped predictions, and the no-change and momentum baselines.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Result, bail};
 use fplopt_core::seasons::{HOLDOUT_SEASONS, season_label};
@@ -11,7 +12,14 @@ use fplopt_features::price::{COLUMNS as PRICE_COLUMNS, price_features};
 use fplopt_features::util::days_between;
 use fplopt_store::{AsOfView, Column, DataStore, Micros, Table};
 
-use crate::gbm::float_column;
+use crate::gbm::{Gbm, GbmParams, float_column, train};
+
+/// The clip on a forecast change h GWs ahead: ±3h tenths of £m. The spec bounds the price at
+/// [p_t − 0.3h, p_t + 0.3h] in £m; prices here are in tenths of £m, and 0.3 a GW is 3 tenths.
+fn clip(dp: f64, h: usize) -> f64 {
+    let bound = 3.0 * h as f64;
+    dp.clamp(-bound, bound)
+}
 
 /// Horizons forecast: price change from deadline t to the deadline of gw_index t + h.
 pub const HORIZONS: [usize; 6] = [1, 2, 3, 4, 5, 6];
@@ -219,11 +227,139 @@ pub fn training_rows(
     Ok(out)
 }
 
+/// Learning parameters of the six regressions (objective "regression"), with the preset's
+/// name for logs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PriceParams {
+    pub name: String,
+    pub gbm: GbmParams,
+}
+
+impl PriceParams {
+    /// Named presets for the develop grid (at most 6, spec Stage B).
+    pub const PRESETS: [&'static str; 6] = ["p1", "p2", "p3", "p4", "p5", "p6"];
+
+    /// Preset `name` ("p1".."p6"): 300 rounds, feature_fraction 0.9, lambda_l2 1, and
+    /// (learning_rate, num_leaves, min_data_in_leaf) from the plan's grid.
+    pub fn preset(name: &str) -> Result<PriceParams> {
+        let (learning_rate, num_leaves, min_data_in_leaf) = match name {
+            "p1" => (0.05, 15, 200),
+            "p2" => (0.05, 31, 200),
+            "p3" => (0.05, 63, 500),
+            "p4" => (0.02, 31, 200),
+            "p5" => (0.1, 15, 500),
+            "p6" => (0.05, 31, 1000),
+            other => bail!(
+                "unknown price forecast preset {other:?} (known: {})",
+                Self::PRESETS.join(", ")
+            ),
+        };
+        Ok(PriceParams {
+            name: name.to_string(),
+            gbm: GbmParams {
+                objective: "regression",
+                num_boost_round: 300,
+                learning_rate,
+                num_leaves,
+                min_data_in_leaf,
+                feature_fraction: 0.9,
+                lambda_l2: 1.0,
+            },
+        })
+    }
+}
+
+/// The six boosters (index h − 1), the preset's name and the seasons fitted on.
+pub struct PriceFit {
+    pub boosters: Vec<Gbm>,
+    pub params_name: String,
+    pub seasons: Vec<i64>,
+}
+
+/// One regression per h on the rows whose dp_h is finite (a row with NaN dp_h is left out
+/// of that h's booster only), in the rows' order. `rows` needs `season`, `FEATURES` and
+/// every `dp_h`; the holdout season is refused, and so is an h without a finite target.
+pub fn fit_price(rows: &Table, params: &PriceParams) -> Result<PriceFit> {
+    let seasons: Vec<i64> =
+        rows.i64("season")?.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();
+    refuse_holdout(&seasons)?;
+    let mut boosters = Vec::with_capacity(HORIZONS.len());
+    for h in HORIZONS {
+        let label = target_name(h);
+        let y = rows.f64(&label)?;
+        let keep: Vec<usize> = (0..rows.height()).filter(|&i| y[i].is_finite()).collect();
+        if keep.is_empty() {
+            bail!("no training row has a finite {label}");
+        }
+        boosters.push(train(&rows.take(&keep), FEATURES, &label, None, &params.gbm)?);
+    }
+    Ok(PriceFit { boosters, params_name: params.name.clone(), seasons })
+}
+
+/// Rows `player_key, h, dp` (h = 1..6 for each player in `keys`' order).
+fn changes(keys: &[i64], dp: impl Fn(usize, usize) -> f64) -> Table {
+    let n = keys.len() * HORIZONS.len();
+    let (mut ks, mut hs, mut dps) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::new());
+    for (j, &key) in keys.iter().enumerate() {
+        for h in HORIZONS {
+            ks.push(key);
+            hs.push(h as i64);
+            dps.push(dp(j, h));
+        }
+    }
+    Table::new()
+        .with("player_key", Column::I64(ks))
+        .with("h", Column::I64(hs))
+        .with("dp", Column::F64(dps))
+}
+
+/// Expected change per player and h, clipped to [−3h, +3h] tenths of £m (prices move at
+/// most 0.1 a night, much less on average; the spec's ±0.3h £m is ±3h tenths). `features`
+/// has `player_key` and `FEATURES` (as `deadline_features` gives them); rows come out in
+/// its order, h = 1..6 within each player.
+pub fn predict_changes(fit: &PriceFit, features: &Table) -> Result<Table> {
+    let keys = features.i64("player_key")?;
+    let predictions: Vec<Vec<f64>> =
+        fit.boosters.iter().map(|b| b.predict(features)).collect::<Result<_>>()?;
+    if predictions.len() != HORIZONS.len() {
+        bail!("a price fit has {} boosters, not {}", predictions.len(), HORIZONS.len());
+    }
+    Ok(changes(keys, |j, h| clip(predictions[h - 1][j], h)))
+}
+
+/// Baselines for `keys` at the view's deadline, each `player_key, h, dp` as
+/// `predict_changes` gives them:
+/// - N0, no change: 0;
+/// - N1, momentum: h · (p_t − p_{t−1 GW}), clipped like the forecast, where p_t is
+///   `player_gw.value` at the target GW (visible from its deadline − 1h) and p_{t−1 GW} the
+///   previous deadline's (gw_index − 1). 0 at the season's first GW and for a player without
+///   either price (a blank GW, or not in `player_gw`).
+pub fn baseline_changes(view: &AsOfView, keys: &[i64]) -> Result<(Table, Table)> {
+    let (season, gw, gw_index) = target(view)?;
+    let prices = deadline_prices(view)?;
+    let previous = calendar(view)?.get(&(season, gw_index - 1)).map(|(gw, _)| *gw);
+    let momentum: Vec<f64> = keys
+        .iter()
+        .map(|&key| {
+            let now = prices.get(&(season, gw, key));
+            let before = previous.and_then(|g| prices.get(&(season, g, key)));
+            match (now, before) {
+                (Some(now), Some(before)) => now - before,
+                _ => 0.0,
+            }
+        })
+        .collect();
+    let n0 = changes(keys, |_, _| 0.0);
+    let n1 = changes(keys, |j, h| clip(h as f64 * momentum[j], h));
+    Ok((n0, n1))
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
+    use fplopt_core::nprng::Generator;
     use fplopt_store::{Column, DataStore, Micros};
 
     use super::*;
@@ -436,5 +572,126 @@ mod tests {
         let store = store();
         let err = training_rows(&store, deadlines()[3], &[2024, 2025], &|_| Ok(xp())).unwrap_err();
         assert!(err.to_string().contains("2025"), "{err}");
+    }
+
+    /// 2,000 seeded rows of every feature in [−1, 1) (`player_key` = row number, season
+    /// 2021) with `dp_h = scale · h · sign(net_share)` plus noise in [−0.5, 0.5), and `dp_6`
+    /// NaN on every other row (excluded from that booster only).
+    fn synthetic(scale: f64) -> Table {
+        let n = 2_000;
+        let mut rng = Generator::new(0);
+        let mut out = Table::new()
+            .with("season", Column::I64(vec![2021; n]))
+            .with("player_key", Column::I64((0..n as i64).collect()));
+        let mut share = Vec::new();
+        for name in FEATURES {
+            let values: Vec<f64> = (0..n).map(|_| 2.0 * rng.random() - 1.0).collect();
+            if *name == "net_share" {
+                share = values.clone();
+            }
+            out.push(name, Column::F64(values));
+        }
+        for h in HORIZONS {
+            let values: Vec<f64> = (0..n)
+                .map(|i| {
+                    let noise = rng.random() - 0.5;
+                    if h == 6 && i % 2 == 1 {
+                        f64::NAN
+                    } else {
+                        scale * h as f64 * share[i].signum() + noise
+                    }
+                })
+                .collect();
+            out.push(&target_name(h), Column::F64(values));
+        }
+        out
+    }
+
+    fn split(table: &Table) -> (Table, Table) {
+        (
+            table.take(&(0..1_500).collect::<Vec<_>>()),
+            table.take(&(1_500..2_000).collect::<Vec<_>>()),
+        )
+    }
+
+    #[test]
+    fn presets_are_the_plans_grid() {
+        for name in PriceParams::PRESETS {
+            let p = PriceParams::preset(name).unwrap();
+            assert_eq!(p.name, name);
+            assert_eq!(p.gbm.objective, "regression");
+            assert_eq!(p.gbm.num_boost_round, 300);
+            assert_eq!((p.gbm.feature_fraction, p.gbm.lambda_l2), (0.9, 1.0));
+        }
+        let p3 = PriceParams::preset("p3").unwrap().gbm;
+        assert_eq!((p3.learning_rate, p3.num_leaves, p3.min_data_in_leaf), (0.05, 63, 500));
+        let p5 = PriceParams::preset("p5").unwrap().gbm;
+        assert_eq!((p5.learning_rate, p5.num_leaves, p5.min_data_in_leaf), (0.1, 15, 500));
+        assert!(PriceParams::preset("p7").is_err());
+    }
+
+    #[test]
+    fn the_fit_learns_the_sign_of_net_share() {
+        let (train, test) = split(&synthetic(1.0));
+        let fit = fit_price(&train, &PriceParams::preset("p1").unwrap()).unwrap();
+        assert_eq!(fit.boosters.len(), HORIZONS.len());
+        assert_eq!(fit.params_name, "p1");
+        assert_eq!(fit.seasons, [2021]);
+        let out = predict_changes(&fit, &test).unwrap();
+        assert_eq!(out.height(), 500 * HORIZONS.len());
+        let (keys, hs, dps) =
+            (out.i64("player_key").unwrap(), out.i64("h").unwrap(), out.f64("dp").unwrap());
+        assert_eq!(&keys[..7], &[1_500, 1_500, 1_500, 1_500, 1_500, 1_500, 1_501]);
+        assert_eq!(&hs[..7], &[1, 2, 3, 4, 5, 6, 1]);
+        let share = test.f64("net_share").unwrap();
+        let agree = (0..500).filter(|&j| dps[j * 6].signum() == share[j].signum()).count();
+        assert!(agree >= 450, "{agree} of 500");
+    }
+
+    #[test]
+    fn predictions_are_clipped_to_three_tenths_per_gw() {
+        let (train, _) = split(&synthetic(10.0));
+        let fit = fit_price(&train, &PriceParams::preset("p1").unwrap()).unwrap();
+        let extreme = Table::new().with("player_key", Column::I64(vec![1, 2]));
+        let extreme = FEATURES.iter().fold(extreme, |t, name| {
+            let v = if *name == "net_share" { vec![1e9, -1e9] } else { vec![0.0, 0.0] };
+            t.with(name, Column::F64(v))
+        });
+        let out = predict_changes(&fit, &extreme).unwrap();
+        let (hs, dps) = (out.i64("h").unwrap(), out.f64("dp").unwrap());
+        for i in 0..out.height() {
+            let bound = 3.0 * hs[i] as f64;
+            let sign = if i < 6 { 1.0 } else { -1.0 };
+            assert_eq!(dps[i], sign * bound, "row {i}");
+        }
+    }
+
+    #[test]
+    fn baselines_are_no_change_and_momentum() {
+        let store = store();
+        let d = deadlines();
+        // GW4: player 1 went 51 → 53, player 2 stayed at 60; key 9 is unknown.
+        let (n0, n1) = baseline_changes(&store.as_of(d[3]), &[1, 2, 9]).unwrap();
+        for t in [&n0, &n1] {
+            assert_eq!(t.height(), 18);
+            assert_eq!(&t.i64("player_key").unwrap()[..7], &[1, 1, 1, 1, 1, 1, 2]);
+            assert_eq!(&t.i64("h").unwrap()[..7], &[1, 2, 3, 4, 5, 6, 1]);
+        }
+        assert!(n0.f64("dp").unwrap().iter().all(|&x| x == 0.0));
+        let dp = n1.f64("dp").unwrap();
+        assert_eq!(&dp[..6], &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0]);
+        assert!(dp[6..].iter().all(|&x| x == 0.0));
+        // GW2: 50 → 51; GW1 (the season's first): no momentum.
+        let (_, n1) = baseline_changes(&store.as_of(d[1]), &[1]).unwrap();
+        assert_eq!(n1.f64("dp").unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let (_, n1) = baseline_changes(&store.as_of(d[0]), &[1]).unwrap();
+        assert!(n1.f64("dp").unwrap().iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn momentum_is_clipped() {
+        assert_eq!(clip(10.0, 1), 3.0);
+        assert_eq!(clip(-20.0, 2), -6.0);
+        assert_eq!(clip(2.5, 1), 2.5);
     }
 }
