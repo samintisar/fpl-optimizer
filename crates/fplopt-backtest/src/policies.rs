@@ -302,6 +302,8 @@ pub enum Policy {
         chips: bool,
         extra: ChipPolicy2,
         prices: PriceSource,
+        /// The noise study's placebo wobble on xP (`crate::jitter`); None for every real policy.
+        jitter: Option<crate::jitter::XpJitter>,
     },
     ChipGains {
         xp_model: String,
@@ -346,7 +348,7 @@ impl Policy {
                 }
                 Ok(())
             }
-            Policy::Optimizer { xp_model, params, chips, extra, prices } => {
+            Policy::Optimizer { xp_model, params, chips, extra, prices, .. } => {
                 check_model(xp_model)?;
                 if *prices == PriceSource::Forecast && xp_model != crate::price_eval::XP_MODEL {
                     bail!(
@@ -420,7 +422,7 @@ impl Policy {
                 }
                 format!("greedy({xp_model},t={}{extra})", r(*threshold))
             }
-            Policy::Optimizer { xp_model, params, chips, extra, prices } => {
+            Policy::Optimizer { xp_model, params, chips, extra, prices, jitter } => {
                 let max_hits = params.max_hits.map_or("inf".to_owned(), |h| h.to_string());
                 let mut parts = vec![
                     xp_model.clone(),
@@ -430,6 +432,9 @@ impl Policy {
                 parts.extend(optimizer_extras(params));
                 if *prices != PriceSource::Fixed {
                     parts.push(prices.label().to_owned());
+                }
+                if let Some(j) = jitter {
+                    parts.push(format!("jit={}/{}", r(j.sigma), j.seed));
                 }
                 if let Some(tables) = &extra.season_tables {
                     parts.push(format!("loso#{}", season_tables_tag(tables)));
@@ -526,7 +531,7 @@ impl Policy {
         &self,
         ctx: &DecisionContext,
     ) -> Result<(PlanInput, OptimizerParams, PlanSet)> {
-        let Policy::Optimizer { params, chips, extra, prices, .. } = self else {
+        let Policy::Optimizer { params, chips, extra, prices, jitter, .. } = self else {
             bail!("optimizer_plans: {} is not an optimizer policy", self.name());
         };
         let mut params = params.clone();
@@ -536,8 +541,15 @@ impl Policy {
             };
             params.chip_value_left = Some(table.clone());
         }
-        let mut problem =
-            PlanInput::from_context(ctx.state, ctx.pool, ctx.frame, ctx.rules, &params)?;
+        let jittered;
+        let frame = match jitter {
+            Some(j) => {
+                jittered = j.apply(ctx.frame, ctx.state.season, ctx.state.gw_index);
+                &jittered
+            }
+            None => ctx.frame,
+        };
+        let mut problem = PlanInput::from_context(ctx.state, ctx.pool, frame, ctx.rules, &params)?;
         if let Some(lead) = extra.double_lead {
             problem.doubles = known_doubles(ctx.view, ctx.state.season, ctx.state.gw_index, lead)?;
         }
@@ -651,6 +663,7 @@ fn inner_name(xp_model: &str, params: &OptimizerParams) -> String {
         chips: false,
         extra: ChipPolicy2::default(),
         prices: PriceSource::Fixed,
+        jitter: None,
     }
     .name();
     name.trim_start_matches("optimizer(").trim_end_matches(')').to_owned()

@@ -128,6 +128,7 @@ fn optimizer(xp: &str) -> Policy {
         chips: false,
         extra: ChipPolicy2::default(),
         prices: PriceSource::Fixed,
+        jitter: None,
     }
 }
 

@@ -111,6 +111,8 @@ fn params_of(name: &str) -> Option<Vec<(&'static str, Kind)>> {
                 ("tc_rule", Kind::Float),
                 ("fh_scale", Kind::Float),
                 ("prices", Kind::Prices),
+                ("xp_jitter", Kind::Float),
+                ("jitter_seed", Kind::Int),
             ]);
             keys
         }
@@ -319,6 +321,19 @@ impl PolicySpec {
                 let split = params.remove("chip_split").map_or(0, Value::i);
                 let loso = params.remove("loso").is_some_and(|v| v.i() != 0);
                 let tc_rule = params.remove("tc_rule").map(Value::f);
+                let sigma = params.remove("xp_jitter").map_or(0.0, Value::f);
+                let seed = params.remove("jitter_seed").map(Value::i);
+                if sigma < 0.0 {
+                    bail!("xp_jitter must be >= 0, got {}", py_float_repr(sigma));
+                }
+                if seed.is_some_and(|s| s < 0) {
+                    bail!("jitter_seed must be >= 0");
+                }
+                if seed.is_some() && sigma == 0.0 {
+                    bail!("jitter_seed needs xp_jitter > 0");
+                }
+                let jitter = (sigma > 0.0)
+                    .then(|| crate::jitter::XpJitter { sigma, seed: seed.unwrap_or(0) as u64 });
                 let prices = match params.remove("prices") {
                     None | Some(Value::Text("fixed")) => PriceSource::Fixed,
                     Some(Value::Text("oracle")) => PriceSource::Oracle,
@@ -357,7 +372,7 @@ impl PolicySpec {
                     extra.tc_rule = Some(t);
                 }
                 opt.validate()?;
-                Policy::Optimizer { xp_model, params: opt, chips, extra, prices }
+                Policy::Optimizer { xp_model, params: opt, chips, extra, prices, jitter }
             }
             "chipgains" | "chiprules" => {
                 let mut rule = |k: &str, default: Value| params.remove(k).unwrap_or(default);
@@ -402,6 +417,7 @@ fn key_default(name: &str, key: &str) -> Option<Value> {
         ("optimizer", "chip_split") => Some(Value::Int(0)),
         ("optimizer", "loso") => Some(Value::Int(0)),
         ("optimizer", "fh_scale") => Some(Value::Float(1.0)),
+        ("optimizer", "xp_jitter") => Some(Value::Float(0.0)),
         (_, "price_k") => Some(Value::Float(0.0)),
         (_, "prices") => Some(Value::Text("fixed")),
         _ => None,
@@ -575,5 +591,27 @@ mod tests {
         assert!(gains.name().contains("pk=0.5"), "{}", gains.name());
         assert!(parse_policy_spec("chipgains:v1:price_k=0").unwrap().params.is_empty());
         assert!(parse_policy_spec("chiprules:v1:prices=oracle").is_err());
+    }
+
+    #[test]
+    fn jitter_keys_parse_and_label() {
+        let base = "optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2";
+        let spec = parse_policy_spec(&format!("{base},xp_jitter=0.05,jitter_seed=3")).unwrap();
+        let policy = spec.build().unwrap();
+        assert_eq!(policy.name(), "optimizer(v1,mh=1,m=2.0,d=0.75,jit=0.05/3)");
+        let Policy::Optimizer { jitter, .. } = &policy else { panic!("not an optimizer") };
+        assert_eq!(*jitter, Some(crate::jitter::XpJitter { sigma: 0.05, seed: 3 }));
+        // the default (0) is dropped and leaves the live planner's name and spec unchanged
+        let plain = parse_policy_spec(&format!("{base},xp_jitter=0")).unwrap();
+        assert_eq!(plain, parse_policy_spec(base).unwrap());
+        assert_eq!(plain.build().unwrap().name(), "optimizer(v1,mh=1,m=2.0,d=0.75)");
+        // seed without a wobble, negative sigma, and the key on other policies are refused
+        assert!(parse_policy_spec(&format!("{base},jitter_seed=3")).is_err());
+        assert!(parse_policy_spec(&format!("{base},xp_jitter=-0.1")).is_err());
+        assert!(parse_policy_spec(&format!("{base},xp_jitter=0.05,jitter_seed=-1")).is_err());
+        assert!(parse_policy_spec("chipgains:v1:xp_jitter=0.05").is_err());
+        // seed defaults to 0
+        let s0 = parse_policy_spec(&format!("{base},xp_jitter=0.05")).unwrap().build().unwrap();
+        assert!(s0.name().ends_with("jit=0.05/0)"), "{}", s0.name());
     }
 }
