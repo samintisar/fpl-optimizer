@@ -326,6 +326,9 @@ impl PolicySpec {
                 if sigma < 0.0 {
                     bail!("xp_jitter must be >= 0, got {}", py_float_repr(sigma));
                 }
+                if sigma > 0.3 {
+                    bail!("xp_jitter must be <= 0.3: larger values can flip the sign of xP");
+                }
                 if seed.is_some_and(|s| s < 0) {
                     bail!("jitter_seed must be >= 0");
                 }
@@ -421,6 +424,7 @@ fn key_default(name: &str, key: &str) -> Option<Value> {
         ("optimizer", "loso") => Some(Value::Int(0)),
         ("optimizer", "fh_scale") => Some(Value::Float(1.0)),
         ("optimizer", "xp_jitter") => Some(Value::Float(0.0)),
+        ("optimizer", "jitter_seed") => Some(Value::Int(0)),
         (_, "price_k") => Some(Value::Float(0.0)),
         (_, "prices") => Some(Value::Text("fixed")),
         _ => None,
@@ -617,7 +621,14 @@ mod tests {
         let err =
             parse_policy_spec("optimizer:v1:tc_rule=8,xp_jitter=0.05").unwrap_err().to_string();
         assert!(err.contains("xp_jitter can't be combined with tc_rule"), "{err}");
-        // seed defaults to 0
+        // 0.3 is the cap
+        assert!(parse_policy_spec(&format!("{base},xp_jitter=0.31")).is_err());
+        assert!(parse_policy_spec(&format!("{base},xp_jitter=0.3")).is_ok());
+        // seed defaults to 0 and is dropped there: one canonical spec
+        assert_eq!(
+            parse_policy_spec(&format!("{base},xp_jitter=0.05")).unwrap(),
+            parse_policy_spec(&format!("{base},xp_jitter=0.05,jitter_seed=0")).unwrap()
+        );
         let s0 = parse_policy_spec(&format!("{base},xp_jitter=0.05")).unwrap().build().unwrap();
         assert!(s0.name().ends_with("jit=0.05/0)"), "{}", s0.name());
     }

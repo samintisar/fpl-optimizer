@@ -568,6 +568,7 @@ impl Policy {
                         ctx.state.season
                     );
                 }
+                // The price forecast reads the true xP on purpose (both placebo arms get the same paths).
                 let paths = forecast.paths(ctx.view, ctx.xp, &problem.gws)?;
                 problem.set_price_paths(|p| paths.get(&p.player_key).cloned());
             }
