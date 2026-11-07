@@ -14,7 +14,7 @@ The next experiments (the price planner re-judged, early transfers, a "move toni
 ## Goal and success
 
 - **Target:** a comparison method whose standard error of the A − B difference is **≤ 4.5 points a season**. A 10-point effect then clears one-sided p < 0.10 with ~80% power: (1.28 + 0.84) × 4.5 ≈ 9.5.
-- **Honest errors:** on placebo pairs (true difference 0), the method's standardized differences z = mean / SE must have a root mean square (about 0, so a bias counts too) of no more than 1.25 over the 10 pairs. Ten pairs give a rough check: the RMS of 10 draws from N(0, 1) is below 1.25 about 89% of the time. The sd of z is reported as a diagnostic. (Amended 2026-11-07 before any run: the first version used the sd, which hides a bias.)
+- **Honest errors:** on placebo pairs (true difference 0), the method's standardized differences z = mean / SE must have a root mean square (about 0, so a bias counts too) of no more than 1.25 over the 10 pairs. Ten pairs give a rough check: the RMS of 10 draws from N(0, 1) is below 1.25 about 89% of the time. The sd of z is reported as a diagnostic. (Amended 2026-11-07 before any run: the first version used the sd, which hides a bias.) Second amendment, also before any run: z = mean / SE over n cells is t-distributed with n − 1 df, so with ~10 cells (whole season, k = 4) the raw RMS would fail honest SEs 27% of the time. Each placebo z is therefore turned into a normal score, Φ⁻¹(F_t(z; n − 1)), before the RMS.
 - **Cheapest wins:** among the methods that pass both, the one with the least server time per comparison.
 - **If none passes:** the note reports the best standard error reached, and we decide on approach B (new variance-reduction machinery) then.
 
@@ -51,6 +51,10 @@ Every comparison is run with `fplopt-rs backtest compare --continuation own --re
 The SE is the plain SE over windows, which treats windows as independent. The placebo check is what tests that assumption.
 
 - **Server time:** the wall time of each compare run (logged by the driver), and per method the time of the run it needs.
+  - An untimed warm-up run fills the xP cache first, since the cache is keyed by the binary and the first runs would otherwise pay for computing xP.
+  - The placebo pairs skip the separate whole-season run, since every k run writes the same paired differences; their whole-season numbers come from the k = 1 run.
+  - The server is shared with the research loop, so wall times are noisy; they rank methods, not more.
+- **Per-decision asymmetry check:** with `--reference b`, arm A decides from B's squads, so it may make more transfers. For each per-decision method the report gives the placebo pairs' mean transfer difference (A − B) next to the mean z.
 
 ## Build
 
