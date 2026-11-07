@@ -110,6 +110,14 @@ Written before any Stage B code, after mapping the code (plan `docs/superpowers/
    - Training-set visibility holds by construction and is unit-tested: rows come from the view at the fit cutoff, so a target exists only when its deadline price is visible.
    - xP inputs are v1's, covered by `model:v1`.
 5. **Clip.** The clip is ±3h tenths, i.e. ±£0.3m per GW (the bound above meant £m).
+6. **Transfer features as built.** FPL's `transfers_*_event` counts are cumulative within a GW. The features are therefore:
+   - `net_event` at the newest snapshot and at D − 1 day and D − 3 days;
+   - only `net_event` is scaled (by ownership and by market activity).
+
+   This replaces the "net transfers over the last 1, 3 and 7 days, each scaled" above.
+7. **Known small look-ahead and staleness, accepted.**
+   - `gameweek` rows are visible from preseason with the season's final calendar. So `days_to_next` and the gw_index mapping can see a later rescheduling (e.g. 2022/23 GW7's cancellation). This is an existing data convention, and the effect is tiny.
+   - Backtest snapshots are fplcache's, roughly 3.5–6 h before each deadline. Live `fpl` snapshots are fresher, so Stage D must check the live features' distribution against training's.
 
 ## Stage C: tuning and the pre-registered check
 
