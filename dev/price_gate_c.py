@@ -29,7 +29,10 @@ sys.modules[_spec.name] = gate_a
 _spec.loader.exec_module(gate_a)
 
 P_MAX = 0.10
-LOWER_MIN = -10.0
+LOWER_MIN = -10.0  # season points
+# The bootstrap CI is of the per-GW mean difference (stats.rs block_bootstrap); the spec's -10 is in
+# season points, so the bound is scaled by the GWs in a season.
+SEASON_GWS = 38
 TAG = "price-check"
 FAMILY = "price check"
 VERDICT_FAMILY = "price check verdict"
@@ -96,7 +99,12 @@ def team_value_test(gws: pd.DataFrame, a: str, b: str) -> tuple[float, float, in
     return mean, float(t.pvalue), n
 
 
+def season_bound(ci_low_per_gw: float) -> float:
+    return ci_low_per_gw * SEASON_GWS
+
+
 def verdict(p: float, lower: float) -> bool:
+    """lower: the points lower bound in season terms (ci_low per GW x SEASON_GWS)."""
     return bool(p < P_MAX and lower > LOWER_MIN)
 
 
@@ -217,7 +225,8 @@ def cmd_check(args) -> int:
     b_name = next(n for n in names if n != a_name)
     tv_mean, tv_p, n = team_value_test(gws, a_name, b_name)
     metrics = json.loads((out / "compare" / "metrics.json").read_text())
-    lower = points_lower_bound(metrics)
+    ci_low = points_lower_bound(metrics)
+    lower = season_bound(ci_low)
     passed = verdict(tv_p, lower)
     result = {
         "price_k": k,
@@ -226,9 +235,11 @@ def cmd_check(args) -> int:
         "n_units": n,
         "team_value_mean": tv_mean,
         "team_value_p": tv_p,
-        "points_lower_bound": lower,
+        "ci_low_per_gw": ci_low,
+        "lower_season": lower,
+        "season_gws": SEASON_GWS,
         "points_lower_bound_path": LOWER_BOUND_PATH,
-        "rule": f"p < {P_MAX} and lower bound > {LOWER_MIN}",
+        "rule": f"p < {P_MAX} and lower_season > {LOWER_MIN}",
         "pass": passed,
     }
     (out / "gate_c.json").write_text(json.dumps(result, indent=2))
@@ -242,6 +253,7 @@ def cmd_check(args) -> int:
     )
     print(json.dumps(result, indent=2))
     print(f"points lower bound read from {LOWER_BOUND_PATH}")
+    print(f"ci_low per GW = {ci_low:.4f}; lower_season = {lower:.2f} (x{SEASON_GWS})")
     print("GATE C: " + ("PASS" if passed else "FAIL"))
     return 0
 

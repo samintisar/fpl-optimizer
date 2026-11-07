@@ -80,6 +80,14 @@ def test_verdict_boundaries():
     assert gate.verdict(0.0999, -9.99)
 
 
+def test_season_conversion_and_verdict():
+    assert abs(gate.season_bound(-0.25) - (-9.5)) < 1e-12
+    assert gate.SEASON_GWS == 38
+    # per-GW -0.25 -> -9.5 season points passes; -0.27 -> -10.26 fails
+    assert gate.verdict(0.05, gate.season_bound(-0.25))
+    assert not gate.verdict(0.05, gate.season_bound(-0.27))
+
+
 def test_lower_bound_extractor():
     metrics = {
         "comparisons": [
