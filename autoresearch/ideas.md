@@ -287,6 +287,9 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
       minutes are 1.03–1.04 of expected in those bands, so the minutes excess cancels a rate
       deficit and MID goals are right in points. Fixing m_start would help FWDs and hurt MIDs.
       Not tested.
+    - 2026-11-07: a FWD-only `m_start` slope in P(start) was considered and not run. FWDs
+      are a minority of rows, and the sub half (all positions) gave only −0.00011 against the
+      judge's MIN_GAIN of 0.0005. Expected to fail the min gain, and it would cost a variant.
 13. **The crowd: ownership and deadline transfers** (model; new 2026-10-28, **blocked on
     the harness**, see *Needs the user*; re-checked 2026-10-29 after the harness hash
     changed: still the same KeyErrors). No model reads FPL managers' choices. Within a
@@ -425,6 +428,16 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 `diag-finish-price-over.txt`).
 
 ## Needs the user (not the loop's to do)
+
+- **2026-11-07: no experiments tonight.** `last_checked_gw` is still 9 (bootstrap
+  2026-11-07T023030Z; GW10's deadline passed 2026-11-06 18:30Z, but its matches aren't
+  checked yet), so there was no monitor; the next run should do the GW10 report. `sync.sh raw`
+  copied 42 new files. The harness hash is still adeb6c64 (head baseline
+  `9fea614165-adeb6c64`), so the crowd (idea 13, b3a642b) is still unscoreable, and the
+  calibration table still blocks `optimizer:v1` decision runs (idea 5). The guard refuses
+  reading `~/fpl-harness` beyond its four entry points, so the hash is the only check on the
+  crowd columns. I spent no variants (idea 12's FWD start half is below MIN_GAIN, see there).
+  The ledger is unchanged: 54 scored (14 KEEP, 40 DISCARD), 4 ERROR.
 
 - **2026-11-06: no experiments tonight.** `last_checked_gw` is still 9 (bootstrap
   2026-11-06T023113Z; the GW10 deadline is 18:30Z today), so there was no monitor. The next
