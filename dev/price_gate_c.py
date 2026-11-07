@@ -3,6 +3,8 @@
     uv run python dev/price_gate_c.py tune --base RUN --arm 0=RUN --arm 0.25=RUN ... [--out DIR]
     uv run python dev/price_gate_c.py check --out DIR [--experiments results/experiments.csv]
 
+    uv run python dev/price_gate_c.py verdict --out DIR   (recover after a crash past compare)
+
 `tune` picks the money weight k on develop 2022/23 (highest deflated points mean). `check` is the
 run-once pre-registered gate: refusals, `backtest compare`, verdict, log.
 """
@@ -37,11 +39,16 @@ TAG = "price-check"
 FAMILY = "price check"
 VERDICT_FAMILY = "price check verdict"
 LIVE = "optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2"
+K_GRID = {0, 0.25, 0.5, 1}
+CHECK_UNITS = 16  # 2 seasons x 8 starts
+TUNE_UNITS = 8  # 2022/23 x 8 starts
+POLICY_A_KEY, POLICY_B_KEY = "policy_a", "policy_b"  # top-level keys of compare's summary.json
 COLUMNS = ["timestamp", "git_sha", "command", "config", "metrics", "n_variants", "family"]
-# metrics.json written by `backtest compare` (evaluate.rs `comparisons_json`): the entry of the
-# top-level "comparisons" list with method "full_run", split "all", metric "realized"; its "ci_low"
-# is the bootstrap CI's lower bound (ci 0.8) of the mean full-run difference A - B.
-LOWER_BOUND_PATH = "comparisons[method=full_run, split=all, metric=realized].ci_low"
+# summary.json written by `backtest compare` (backtest.rs payload; evaluate.rs `comparisons_json`):
+# the entry of summary["summary"]["comparisons"] with method "full_run", split "all", metric
+# "realized"; its "ci_low" is the per-GW bootstrap CI's
+# lower bound (ci 0.8) of the mean full-run difference A - B.
+LOWER_BOUND_PATH = "summary.comparisons[method=full_run, split=all, metric=realized].ci_low"
 
 
 # ---- pure functions ----
@@ -108,11 +115,11 @@ def verdict(p: float, lower: float) -> bool:
     return bool(p < P_MAX and lower > LOWER_MIN)
 
 
-def points_lower_bound(metrics: dict) -> float:
-    for c in metrics["comparisons"]:
+def points_lower_bound(summary: dict) -> float:
+    for c in summary["summary"]["comparisons"]:
         if c["method"] == "full_run" and c["split"] == "all" and c["metric"] == "realized":
             return float(c["ci_low"])
-    raise KeyError(f"no {LOWER_BOUND_PATH} in metrics.json")
+    raise KeyError(f"no {LOWER_BOUND_PATH} in summary.json")
 
 
 # ---- commands ----
@@ -123,11 +130,18 @@ def cmd_tune(args) -> None:
         return gate_a.units(pd.read_parquet(p / "gws.parquet"))
 
     base = load(args.base)
+    if len(base) != TUNE_UNITS:
+        raise SystemExit(f"base run has {len(base)} units, expected {TUNE_UNITS}")
     results = {}
     for item in args.arm:
         k, _, path = item.partition("=")
         results[k] = gate_a.compare(base, load(Path(path)))
+        if results[k]["n"] != TUNE_UNITS:
+            raise SystemExit(f"arm {k}: {results[k]['n']} paired units, expected {TUNE_UNITS}")
     out = tune_choice(results)
+    bad = [k for k, a in out["arms"].items() if math.isnan(a["deflated"])]
+    if bad:
+        raise SystemExit(f"arms {bad}: deflated mean is NaN (fewer than 2 units)")
     out["results"] = results
     print(f"{'k':>6} {'points':>9} {'se':>7} {'deflated':>9} {'end value':>10}")
     for k, a in out["arms"].items():
@@ -178,54 +192,20 @@ def append_log(path: Path, command: str, config: dict, metrics: dict, n_variants
         )
 
 
-def cmd_check(args) -> int:
-    out: Path = args.out
-    nonempty = out.exists() and any(out.iterdir())
-    reason = refusal(
-        _log_families(args.experiments),
-        _dirty(),
-        _git("rev-parse", "HEAD"),
-        _git("rev-parse", "--verify", "--quiet", f"{TAG}^{{commit}}") or None,
-        nonempty,
-    )
-    if reason:
-        print(f"refused: {reason}", file=sys.stderr)
-        return 2
-    k = json.loads((REPO / "config" / "prices" / "planner.json").read_text())["price_k"]
-    a = f"{LIVE},prices=forecast,price_k={k}"
-    cmd = [
-        str(args.binary),
-        "backtest",
-        "compare",
-        "--a",
-        a,
-        "--b",
-        LIVE,
-        "--seasons",
-        "2023,2024",
-        "--starts",
-        "template@1,random:3@1,template@20,random:3@20",
-        "--no-per-decision",
-        "--family",
-        FAMILY,
-        "--experiments",
-        str(args.experiments),
-        "--out",
-        str(out / "compare"),
-    ]
-    if args.jobs:
-        cmd += ["--jobs", str(args.jobs)]
-    if args.xp_cache:
-        cmd += ["--xp-cache", str(args.xp_cache)]
-    subprocess.run(cmd, check=True)
+def _resolve(p: Path) -> Path:
+    return p if p.is_absolute() else REPO / p
 
+
+def finalize(out: Path, experiments: Path, k: float) -> dict:
+    """Verdict from an existing `backtest compare` output in DIR/compare; writes gate_c.json and
+    appends the verdict row."""
     gws = pd.read_parquet(out / "compare" / "gws.parquet")
-    names = sorted(gws["policy"].unique())
-    a_name = next(n for n in names if "forecast" in n)
-    b_name = next(n for n in names if n != a_name)
+    summary = json.loads((out / "compare" / "summary.json").read_text())
+    a_name, b_name = summary[POLICY_A_KEY], summary[POLICY_B_KEY]
     tv_mean, tv_p, n = team_value_test(gws, a_name, b_name)
-    metrics = json.loads((out / "compare" / "metrics.json").read_text())
-    ci_low = points_lower_bound(metrics)
+    if n != CHECK_UNITS:
+        raise SystemExit(f"expected {CHECK_UNITS} paired units, got {n}")
+    ci_low = points_lower_bound(summary)
     lower = season_bound(ci_low)
     passed = verdict(tv_p, lower)
     result = {
@@ -244,17 +224,100 @@ def cmd_check(args) -> int:
     }
     (out / "gate_c.json").write_text(json.dumps(result, indent=2))
     append_log(
-        args.experiments,
-        "price_gate_c.py check " + " ".join(sys.argv[2:]),
+        experiments,
+        "price_gate_c.py check " + str(out),
         {"price_k": k, "out": str(out)},
         result,
         1,
         VERDICT_FAMILY,
     )
+    return result
+
+
+def _report(result: dict) -> None:
     print(json.dumps(result, indent=2))
     print(f"points lower bound read from {LOWER_BOUND_PATH}")
-    print(f"ci_low per GW = {ci_low:.4f}; lower_season = {lower:.2f} (x{SEASON_GWS})")
-    print("GATE C: " + ("PASS" if passed else "FAIL"))
+    print(
+        f"ci_low per GW = {result['ci_low_per_gw']:.4f}; "
+        f"lower_season = {result['lower_season']:.2f} (x{SEASON_GWS})"
+    )
+    print("GATE C: " + ("PASS" if result["pass"] else "FAIL"))
+
+
+def _frozen_k() -> float:
+    k = json.loads((REPO / "config" / "prices" / "planner.json").read_text())["price_k"]
+    if k not in K_GRID:
+        raise SystemExit(f"refused: frozen price_k {k} is not in {sorted(K_GRID)}")
+    return k
+
+
+def cmd_check(args) -> int:
+    out: Path = args.out
+    experiments = _resolve(args.experiments)
+    nonempty = out.exists() and any(out.iterdir())
+    reason = refusal(
+        _log_families(experiments),
+        _dirty(),
+        _git("rev-parse", "HEAD"),
+        _git("rev-parse", "--verify", "--quiet", f"{TAG}^{{commit}}") or None,
+        nonempty,
+    )
+    if reason:
+        print(f"refused: {reason}", file=sys.stderr)
+        return 2
+    k = _frozen_k()
+    subprocess.run(
+        ["cargo", "build", "--release", "-p", "fplopt-cli", "-j", str(args.cargo_jobs)],
+        check=True,
+        cwd=REPO,
+    )
+    binary = _resolve(args.binary) if args.binary else REPO / "target" / "release" / "fplopt-rs"
+    a = f"{LIVE},prices=forecast,price_k={k}"
+    cmd = [
+        str(binary),
+        "backtest",
+        "compare",
+        "--a",
+        a,
+        "--b",
+        LIVE,
+        "--seasons",
+        "2023,2024",
+        "--starts",
+        "template@1,random:3@1,template@20,random:3@20",
+        "--no-per-decision",
+        "--family",
+        FAMILY,
+        "--experiments",
+        str(experiments),
+        "--out",
+        str(out / "compare"),
+    ]
+    if args.jobs:
+        cmd += ["--jobs", str(args.jobs)]
+    if args.xp_cache:
+        cmd += ["--xp-cache", str(args.xp_cache)]
+    out.mkdir(parents=True, exist_ok=True)
+    log = out / "compare.log"
+    with log.open("w", encoding="utf-8") as f:
+        r = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, cwd=REPO)
+    if r.returncode != 0:
+        print(f"backtest compare failed ({r.returncode}); see {log}", file=sys.stderr)
+        return r.returncode
+    result = finalize(out, experiments, k)
+    tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+    print("\n".join(tail))
+    _report(result)
+    return 0
+
+
+def cmd_verdict(args) -> int:
+    experiments = _resolve(args.experiments)
+    if VERDICT_FAMILY in set(_log_families(experiments)):
+        print(f"refused: the log already holds family '{VERDICT_FAMILY}'", file=sys.stderr)
+        return 2
+    result = finalize(args.out, experiments, _frozen_k())
+    _report(result)
     return 0
 
 
@@ -268,12 +331,18 @@ def main() -> None:
     c = sub.add_parser("check")
     c.add_argument("--out", type=Path, required=True)
     c.add_argument("--experiments", type=Path, default=Path("results/experiments.csv"))
-    c.add_argument("--binary", type=Path, default=Path("target/release/fplopt-rs"))
+    c.add_argument("--binary", type=Path)
+    c.add_argument("--cargo-jobs", type=int, default=2)
     c.add_argument("--jobs", type=int)
     c.add_argument("--xp-cache", type=Path)
+    v = sub.add_parser("verdict", help="recompute the verdict from an existing compare output")
+    v.add_argument("--out", type=Path, required=True)
+    v.add_argument("--experiments", type=Path, default=Path("results/experiments.csv"))
     args = ap.parse_args()
     if args.cmd == "tune":
         cmd_tune(args)
+    elif args.cmd == "verdict":
+        sys.exit(cmd_verdict(args))
     else:
         sys.exit(cmd_check(args))
 

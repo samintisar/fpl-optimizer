@@ -90,18 +90,32 @@ def test_season_conversion_and_verdict():
 
 def test_lower_bound_extractor():
     metrics = {
-        "comparisons": [
-            {"method": "full_run", "split": "develop", "metric": "realized", "ci_low": 9.0},
-            {"method": "full_run", "split": "all", "metric": "xg", "ci_low": 8.0},
-            {"method": "per_decision", "split": "all", "metric": "realized", "ci_low": 7.0},
-            {"method": "full_run", "split": "all", "metric": "realized", "ci_low": -3.5},
-        ]
+        "policy_a": "A",
+        "summary": {
+            "comparisons": [
+                {"method": "full_run", "split": "develop", "metric": "realized", "ci_low": 9.0},
+                {"method": "full_run", "split": "all", "metric": "xg", "ci_low": 8.0},
+                {"method": "per_decision", "split": "all", "metric": "realized", "ci_low": 7.0},
+                {"method": "full_run", "split": "all", "metric": "realized", "ci_low": -3.5},
+            ]
+        },
     }
     assert gate.points_lower_bound(metrics) == -3.5
     assert "method=full_run" in gate.LOWER_BOUND_PATH
     try:
-        gate.points_lower_bound({"comparisons": []})
+        gate.points_lower_bound({"summary": {"comparisons": []}})
     except KeyError:
         pass
     else:
         raise AssertionError("expected KeyError")
+
+
+def test_extractor_on_comparisons_json_fields():
+    # field names exactly as evaluate.rs `comparisons_json` writes them, nested as in summary.json
+    row = dict(
+        a="A", b="B", method="full_run", split="all", metric="realized", mean=0.1, ci_low=-0.2,
+        ci_high=0.4, p_one_sided=0.2, n_seasons=2, n_gws=76, season_diff=3.0, p_season_t=0.3,
+        deflated_mean=0.0,
+    )  # fmt: skip
+    summary = {"policy_a": "A", "policy_b": "B", "summary": {"comparisons": [row]}}
+    assert gate.season_bound(gate.points_lower_bound(summary)) == -0.2 * 38
