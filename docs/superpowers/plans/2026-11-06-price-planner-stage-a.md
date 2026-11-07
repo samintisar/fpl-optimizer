@@ -533,8 +533,16 @@ def _run(points, end_values):
     rows = []
     for (sid, pts), end in zip(points.items(), end_values, strict=True):
         for gw, p in enumerate(pts, start=1):
-            rows.append({"season": 2020, "start_id": sid, "gw": gw, "gw_index": gw,
-                         "net_points": p, "market_value": 1000 if gw < len(pts) else end})
+            rows.append(
+                {
+                    "season": 2020,
+                    "start_id": sid,
+                    "gw": gw,
+                    "gw_index": gw,
+                    "net_points": p,
+                    "market_value": 1000 if gw < len(pts) else end,
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -592,7 +600,11 @@ def _stats(d: pd.Series) -> dict:
     n = int(d.size)
     se = float(d.std(ddof=1) / math.sqrt(n)) if n > 1 else float("nan")
     half = float(stats.t.ppf(0.9, n - 1) * se) if n > 1 else float("nan")
-    return {"mean": float(d.mean()), "se": se, "ci80": [float(d.mean()) - half, float(d.mean()) + half]}
+    return {
+        "mean": float(d.mean()),
+        "se": se,
+        "ci80": [float(d.mean()) - half, float(d.mean()) + half],
+    }
 
 
 def compare(base: pd.DataFrame, arm: pd.DataFrame) -> dict:

@@ -411,11 +411,19 @@ def fetch(out: Path, seed: int, pause: float) -> pd.DataFrame:
                 pause,
             )
             entry = page["standings"]["results"][slot_of(rank)]["entry"]
-            history = get_cached(out / "history" / f"{entry}.json.gz", f"entry/{entry}/history/", pause)
+            history = get_cached(
+                out / "history" / f"{entry}.json.gz", f"entry/{entry}/history/", pause
+            )
             for h in history["current"]:
                 rows.append(
-                    {"group": group, "rank": rank, "entry": entry, "gw": h["event"],
-                     "value": h["value"], "bank": h["bank"]}
+                    {
+                        "group": group,
+                        "rank": rank,
+                        "entry": entry,
+                        "gw": h["event"],
+                        "value": h["value"],
+                        "bank": h["bank"],
+                    }
                 )
             if i % 50 == 0:
                 print(f"{group}: {i}/{len(ranks)}", flush=True)
@@ -468,10 +476,10 @@ def main() -> None:
     history = get_cached(
         args.managers / "history" / f"{args.entry}.json.gz", f"entry/{args.entry}/history/", 1.0
     )
-    result["user"] = {str(h["event"]): {"value": h["value"], "bank": h["bank"]} for h in history["current"]}
-    result["paths"] = (
-        managers.groupby(["group", "gw"])["value"].median().unstack(0).to_dict()
-    )
+    result["user"] = {
+        str(h["event"]): {"value": h["value"], "bank": h["bank"]} for h in history["current"]
+    }
+    result["paths"] = managers.groupby(["group", "gw"])["value"].median().unstack(0).to_dict()
     result["ours_path"] = dict(zip(ours["gw"].astype(int), ours["market_value"].astype(int)))
     (args.managers / "gap.json").write_text(json.dumps(result, indent=2, default=int))
     print(json.dumps({k: result[k] for k in GROUPS}, indent=2))
@@ -554,8 +562,13 @@ def test_replay_tracks_purchase_prices():
             "transfers": ["[]", "[[1, 2]]", "[[2, 3]]"],
         }
     )
-    deadline_price = {(2021, 1, 1): 50, (2021, 2, 1): 50, (2021, 2, 2): 60,
-                      (2021, 3, 2): 61, (2021, 3, 3): 70}
+    deadline_price = {
+        (2021, 1, 1): 50,
+        (2021, 2, 1): 50,
+        (2021, 2, 2): 60,
+        (2021, 3, 2): 61,
+        (2021, 3, 3): 70,
+    }
     snaps = {1: [], 2: [(pd.Timestamp("2021-08-28 01:30", tz="UTC"), 62)], 3: []}
     rows = timing.replay(gws, deadline_price, snaps, window=pd.Timedelta(hours=24))
     # GW3: player 2 bought at 60, 62 on the night before the deadline, 61 at the deadline:
@@ -618,7 +631,7 @@ def replay(gws: pd.DataFrame, deadline_price: dict, snaps: dict, window) -> list
         prev_deadline = None
         for row in unit.itertuples():
             pairs = json.loads(row.transfers)
-            start = (prev_deadline if window is None else row.deadline - window)
+            start = prev_deadline if window is None else row.deadline - window
             if window is None and start is None:
                 start = row.deadline - pd.Timedelta(days=7)
             sell_gain = buy_gain = 0
@@ -635,8 +648,15 @@ def replay(gws: pd.DataFrame, deadline_price: dict, snaps: dict, window) -> list
                 if d_i is not None:
                     purchase[i] = d_i
             if pairs and row.gw_index > 1:
-                out.append({"season": season, "start_id": start_id, "gw": row.gw,
-                            "sell_gain": sell_gain, "buy_gain": buy_gain})
+                out.append(
+                    {
+                        "season": season,
+                        "start_id": start_id,
+                        "gw": row.gw,
+                        "sell_gain": sell_gain,
+                        "buy_gain": buy_gain,
+                    }
+                )
             prev_deadline = row.deadline
     return out
 
@@ -649,12 +669,18 @@ def main() -> None:
     args = ap.parse_args()
     gws = pd.read_parquet(args.run / "gws.parquet")
     gws = gws[gws["season"].isin(SEASONS) & ~gws["start_id"].str.contains(r"\+bank")]
-    pg = pd.read_parquet(args.data / "player_gw.parquet", columns=["season", "gw", "player_key", "value"])
+    pg = pd.read_parquet(
+        args.data / "player_gw.parquet", columns=["season", "gw", "player_key", "value"]
+    )
     pg = pg[pg["season"].isin(SEASONS)]
-    deadline_price = {(int(s), int(g), int(k)): int(v)
-                      for s, g, k, v in pg[["season", "gw", "player_key", "value"]].itertuples(index=False)}
-    snap = pd.read_parquet(args.data / "player_snapshot.parquet",
-                           columns=["season", "player_key", "snapshot_at", "now_cost"])
+    deadline_price = {
+        (int(s), int(g), int(k)): int(v)
+        for s, g, k, v in pg[["season", "gw", "player_key", "value"]].itertuples(index=False)
+    }
+    snap = pd.read_parquet(
+        args.data / "player_snapshot.parquet",
+        columns=["season", "player_key", "snapshot_at", "now_cost"],
+    )
     snap = snap[snap["season"].isin(SEASONS)].dropna().sort_values("snapshot_at")
     snaps: dict[int, list] = {}
     for k, t, p in snap[["player_key", "snapshot_at", "now_cost"]].itertuples(index=False):
@@ -780,8 +806,12 @@ def points_per_million(base: pd.DataFrame, bank: pd.DataFrame, extra_bank: int) 
         n = int(d.size)
         se = float(d.std(ddof=1) / math.sqrt(n)) if n > 1 else float("nan")
         half = float(stats.t.ppf(0.9, n - 1) * se) if n > 1 else float("nan")
-        out[gw] = {"n": n, "mean": float(d.mean()), "se": se,
-                   "ci80": [float(d.mean()) - half, float(d.mean()) + half]}
+        out[gw] = {
+            "n": n,
+            "mean": float(d.mean()),
+            "se": se,
+            "ci80": [float(d.mean()) - half, float(d.mean()) + half],
+        }
     return out
 
 
