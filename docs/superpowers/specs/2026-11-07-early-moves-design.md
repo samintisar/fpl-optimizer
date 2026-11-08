@@ -29,17 +29,24 @@ That moment was unrealistic, because the gameweek's results aren't known right a
 
 Develop seasons 2021/22–2022/23 only: the snapshots that give prices at A start in 2021. The 2025/26 holdout is never read, and 2023/24–2024/25 stay unused until a frozen version passes on develop.
 
-- **Main result: net points of E − L,** from the standard comparison:
-  - `backtest compare --continuation own --reference b --k 1 --stride 1`, scored on real points;
-  - 16 starts a season (`template@1,random:3@1,template@10,random:3@10,template@20,random:3@20,template@29,random:3@29`);
-  - the SE is grouped by season.
-  - This assumes the noise study's seven-season placebos pass. If they don't, the comparison method is fixed first.
-  - With 2 seasons the SE grouped by season has 1 degree of freedom, so the pooled-window SE is reported next to it, and the main result uses the larger of the two.
-- **Value gain:** money kept by E's moves at A versus at the deadline, from the snapshots (same transfers, priced at both moments), in £m a season and converted to points at 0.395 xP per £1m per GW.
-- **Information cost:** the share of decisions where E's transfers at A differ from L's at the deadline, and the per-decision point difference on those decisions only.
+Amended 2026-11-08, before any build, after the noise study's placebos:
+- the standard comparison (PLAN §5) counts only one GW's points per decision, so it cannot see money kept;
+- its SE grows with how often the arms disagree.
+
+So the net effect is split into a value gain and an information cost:
+
+- **Pre-check: how often E's transfers at A differ from L's at the deadline.** At every decision of L's own runs, plan at A and at the deadline and count the differences. It is cheap (no simulation) and gives a power estimate before the comparison runs. The placebo pairs disagreed in 94% of windows, with an SE of 9–13 a season over 7 seasons, about 18–25 over 2.
+- **Value gain V:**
+  - the money kept by E's moves (bought at A rather than at the deadline, and sold at A's selling price rather than the deadline's), from the snapshots, along E's own runs;
+  - in £m a season, and in points as Σ over the remaining GWs of the cumulative money kept (£m) × 0.395;
+  - nearly deterministic, so its SE (over starts and seasons) is small.
+- **Information cost C:**
+  - E − L per decision from the standard comparison (`backtest compare --continuation own --reference b --k 1 --stride 1`, real points, 16 starts a season: `template@1,random:3@1,template@10,random:3@10,template@20,random:3@20,template@29,random:3@29`), which counts the points the earlier transfer choice wins or loses in its GW;
+  - with 2 seasons the SE over season means has 1 degree of freedom, so the pooled-window SE is reported next to it and the larger of the two is used.
+- **Net = V + (E − L per decision),** with the SEs combined, treating the two as independent.
 - **News risk:** the share of players E buys at A who are flagged (status not `a`) at some snapshot between A and the deadline.
 
-**Gate:** E is worth an alert if E − L > 0 with one-sided p < 0.10. A 10-point effect is about 1.7 SE at the expected SE of ~6. Logged as family `early moves develop`. No tuning grid: E has no parameters.
+**Gate:** E is worth an alert if the net > 0 with one-sided p < 0.10. Logged as family `early moves develop`. No tuning grid: E has no parameters. If the pre-check shows E disagrees with L so often that a 10-point net would be under 1.3 SE, the note reports V, the disagreement rate and the news risk, and we decide before running the comparison.
 
 ## Build (Rust)
 
@@ -64,7 +71,7 @@ Develop seasons 2021/22–2022/23 only: the snapshots that give prices at A star
    - E's buy and sell prices are A's;
    - the captain and XI step can't change transfers;
    - `check leakage` covers the early view (corrupt everything at or after A, and E's decision at A must not change).
-6. **Driver** `dev/early_moves.py`: runs the comparison and computes the value gain, information cost and news risk; writes `docs/research/2026-11-early-moves.md`.
+6. **Driver** `dev/early_moves.py`: runs the pre-check (needs a Rust entry point that plans at A and at the deadline along L's runs) and the comparison, and computes the value gain, information cost and news risk; writes `docs/research/2026-11-early-moves.md`.
 
 ## Not in this spec
 
@@ -74,6 +81,6 @@ Develop seasons 2021/22–2022/23 only: the snapshots that give prices at A star
 
 ## Risks
 
-- **Two seasons are noisy:** an SE of ~6 sees 10 points only about half the time. The value gain and information cost are reported so a near miss can be read.
+- **Two seasons are noisy:** the information cost's SE depends on the disagreement rate. The pre-check gives it before the comparison runs.
 - **News between A and the deadline** (cups, Europe, press conferences) is the cost being measured. Before 2021 there are no status flags, which is one more reason these seasons are out.
 - **Lockdown at 09:00 is an approximation** for seasons before 2026/27. The real first chance to move after the last match is earlier, so the gain is understated.

@@ -36,7 +36,39 @@ Server time per compare run (14 jobs, warm xP cache): whole season 14.5 min (C1,
 - **The season-clustered SE tells us nothing with 2 seasons** (1 df: it is half the gap between the two season means, from 1.2 to 9.7 here). Whether pooled windows understate the error is still open; only a placebo check answers it.
 - **Unchecked:** whether these SEs are honest (no placebos), and the per-decision transfer asymmetry under `--reference b`.
 
-## Next (approach B, cheap steps first)
+## Seven seasons and placebos (2026-11-08): the standard comparison
+
+C2 on all seven develop seasons (`results/noise-seasons/` on the server, family `noise study seasons`, about 1 h 55 min a run at `--jobs 14`, with the xP cache cold before 2021):
+
+| Method | Mean | SE (pooled) | SE (season means, 6 df) |
+|---|---|---|---|
+| Per decision k=1, realized | +2.8 | **2.1** | 2.5 |
+| Per decision k=2, realized | −0.1 | 2.8 | 3.4 |
+| Per decision k=1, xG (2019/20+ only) | +0.9 | 2.5 | 2.1 |
+| Per decision k=2, xG (2019/20+ only) | −3.1 | 3.5 | 3.0 |
+| Whole season, realized | −12.6 | 7.7 | – |
+| Whole season, xG | −6.1 | 8.5 | – |
+
+xG points are missing before 2019/20 (an input is null; not traced), so on seven seasons real points win.
+
+Four placebo pairs (`xp_jitter=0.05`, seeds 1/2 … 7/8), per decision k=1 realized, seven seasons (family `noise study seasons placebo`):
+
+| Pair | Mean | SE pooled | SE season | Same decision | A − B transfers a window |
+|---|---|---|---|---|---|
+| P1 | −2.2 | 9.3 | 12.5 | 5% | +0.035 |
+| P2 | −2.7 | 9.4 | 11.3 | 6% | +0.029 |
+| P3 | −0.8 | 10.5 | 9.4 | 6% | +0.029 |
+| P4 | −6.4 | 9.8 | 13.4 | 6% | +0.038 |
+
+- **The SEs are honest or conservative:** the RMS of the normal-score z is 0.38 pooled and 0.27 by season, not above 1.
+- **No bias detected:** the mean of the four is −3.1, against an SE of about 5. All four being negative has a 1-in-8 chance under no bias; A makes about 0.03 more transfers a window under `--reference b`.
+- **The SE depends on how often the arms disagree.** The placebos (5% jitter) change almost every decision, hence an SE of 9–13. Hit margin 3 vs 2 matches in ~70% of windows, hence 2.1–2.5.
+
+**Adopted** as the standard comparison (PLAN §5, CLAUDE.md): per decision k=1, realized points, all seven develop seasons, 16 starts, judged on the larger of the two SEs. It counts only the decision's own GW, so effects that come later (money kept, FTs banked, chips) are measured separately.
+
+The 10-pair placebo criterion of the original spec was not run; four pairs are a rough check (they catch a bias of several points or SEs off by a factor, not finer).
+
+## Next (approach B, as planned before the seven-season runs)
 
 - **More seasons.** The SE falls with √(seasons). C2 is running on all seven develop seasons (2016/17–2022/23) with k=2 and k=1, xG and realized (`results/noise-seasons/` on the server, family `noise study seasons`). Expected k=2 xG SE ≈ 6.1 × √(2/7) ≈ 3.3. Anything that needs price snapshots has only 2021/22–2022/23 (≈ 4 for the price planner at k=2 xG).
 - **Dropped: a control variate on the arms' predicted xP.** A control variate needs a quantity with a known mean; the predicted xP difference between two planners carries the very effect being measured, so subtracting it would remove the effect. xG scoring is the valid form of the idea.

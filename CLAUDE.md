@@ -52,4 +52,5 @@
 
 - Notebooks: flat, copy-pasteable cells; anything reused moves into `src/fplopt/`.
 - Tune on component metrics (log loss, calibration, RMSE), not season totals.
+- Compare planner changes with the standard comparison (PLAN §5 *Comparing policies*): per-decision k = 1 (`--continuation own --reference b --k 1 --stride 1`), all seven develop seasons, 16 starts, realized points, judged on the SE over season means. Its SE grows with how often the arms disagree, and it doesn't count effects that arrive after the GW (money, FTs, chips).
 - Don't touch the 2025/26 holdout season until Phase 6.
