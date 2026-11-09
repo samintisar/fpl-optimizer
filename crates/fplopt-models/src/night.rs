@@ -195,6 +195,7 @@ pub fn predict_night(fit: &NightFit, features: &Table) -> Result<Table> {
 mod tests {
     use super::*;
     use fplopt_build::common::uk_wall_clock;
+    use fplopt_features::night::night_features;
     use fplopt_store::DataStore;
     use std::collections::HashMap;
 
@@ -328,6 +329,68 @@ mod tests {
     fn training_rows_refuse_the_holdout() {
         let s = store();
         assert!(training_rows(&s, &[2025], uk_wall_clock(date(8, 25), 0)).is_err());
+    }
+
+    /// On real `data/` (the worktree's `../../../data`; skipped if absent): for 5 nights spread
+    /// over 2021/22, `training_rows`' features equal `night_features` on the early view.
+    /// Reads nothing from 2022/23 on: the views end 2022-06-01.
+    #[test]
+    #[ignore = "needs the real data/ directory"]
+    fn night_real() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../../data");
+        if !dir.join("gameweek.parquet").exists() {
+            eprintln!("skipped: no data/ at {}", dir.display());
+            return;
+        }
+        let s = DataStore::open(&dir).unwrap();
+        // 2022-06-01 00:00 UTC: after 2021/22's last GW, before 2022/23
+        let june_2022: Micros = 1_654_041_600_000_000;
+        let all = nights(&s.as_of(june_2022), 2021).unwrap();
+        assert!(all.len() > 250, "{} nights", all.len());
+        let cutoff = all.last().unwrap().label_to;
+        assert!(cutoff < june_2022);
+        let rows = training_rows(&s, &[2021], cutoff).unwrap();
+        let row_nights = rows.opt_i64("night").unwrap();
+        let row_keys = rows.i64("player_key").unwrap();
+        // labels: one-step changes only (FPL moves a price at most 0.1m a night)
+        let dp = rows.f64("dp").unwrap();
+        let labelled: Vec<usize> = (0..rows.height()).filter(|&i| dp[i].is_finite()).collect();
+        let multi = labelled.iter().filter(|&&i| dp[i].abs() > 1.0).count();
+        let labelled_nights: BTreeSet<Micros> =
+            labelled.iter().filter_map(|&i| row_nights[i]).collect();
+        eprintln!(
+            "{} rows, {} labelled, {} rises, {} falls, {} with |dp| > 1, {} of {} nights unlabelled",
+            rows.height(),
+            labelled.len(),
+            labelled.iter().filter(|&&i| dp[i] > 0.0).count(),
+            labelled.iter().filter(|&&i| dp[i] < 0.0).count(),
+            multi,
+            all.len() - labelled_nights.len(),
+            all.len()
+        );
+        assert!(multi * 1000 <= labelled.len(), "{multi} multi-step labels");
+        for k in 0..5 {
+            let night = &all[(k * (all.len() - 1)) / 4];
+            let idx: Vec<usize> =
+                (0..rows.height()).filter(|&i| row_nights[i] == Some(night.cutoff)).collect();
+            let view = s.as_of_early(night.deadline, night.cutoff).unwrap();
+            let want = night_features(&view).unwrap();
+            assert!(want.height() > 0, "night {k}: no features");
+            assert_eq!(idx.len(), want.height(), "night {k}: row counts");
+            let keys: Vec<i64> = idx.iter().map(|&i| row_keys[i]).collect();
+            assert_eq!(keys, want.i64("player_key").unwrap(), "night {k}: player keys");
+            for c in FEATURES {
+                let got = rows.f64(c).unwrap();
+                let exp = want.f64(c).unwrap();
+                for (j, &i) in idx.iter().enumerate() {
+                    let (a, b) = (got[i], exp[j]);
+                    assert!(
+                        a == b || (a.is_nan() && b.is_nan()),
+                        "night {k} {c} row {j}: {a} vs {b}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
