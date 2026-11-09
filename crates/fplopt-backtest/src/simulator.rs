@@ -301,6 +301,9 @@ pub struct GwRow {
 pub struct Step {
     pub state: SquadState,
     pub pool: Arc<Vec<PoolPlayer>>,
+    /// The deadline's pool, at which the GW row values the squad (`pool` for a deadline
+    /// decision).
+    pub deadline_pool: Arc<Vec<PoolPlayer>>,
     pub decision: Decision,
     /// `early_kept` of an early decision.
     pub early_kept: Option<i64>,
@@ -343,7 +346,10 @@ pub fn early_kept(
     let price =
         |pool: &[PoolPlayer], key: i64| pool.iter().find(|p| p.player_key == key).map(|p| p.price);
     let (at_a, at_d) = (refresh(state, early), refresh(state, deadline));
-    let selling = |s: &SquadState, key: i64| {
+    // `refresh` keeps a player's previous price when he is absent from the pool: count an
+    // out-player only when both pools price him
+    let selling = |s: &SquadState, pool: &[PoolPlayer], key: i64| {
+        price(pool, key)?;
         s.holdings.iter().find(|h| h.player_key == key).map(|h| selling_price(h, sell_on_fee))
     };
     let mut kept = 0;
@@ -351,7 +357,9 @@ pub fn early_kept(
         if let (Some(a), Some(d)) = (price(early, t.in_key), price(deadline, t.in_key)) {
             kept += d - a;
         }
-        if let (Some(a), Some(d)) = (selling(&at_a, t.out_key), selling(&at_d, t.out_key)) {
+        if let (Some(a), Some(d)) =
+            (selling(&at_a, early, t.out_key), selling(&at_d, deadline, t.out_key))
+        {
             kept += a - d;
         }
     }
@@ -384,7 +392,8 @@ pub fn decide_step(
                 let state = refresh(state, &deadline_pool);
                 return Ok(Step {
                     state,
-                    pool: deadline_pool,
+                    pool: deadline_pool.clone(),
+                    deadline_pool,
                     decision: decision.clone(),
                     early_kept: None,
                 });
@@ -392,7 +401,13 @@ pub fn decide_step(
             let pool = caches.pool(&store.as_of_early(deadline, at)?)?;
             let kept = early_kept(state, decision, &pool, &deadline_pool, rules.sell_on_fee);
             let state = refresh(state, &pool);
-            return Ok(Step { state, pool, decision: decision.clone(), early_kept: Some(kept) });
+            return Ok(Step {
+                state,
+                pool,
+                deadline_pool,
+                decision: decision.clone(),
+                early_kept: Some(kept),
+            });
         }
         Decider::Policy(policy) => policy,
     };
@@ -425,7 +440,13 @@ pub fn decide_step(
             prices: prices.as_ref().map(PriceData::input),
         };
         let decision = policy.decide(&ctx)?;
-        return Ok(Step { state, pool: deadline_pool, decision, early_kept: None });
+        return Ok(Step {
+            state,
+            pool: deadline_pool.clone(),
+            deadline_pool,
+            decision,
+            early_kept: None,
+        });
     };
     // Transfers at A.
     let early_view = store.as_of_early(deadline, at)?;
@@ -469,7 +490,7 @@ pub fn decide_step(
         priced_at: Some(at),
     };
     let kept = early_kept(state, &decision, &pool, &deadline_pool, rules.sell_on_fee);
-    Ok(Step { state: state_a, pool, decision, early_kept: Some(kept) })
+    Ok(Step { state: state_a, pool, deadline_pool, decision, early_kept: Some(kept) })
 }
 
 /// The squad's best GW score in hindsight: the best valid XI on realized points plus the
@@ -498,7 +519,9 @@ fn pairs_json(pairs: impl IntoIterator<Item = (i64, i64)>) -> String {
     format!("[{}]", items.join(", "))
 }
 
-/// Apply the decision, score it, and return (gw_state, record, GW row).
+/// Apply the decision, score it, and return (gw_state, record, GW row). The transfers are
+/// made at `step.pool` (gw_state carries its bank and purchase prices); the row's squad and
+/// market values are at the deadline's pool.
 pub fn play_step(
     step: &Step,
     rules: &Rules,
@@ -525,6 +548,7 @@ pub fn play_step(
     } else {
         None
     };
+    let valued = refresh(&gw_state, &step.deadline_pool);
     let mut diagnostics = [None; 7];
     if let Some(d) = &decision.diagnostics {
         for (slot, key) in diagnostics.iter_mut().zip(CHIP_DIAGNOSTICS) {
@@ -553,8 +577,8 @@ pub fn play_step(
         xi_regret,
         bank: gw_state.bank,
         free_transfers: state.free_transfers,
-        squad_value: squad_value(&gw_state, rules.sell_on_fee),
-        market_value: market_value(&gw_state),
+        squad_value: squad_value(&valued, rules.sell_on_fee),
+        market_value: market_value(&valued),
         decided_at: decision.priced_at.unwrap_or(deadline),
         early_kept: step.early_kept,
         transfers: pairs_json(decision.transfers.iter().map(|t| (t.out_key, t.in_key))),
@@ -585,8 +609,8 @@ fn kahan(values: impl IntoIterator<Item = f64>) -> f64 {
 
 /// Per decision i (decided at schedule row i): (predicted, realized) gain of its transfers
 /// over schedule rows i..i+window−1 that were recorded (a Free Hit: row i only), or (None,
-/// None) without transfers. xP from the decision deadline's frame (the one the policy
-/// saw), points from the outcomes.
+/// None) without transfers. xP from the frame the transfers were decided on (the decision
+/// deadline's, or for an early decision its view at `priced_at`), points from the outcomes.
 pub fn transfer_gains(
     store: &DataStore,
     rules: &Rules,
@@ -607,7 +631,11 @@ pub fn transfer_gains(
         let gws = &gameweeks[i..(i + span).min(gameweeks.len())];
         let ins: Vec<i64> = decision.transfers.iter().map(|t| t.in_key).collect();
         let outs: Vec<i64> = decision.transfers.iter().map(|t| t.out_key).collect();
-        let xp = caches.xp(xp_model, &store.as_of(gws[0].deadline))?;
+        let view = match decision.priced_at {
+            Some(at) => store.as_of_early(gws[0].deadline, at)?,
+            None => store.as_of(gws[0].deadline),
+        };
+        let xp = caches.xp(xp_model, &view)?;
         let offsets: Vec<i64> = gws.iter().map(|g| g.gw_index - gws[0].gw_index).collect();
         let f = &xp.frame;
         let by_key = |key: i64| -> f64 {
@@ -803,6 +831,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    use crate::gw_score::Lineup;
     use crate::state::{Holding, PoolPlayer, Transfer};
     use fplopt_build::table::Column;
 
@@ -852,5 +881,108 @@ mod tests {
         assert_eq!(kept, (61 - 60) + (51 - 49));
         // nothing moved: nothing kept
         assert_eq!(early_kept(&state, &Decision::default(), &at_a, &at_d, 0.5), 0);
+        // out-player absent from the deadline pool: his deadline price is stale, nothing counted
+        let at_d = pool(&[(2, 61)]);
+        assert_eq!(early_kept(&state, &decision, &at_a, &at_d, 0.5), 61 - 60);
+        // ... or from A's
+        let at_a = pool(&[(2, 60)]);
+        let at_d = pool(&[(1, 49), (2, 61)]);
+        assert_eq!(early_kept(&state, &decision, &at_a, &at_d, 0.5), 61 - 60);
+    }
+
+    fn rules() -> Rules {
+        let dir =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/scoring"));
+        fplopt_build::scoring::backtest_rules(2024, dir).unwrap()
+    }
+
+    /// GK 1-2, DEF 3-7, MID 8-12, FWD 13-16 (16 not held).
+    fn element_type(k: i64) -> i64 {
+        match k {
+            1..=2 => 1,
+            3..=7 => 2,
+            8..=12 => 3,
+            _ => 4,
+        }
+    }
+
+    fn typed_pool(prices: &[(i64, i64)]) -> Vec<PoolPlayer> {
+        prices
+            .iter()
+            .map(|&(k, p)| PoolPlayer {
+                player_key: k,
+                element_type: element_type(k),
+                team_key: k,
+                price: p,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn play_step_values_the_squad_at_the_deadline_and_keeps_the_early_prices_in_the_state() {
+        let state = SquadState {
+            season: 2022,
+            gw_index: 5,
+            holdings: (1..=15)
+                .map(|k| Holding {
+                    player_key: k,
+                    element_type: element_type(k),
+                    team_key: k,
+                    purchase_price: 50,
+                    price: 50,
+                })
+                .collect(),
+            bank: 100,
+            free_transfers: 1,
+            chips_used: vec![],
+            freehit_backup: None,
+            freehit_bank: None,
+        };
+        let decision = Decision {
+            transfers: vec![Transfer { out_key: 15, in_key: 16 }],
+            lineup: Lineup {
+                starters: vec![1, 3, 4, 5, 6, 8, 9, 10, 11, 13, 14],
+                bench: vec![2, 7, 12, 16],
+                captain: 13,
+                vice: 8,
+            },
+            priced_at: Some(1),
+            ..Decision::default()
+        };
+        // A: everyone 50, 16 at 60; deadline: held 55, 16 at 62
+        let at_a: Vec<(i64, i64)> = (1..=15).map(|k| (k, 50)).chain([(16, 60)]).collect();
+        let at_d: Vec<(i64, i64)> = (1..=15).map(|k| (k, 55)).chain([(16, 62)]).collect();
+        let outcomes = GwOutcomes {
+            realized: (1..=16).map(|k| (k, (2, 90))).collect(),
+            xg: (1..=16).map(|k| (k, (2.0, 90))).collect(),
+        };
+        let rules = rules();
+        let step = Step {
+            state: state.clone(),
+            pool: Arc::new(typed_pool(&at_a)),
+            deadline_pool: Arc::new(typed_pool(&at_d)),
+            decision: decision.clone(),
+            early_kept: None,
+        };
+        let (gw_state, _, row) = play_step(&step, &rules, &outcomes, 5, 10).unwrap();
+        // bought and sold at A: the state carries A's bank and purchase price
+        assert_eq!(gw_state.bank, 100 + 50 - 60);
+        let bought = gw_state.holdings.iter().find(|h| h.player_key == 16).unwrap();
+        assert_eq!((bought.purchase_price, bought.price), (60, 60));
+        assert_eq!(row.bank, 90);
+        // valued at the deadline: 14 × 55 + 62 + bank; selling 14 × (50 + 2) + (60 + 1)
+        assert_eq!(row.market_value, 14 * 55 + 62 + 90);
+        assert_eq!(row.squad_value, 14 * 52 + 61);
+        // a deadline decision (deadline pool = pool): valued at the pool, as before
+        let step = Step {
+            state,
+            pool: Arc::new(typed_pool(&at_d)),
+            deadline_pool: Arc::new(typed_pool(&at_d)),
+            decision: Decision { priced_at: None, ..decision },
+            early_kept: None,
+        };
+        let (gw_state, _, row) = play_step(&step, &rules, &outcomes, 5, 10).unwrap();
+        assert_eq!(row.market_value, market_value(&gw_state));
+        assert_eq!(row.squad_value, squad_value(&gw_state, rules.sell_on_fee));
     }
 }
