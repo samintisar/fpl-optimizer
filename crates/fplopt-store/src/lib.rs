@@ -2,8 +2,9 @@
 //! `DataStore::open(data_dir).as_of(deadline)` is how everything downstream of `data/` reads
 //! tables, and the only code in the feature layer that reads files.
 //!
-//! A view exposes only rows with `available_at < cutoff` (the deadline for `as_of(deadline)`, earlier for an early view, `as_of_early`, the early-move study; strict; the column, never
-//! `event_time`). Snapshot tables are read with `latest()` (newest snapshot per group before
+//! A view exposes only rows with `available_at < cutoff` (strict; the column, never
+//! `event_time`), where the cutoff is the deadline for `as_of(deadline)` and earlier for an
+//! early view (`as_of_early`, the early-move study). Snapshot tables are read with `latest()` (newest snapshot per group before
 //! the cutoff); the as-of fixture list with `schedule()`. Static tables are not as-of, so
 //! `table()` refuses them: `lookup()` returns only their identity columns
 //! (`TableSpec::public_columns`) for keys visible at the cutoff.
