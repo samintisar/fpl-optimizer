@@ -195,6 +195,9 @@ enum Check {
         deadlines: usize,
         #[arg(long, default_value_t = 0)]
         seed: u64,
+        /// Check only the frames whose name starts with this (e.g. `probe:early`).
+        #[arg(long)]
+        only: Option<String>,
     },
     /// Compare Python and Rust outputs (the migration's parity gate).
     Parity {
@@ -286,9 +289,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 health::check_freshness(&ctx.store, Utc::now(), max_age).map(drop)
             }))
         }
-        Command::Check { check: Check::Leakage { deadlines, seed } } => {
+        Command::Check { check: Check::Leakage { deadlines, seed, only } } => {
             Ok(run_job("check leakage", |ctx| {
-                check_leakage(&ctx.settings.data_dir, deadlines, seed)
+                check_leakage(&ctx.settings.data_dir, deadlines, seed, only.as_deref())
             }))
         }
         Command::Features { command: FeaturesJob::Dump { deadlines, out } } => {
@@ -382,7 +385,7 @@ fn features_dump(data_dir: &Path, deadlines: &Path, out: &Path) -> Result<()> {
 
 /// `check leakage`: every feature and the history frames at the edge deadlines plus
 /// `n_deadlines` sampled ones; fails listing the leaks.
-fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
+fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64, only: Option<&str>) -> Result<()> {
     use fplopt_features::leakcheck::{FEATURE_TABLES, check_leakage, sample_deadlines};
     let started = std::time::Instant::now();
     let names: Vec<&str> = FEATURE_TABLES
@@ -405,7 +408,11 @@ fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
         .chain(fplopt_models::LEAKAGE_BUILDERS)
         .chain(fplopt_backtest::probes::PROBE_BUILDERS)
         .copied()
+        .filter(|(name, _)| only.is_none_or(|p| name.starts_with(p)))
         .collect();
+    if builders.is_empty() {
+        anyhow::bail!("no frame matches --only: the leakage check was not performed");
+    }
     log::info!(
         "leakage check: {} deadline(s) from {} to {}, {} frame(s), seed {seed}",
         deadlines.len(),
