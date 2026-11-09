@@ -644,6 +644,7 @@ fn night_eval(args: &NightEvalArgs) -> Result<()> {
          Gate N: {verdict} (the model beats both baselines on both targets, p < {}, and is \
          calibrated where p >= {})\n{}\n\n\
          Calibration condition (the model's calibrated p >= {}: n >= {}, rate >= mean p - {})\n{}\n\n\
+         At policy T's threshold (calibrated p >= {}; report only, not in the gate)\n{}\n\n\
          Written to {}",
         format_seasons(&seasons),
         season_label(args.first_fit as i32),
