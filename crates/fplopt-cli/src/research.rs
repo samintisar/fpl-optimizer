@@ -9,6 +9,7 @@
 //! per owner, by log loss (`fplopt_backtest::night_eval`); writes predictions.parquet and
 //! metrics.json to --out and appends the run to the experiment log. Usage errors exit 2.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -29,7 +30,7 @@ use fplopt_core::seasons::{HOLDOUT_SEASONS, season_label};
 use fplopt_core::settings::Settings;
 use fplopt_models::night::NightParams;
 use fplopt_models::price::PriceParams;
-use fplopt_store::DataStore;
+use fplopt_store::{DataStore, Micros};
 
 use crate::backtest::{
     XpCacheArgs, command_line, default_jobs, format_seasons, num_text, seasons_with_data,
@@ -49,15 +50,17 @@ pub enum ResearchJob {
 
 #[derive(Args)]
 pub struct NightEvalArgs {
-    /// Evaluated start years: 2022 or 2021-2022 (each after --first-fit, 2022/23 at the
-    /// latest; later seasons and the holdout are refused).
+    /// Evaluated start years: 2021 for development (each after --first-fit, 2022/23 at the
+    /// latest; later seasons and the holdout are refused). 2022 is Gate N's season, only
+    /// under --family 'night price model gate n'.
     #[arg(long)]
     pub seasons: String,
     /// First season of every fit (season S is fitted on --first-fit..S-1; snapshots start in
     /// 2020/21).
     #[arg(long, default_value_t = 2020)]
     pub first_fit: i64,
-    /// Experiment-log family.
+    /// Experiment-log family ('night price model gate n' is Gate N's run: once, from a
+    /// clean checkout at the tag `night-model-gate-n`).
     #[arg(long, default_value = "night price model")]
     pub family: String,
     #[arg(long, default_value = "results/experiments.csv")]
@@ -105,31 +108,39 @@ pub const FIRST_FIT_MIN: i64 = 2021;
 pub const GATE_FAMILY: &str = "price forecast gate b";
 /// The tag of the commit Gate B's run is made from.
 pub const GATE_TAG: &str = "price-forecast-gate-b";
+/// The family of Gate N's run (`research night-eval` on 2022/23), which may run once.
+pub const NIGHT_GATE_FAMILY: &str = "night price model gate n";
+/// The tag of the commit Gate N's run is made from.
+pub const NIGHT_GATE_TAG: &str = "night-model-gate-n";
+/// Gate N's season: night-eval evaluates it only under `NIGHT_GATE_FAMILY`.
+pub const NIGHT_GATE_SEASON: i64 = 2022;
 /// Changes `git status` may show in a gate run's checkout (the log it appends to).
 const LOG_FILES: [&str; 1] = ["results/experiments.csv"];
 
-/// The code checkout as git sees it, for Gate B's refusals.
+/// The code checkout as git sees it, for a gate's refusals.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Checkout {
     /// `git status --porcelain` lines, without `LOG_FILES` (empty: clean).
     pub dirty: Vec<String>,
     /// `git rev-parse HEAD`.
     pub head: String,
-    /// The commit `GATE_TAG` points at, if the tag exists.
+    /// The commit the gate's tag points at, if the tag exists.
     pub tag: Option<String>,
     /// The commit this binary was built from (`experiments::GIT_SHA`).
     pub built: String,
 }
 
-/// Why a `GATE_FAMILY` run must not run (None: it may; other families are never refused):
-/// the log already holds a row of the family, the checkout is dirty, HEAD isn't the tagged
-/// commit, or the binary wasn't built from HEAD.
+/// Why a `gate_family` run must not run (None: it may; other families are never refused):
+/// the log already holds a row of the family, the checkout is dirty, HEAD isn't the commit
+/// tagged `gate_tag` (`checkout.tag`), or the binary wasn't built from HEAD.
 pub fn gate_refusal(
     family: &str,
+    gate_family: &str,
+    gate_tag: &str,
     log: &[Vec<(String, String)>],
     checkout: &Checkout,
 ) -> Option<String> {
-    if family != GATE_FAMILY {
+    if family != gate_family {
         return None;
     }
     if log.iter().any(|row| row.iter().any(|(k, v)| k == "family" && v == family)) {
@@ -142,10 +153,10 @@ pub fn gate_refusal(
         ));
     }
     match &checkout.tag {
-        None => return Some(format!("no tag {GATE_TAG} (git fetch --tags?)")),
+        None => return Some(format!("no tag {gate_tag} (git fetch --tags?)")),
         Some(tag) if *tag != checkout.head => {
             return Some(format!(
-                "HEAD {} is not the commit tagged {GATE_TAG} ({tag})",
+                "HEAD {} is not the commit tagged {gate_tag} ({tag})",
                 checkout.head
             ));
         }
@@ -168,8 +179,9 @@ fn git(root: &std::path::Path, args: &[&str]) -> Result<(bool, String)> {
     }
 }
 
-/// The checkout this binary's source lives in (the workspace root), as git sees it.
-fn checkout() -> Result<Checkout> {
+/// The checkout this binary's source lives in (the workspace root), as git sees it, with the
+/// commit `gate_tag` points at.
+fn checkout(gate_tag: &str) -> Result<Checkout> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
     let (ok, status) = git(&root, &["status", "--porcelain", "--untracked-files=normal"])?;
     let (ok_head, head) = git(&root, &["rev-parse", "HEAD"])?;
@@ -182,7 +194,7 @@ fn checkout() -> Result<Checkout> {
         .map(str::to_owned)
         .collect();
     let (has_tag, tag) =
-        git(&root, &["rev-parse", "--verify", "--quiet", &format!("{GATE_TAG}^{{commit}}")])?;
+        git(&root, &["rev-parse", "--verify", "--quiet", &format!("{gate_tag}^{{commit}}")])?;
     Ok(Checkout {
         dirty,
         head: head.trim().to_owned(),
@@ -330,7 +342,9 @@ fn price_eval(args: &PriceEvalArgs) -> Result<()> {
     let family = args.family.clone().unwrap_or_else(|| "price forecast".to_owned());
     if family == GATE_FAMILY {
         let log = read_experiments(&args.experiments)?;
-        if let Some(reason) = gate_refusal(&family, &log, &checkout()?) {
+        if let Some(reason) =
+            gate_refusal(&family, GATE_FAMILY, GATE_TAG, &log, &checkout(GATE_TAG)?)
+        {
             return usage(format!("refusing the gate run: {reason}"));
         }
     }
@@ -468,20 +482,45 @@ fn night_eval(args: &NightEvalArgs) -> Result<()> {
     if let Err(e) = night_eval::check_seasons(&seasons, args.first_fit) {
         return usage(format!("argument --seasons: {e}"));
     }
+    // Gate N's one look at 2022/23: only under its family, which runs once from its tag.
+    if seasons.contains(&NIGHT_GATE_SEASON) && args.family != NIGHT_GATE_FAMILY {
+        return usage(format!(
+            "argument --seasons: {} is Gate N's season, run once under the family \
+             '{NIGHT_GATE_FAMILY}'; development runs use --seasons 2021",
+            season_label(NIGHT_GATE_SEASON as i32)
+        ));
+    }
+    if args.family == NIGHT_GATE_FAMILY {
+        let log = read_experiments(&args.experiments)?;
+        let checkout = checkout(NIGHT_GATE_TAG)?;
+        if let Some(reason) =
+            gate_refusal(&args.family, NIGHT_GATE_FAMILY, NIGHT_GATE_TAG, &log, &checkout)
+        {
+            return usage(format!("refusing the gate run: {reason}"));
+        }
+    }
     let data_dir = args.data_dir.clone().unwrap_or_else(|| Settings::from_env().data_dir);
     let store = match DataStore::open(&data_dir) {
         Ok(s) => s,
         Err(e) => return usage(format!("{e:#}")),
     };
     let available = seasons_with_data(&store)?;
+    // the season column only: which seasons have snapshots at all
+    let snapshots: BTreeSet<i64> = store
+        .as_of(Micros::MAX)
+        .table("player_snapshot", Some(&["season"]))?
+        .i64("season")?
+        .iter()
+        .copied()
+        .collect();
     let last = seasons.iter().max().copied().unwrap_or(args.first_fit);
     let missing: Vec<String> = (args.first_fit..=last)
-        .filter(|s| !available.contains(s))
+        .filter(|s| !available.contains(s) || !snapshots.contains(s))
         .map(|s| season_label(s as i32))
         .collect();
     if !missing.is_empty() {
         return usage(format!(
-            "no gameweek/player_match data for {} (run fplopt build all?)",
+            "no gameweek/player_match/player_snapshot data for {} (run fplopt build all?)",
             missing.join(", ")
         ));
     }
@@ -792,27 +831,98 @@ mod tests {
     #[test]
     fn gate_runs_once_from_the_tagged_clean_build() {
         let other = vec![log_row("price forecast"), log_row("price forecast develop")];
-        assert_eq!(gate_refusal(GATE_FAMILY, &other, &clean()), None);
+        assert_eq!(gate_refusal(GATE_FAMILY, GATE_FAMILY, GATE_TAG, &other, &clean()), None);
         // Already logged.
         let once = vec![log_row("price forecast"), log_row(GATE_FAMILY)];
-        let r = gate_refusal(GATE_FAMILY, &once, &clean()).unwrap();
+        let r = gate_refusal(GATE_FAMILY, GATE_FAMILY, GATE_TAG, &once, &clean()).unwrap();
         assert!(r.contains("already"), "{r}");
         // Dirty checkout.
         let dirty = Checkout { dirty: vec![" M src/x.rs".into()], ..clean() };
-        let r = gate_refusal(GATE_FAMILY, &other, &dirty).unwrap();
+        let r = gate_refusal(GATE_FAMILY, GATE_FAMILY, GATE_TAG, &other, &dirty).unwrap();
         assert!(r.contains("uncommitted") && r.contains("src/x.rs"), "{r}");
         // HEAD not the tagged commit, or no tag at all.
         let moved = Checkout { head: "def".into(), built: "def".into(), ..clean() };
-        let r = gate_refusal(GATE_FAMILY, &other, &moved).unwrap();
+        let r = gate_refusal(GATE_FAMILY, GATE_FAMILY, GATE_TAG, &other, &moved).unwrap();
         assert!(r.contains("not the commit tagged") && r.contains(GATE_TAG), "{r}");
         let untagged = Checkout { tag: None, ..clean() };
-        assert!(gate_refusal(GATE_FAMILY, &other, &untagged).unwrap().contains("no tag"));
+        assert!(
+            gate_refusal(GATE_FAMILY, GATE_FAMILY, GATE_TAG, &other, &untagged)
+                .unwrap()
+                .contains("no tag")
+        );
         // A binary built from another commit.
         let stale = Checkout { built: "old".into(), ..clean() };
-        assert!(gate_refusal(GATE_FAMILY, &other, &stale).unwrap().contains("rebuild"));
+        assert!(
+            gate_refusal(GATE_FAMILY, GATE_FAMILY, GATE_TAG, &other, &stale)
+                .unwrap()
+                .contains("rebuild")
+        );
         // Other families are never refused, whatever the checkout and log.
         let worst = Checkout { dirty: vec!["?? a".into()], tag: None, ..moved };
-        assert_eq!(gate_refusal("price forecast", &once, &worst), None);
+        assert_eq!(gate_refusal("price forecast", GATE_FAMILY, GATE_TAG, &once, &worst), None);
+    }
+
+    #[test]
+    fn night_gate_runs_once_from_its_tag() {
+        let refuse = |family: &str, log: &[Vec<(String, String)>], c: &Checkout| {
+            gate_refusal(family, NIGHT_GATE_FAMILY, NIGHT_GATE_TAG, log, c)
+        };
+        let other = vec![log_row("night price model"), log_row(GATE_FAMILY)];
+        assert_eq!(refuse(NIGHT_GATE_FAMILY, &other, &clean()), None);
+        // Already logged.
+        let once = vec![log_row("night price model"), log_row(NIGHT_GATE_FAMILY)];
+        let r = refuse(NIGHT_GATE_FAMILY, &once, &clean()).unwrap();
+        assert!(r.contains("already") && r.contains(NIGHT_GATE_FAMILY), "{r}");
+        // The tag named is Gate N's.
+        let moved = Checkout { head: "def".into(), built: "def".into(), ..clean() };
+        let r = refuse(NIGHT_GATE_FAMILY, &other, &moved).unwrap();
+        assert!(r.contains(NIGHT_GATE_TAG) && !r.contains(GATE_TAG), "{r}");
+        let untagged = Checkout { tag: None, ..clean() };
+        assert!(refuse(NIGHT_GATE_FAMILY, &other, &untagged).unwrap().contains(NIGHT_GATE_TAG));
+        // Gate B's family is not Gate N's gate.
+        assert_eq!(refuse(GATE_FAMILY, &once, &untagged), None);
+    }
+
+    fn night_cli(seasons: &str, family: Option<&str>) -> NightEvalArgs {
+        let mut argv = vec!["x", "night-eval", "--seasons", seasons, "--data-dir", "no-such-dir"];
+        if let Some(f) = family {
+            argv.extend(["--family", f]);
+        }
+        argv.extend(["--experiments", "no-such-dir/e.csv", "--out", "o"]);
+        let ResearchJob::NightEval(a) = Cli::try_parse_from(argv).unwrap().job else {
+            panic!("not night-eval")
+        };
+        a
+    }
+
+    fn usage_text(r: Result<()>) -> String {
+        let err = r.unwrap_err();
+        match err.downcast_ref::<crate::optimize_plan::Usage>() {
+            Some(u) => u.to_string(),
+            None => panic!("not a usage error: {err:#}"),
+        }
+    }
+
+    #[test]
+    fn night_eval_keeps_2022_for_the_gate_family() {
+        // a data dir that doesn't exist: the refusal comes before any read
+        for family in [None, Some("night price model"), Some(GATE_FAMILY)] {
+            let u = usage_text(night_eval(&night_cli("2022", family)));
+            assert!(u.contains("Gate N's season") && u.contains(NIGHT_GATE_FAMILY), "{u}");
+            assert!(u.contains("--seasons 2021"), "{u}");
+        }
+        let u = usage_text(night_eval(&night_cli("2021-2022", None)));
+        assert!(u.contains("Gate N's season"), "{u}");
+        // 2021 alone gets past the guard and fails on the missing data dir (an error, not
+        // the guard's)
+        let e = format!("{:#}", night_eval(&night_cli("2021", None)).unwrap_err());
+        assert!(!e.contains("Gate N"), "{e}");
+        // the gate family passes the season guard; it is then refused by the checkout (no
+        // tag yet, a dirty tree) or, from the tagged clean build, fails on the missing data
+        // dir: an error either way, never a run
+        let e =
+            format!("{:#}", night_eval(&night_cli("2022", Some(NIGHT_GATE_FAMILY))).unwrap_err());
+        assert!(!e.contains("Gate N's season"), "{e}");
     }
 
     #[test]

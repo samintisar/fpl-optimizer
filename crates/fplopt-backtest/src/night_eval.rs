@@ -22,7 +22,10 @@ use fplopt_store::{Column, DataStore, Micros, Table};
 
 use crate::eval::diebold_mariano;
 
-/// Nights' log losses overlap for about a week (the counter carries over nights).
+/// Nights' log losses overlap for about a week (the counter carries over nights). The lag
+/// counts nights that have labelled rows (the DM clusters), not calendar nights: a night
+/// without a labelled row (no morning snapshot, a stale evening price) is no cluster, so
+/// across gaps in the snapshots 7 lags span more than 7 calendar nights.
 pub const DM_LAG: usize = 7;
 /// The gate's one-sided level.
 pub const ALPHA: f64 = 0.10;
