@@ -2,11 +2,11 @@
 //! `DataStore::open(data_dir).as_of(deadline)` is how everything downstream of `data/` reads
 //! tables, and the only code in the feature layer that reads files.
 //!
-//! A view exposes only rows with `available_at < deadline` (strict; the column, never
+//! A view exposes only rows with `available_at < cutoff` (the deadline for `as_of(deadline)`, earlier for an early view, `as_of_early`, the early-move study; strict; the column, never
 //! `event_time`). Snapshot tables are read with `latest()` (newest snapshot per group before
-//! the deadline); the as-of fixture list with `schedule()`. Static tables are not as-of, so
+//! the cutoff); the as-of fixture list with `schedule()`. Static tables are not as-of, so
 //! `table()` refuses them: `lookup()` returns only their identity columns
-//! (`TableSpec::public_columns`) for keys visible at the deadline.
+//! (`TableSpec::public_columns`) for keys visible at the cutoff.
 //!
 //! Each table is loaded once per store, lazily and column by column, and kept sorted by
 //! `available_at` (snapshot tables: at equal times the preferred source last). A view's
@@ -350,7 +350,13 @@ impl DataStore {
     }
 
     pub fn as_of(&self, deadline: Micros) -> AsOfView<'_> {
-        AsOfView { store: self, deadline }
+        AsOfView { store: self, deadline, cutoff: deadline }
+    }
+
+    /// The view for `deadline`'s gameweek as known strictly before `cutoff` (≤ deadline): the
+    /// early-move study's decision at the previous lockdown.
+    pub fn as_of_early(&self, deadline: Micros, cutoff: Micros) -> Result<AsOfView<'_>> {
+        self.as_of(cutoff).for_deadline(deadline)
     }
 
     /// The data directory of a file-backed store.
@@ -372,11 +378,13 @@ impl DataStore {
     }
 }
 
-/// The data as known strictly before `deadline` (µs since the epoch, UTC).
+/// The data as known strictly before `cutoff` (µs since the epoch, UTC), for the gameweek
+/// whose deadline is `deadline` (cutoff ≤ deadline; equal for `as_of`).
 #[derive(Clone, Copy)]
 pub struct AsOfView<'a> {
     store: &'a DataStore,
     deadline: Micros,
+    cutoff: Micros,
 }
 
 impl<'a> AsOfView<'a> {
@@ -384,16 +392,35 @@ impl<'a> AsOfView<'a> {
         self.deadline
     }
 
+    /// What the view sees: rows with available_at < cutoff.
+    pub fn cutoff(&self) -> Micros {
+        self.cutoff
+    }
+
+    /// Whether the view sees less than its deadline would (an early-move view).
+    pub fn is_early(&self) -> bool {
+        self.cutoff < self.deadline
+    }
+
+    /// The view for a later `deadline` that sees exactly what this one sees.
+    pub fn for_deadline(&self, deadline: Micros) -> Result<AsOfView<'a>> {
+        if deadline < self.cutoff {
+            bail!("deadline {deadline} is before the view's cutoff {}", self.cutoff);
+        }
+        Ok(AsOfView { store: self.store, deadline, cutoff: self.cutoff })
+    }
+
     /// The same store as of `cutoff` (walk-forward fits); a cutoff after this view's deadline
-    /// fails, so nothing derived from a view sees more than the view.
+    /// fails, and the result never sees more than this view, so nothing derived from a view
+    /// sees more than the view.
     pub fn earlier(&self, cutoff: Micros) -> Result<AsOfView<'a>> {
         if cutoff > self.deadline {
             bail!("cutoff {cutoff} is after the view's deadline {}", self.deadline);
         }
-        Ok(AsOfView { store: self.store, deadline: cutoff })
+        Ok(AsOfView { store: self.store, deadline: cutoff, cutoff: cutoff.min(self.cutoff) })
     }
 
-    /// Rows with available_at < deadline, in available_at order (all columns when `columns`
+    /// Rows with available_at < cutoff, in available_at order (all columns when `columns`
     /// is None). Not for static tables (use `lookup`).
     pub fn table(&self, name: &str, columns: Option<&[&str]>) -> Result<Table> {
         if let Some(spec) = table_spec(name)
@@ -405,7 +432,7 @@ impl<'a> AsOfView<'a> {
             );
         }
         let table = self.store.table(name)?;
-        let k = table.visible(self.deadline);
+        let k = table.visible(self.cutoff);
         match columns {
             Some(columns) => table.prefix(columns, k),
             None => {
@@ -416,7 +443,7 @@ impl<'a> AsOfView<'a> {
     }
 
     /// Static tables only: the `public_columns` of the rows whose key is in `keys` and is
-    /// visible as of the deadline (appears in a visible row of the spec's `visible_via`
+    /// visible as of the cutoff (appears in a visible row of the spec's `visible_via`
     /// table); one row per key (the first), sorted by key. Other keys are dropped.
     pub fn lookup(&self, name: &str, keys: &[i64]) -> Result<Table> {
         let spec = table_spec(name).ok_or_else(|| unknown(name))?;
@@ -444,7 +471,7 @@ impl<'a> AsOfView<'a> {
     }
 
     /// Snapshot tables only: per `by` group (nulls are a group; `by` empty = one group) the
-    /// row of the newest snapshot before the deadline, an 'fpl' row winning a tie. One row
+    /// row of the newest snapshot before the cutoff, an 'fpl' row winning a tie. One row
     /// per group, sorted by `by`; columns = `by` then `columns` (default: all).
     pub fn latest(&self, name: &str, by: &[&str], columns: Option<&[&str]>) -> Result<Table> {
         let table = self.store.table(name)?;
@@ -461,7 +488,7 @@ impl<'a> AsOfView<'a> {
                 out_columns.push(c);
             }
         }
-        let k = table.visible(self.deadline);
+        let k = table.visible(self.cutoff);
         let groups = table.groups(by)?;
         let mut rows = Vec::new();
         for g in 0..groups.offsets.len().saturating_sub(1) {
@@ -477,7 +504,7 @@ impl<'a> AsOfView<'a> {
     }
 
     /// The as-of fixture list of `season`: the newest `fixture_snapshot` of that season before
-    /// the deadline (schedule_source 'snapshot'; GW index from `gameweek`), else the final
+    /// the cutoff (schedule_source 'snapshot'; GW index from `gameweek`), else the final
     /// `schedule` ('final'). Sorted by fixture_key.
     pub fn schedule(&self, season: i64) -> Result<Table> {
         let newest = self.latest("fixture_snapshot", &["season"], Some(&["snapshot_at"]))?;
@@ -507,7 +534,7 @@ impl<'a> AsOfView<'a> {
                 // Visible rows are sorted by available_at (= snapshot_at): the snapshot is a
                 // block.
                 let snapshots = self.store.table("fixture_snapshot")?;
-                let k = snapshots.visible(self.deadline);
+                let k = snapshots.visible(self.cutoff);
                 let visible = &snapshots.available[..k];
                 let lo = visible.partition_point(|&t| t < at);
                 let hi = visible.partition_point(|&t| t <= at);

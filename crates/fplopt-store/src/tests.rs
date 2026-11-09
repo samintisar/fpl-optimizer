@@ -142,3 +142,54 @@ fn unknown_tables_and_columns_fail() {
     assert!(s.as_of(H).table("player_season", Some(&["season"])).is_err());
     assert!(s.as_of(H).table("player_match", None).is_err());
 }
+
+#[test]
+fn an_early_view_is_for_its_deadline_but_sees_only_rows_before_its_cutoff() {
+    let rows = Table::new()
+        .with("player_key", ints(&[1, 2, 3]))
+        .with("fixture_key", ints(&[10, 10, 10]))
+        .with("available_at", ts(&[1, 3, 5]));
+    let gameweeks = Table::new()
+        .with("season", ints(&[2022, 2022]))
+        .with("gw", ints(&[1, 2]))
+        .with("gw_index", ints(&[1, 2]))
+        .with("deadline_time", Column::OptI64(vec![Some(2 * H), Some(6 * H)]))
+        .with("available_at", ts(&[0, 0]));
+    let s = store(vec![("player_match", rows), ("gameweek", gameweeks)]);
+    let early = s.as_of_early(6 * H, 4 * H).unwrap();
+    assert_eq!(early.deadline(), 6 * H);
+    assert_eq!(early.cutoff(), 4 * H);
+    assert!(early.is_early());
+    // visibility follows the cutoff ...
+    let seen = early.table("player_match", Some(&["player_key"])).unwrap();
+    assert_eq!(seen.i64("player_key").unwrap(), &[1, 2]);
+    // ... the gameweek follows the deadline
+    assert_eq!(early.gameweek_for_deadline().unwrap(), (2022, 2));
+    // as_of is the cutoff = deadline case
+    let full = s.as_of(6 * H);
+    assert_eq!(full.cutoff(), 6 * H);
+    assert!(!full.is_early());
+    assert_eq!(full.table("player_match", None).unwrap().height(), 3);
+    // a deadline before the cutoff is refused
+    assert!(s.as_of(4 * H).for_deadline(3 * H).is_err());
+    // earlier() never widens what the view sees
+    let e = early.earlier(5 * H).unwrap();
+    assert_eq!((e.deadline(), e.cutoff()), (5 * H, 4 * H));
+    let e = early.earlier(2 * H).unwrap();
+    assert_eq!((e.deadline(), e.cutoff()), (2 * H, 2 * H));
+    assert!(early.earlier(7 * H).is_err());
+}
+
+#[test]
+fn latest_on_an_early_view_takes_the_newest_snapshot_before_the_cutoff() {
+    let rows = Table::new()
+        .with("snapshot_at", ts(&[1, 3, 5]))
+        .with("source", strs(&["fpl", "fpl", "fpl"]))
+        .with("player_key", Column::OptI64(vec![Some(7), Some(7), Some(7)]))
+        .with("now_cost", ints(&[50, 51, 52]))
+        .with("available_at", ts(&[1, 3, 5]));
+    let s = store(vec![("player_snapshot", rows)]);
+    let early = s.as_of_early(6 * H, 4 * H).unwrap();
+    let out = early.latest("player_snapshot", &["player_key"], Some(&["now_cost"])).unwrap();
+    assert_eq!(out.i64("now_cost").unwrap(), &[51]);
+}
