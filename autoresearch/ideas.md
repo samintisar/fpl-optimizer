@@ -429,6 +429,16 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 
 ## Needs the user (not the loop's to do)
 
+- **2026-11-09: no experiments tonight.** `last_checked_gw` is still 9 (bootstrap
+  2026-11-09T023113Z; status still reports next GW 10 with the 2026-11-06 deadline, so
+  FPL hasn't marked GW10 checked yet). No monitor; the next run should do the GW10 report.
+  `sync.sh raw` copied 33 new files. The harness hash is still adeb6c64 (head baseline
+  `039552b60b-adeb6c64`), so the crowd (idea 13, b3a642b) is still unscoreable, and the
+  calibration table still blocks `optimizer:v1` decision runs (idea 5). No open line has an
+  untried variant with a mechanism behind it (idea 18's learning rate / min_data_in_leaf
+  have none), so I spent no variants. The ledger is unchanged: 54 scored (14 KEEP, 40
+  DISCARD), 4 ERROR. Fifth night idle: the loop needs a harness or table change to resume.
+
 - **2026-11-08: no experiments tonight.** `last_checked_gw` is still 9 (bootstrap
   2026-11-08T023213Z; GW10's matches not yet checked by FPL), so there was no monitor; the
   next run should do the GW10 report. `sync.sh raw` copied 34 new files. The harness hash is
