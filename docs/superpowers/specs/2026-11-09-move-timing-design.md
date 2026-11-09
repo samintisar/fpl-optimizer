@@ -40,6 +40,15 @@ A player-night classifier: rise / fall / no change tonight.
   - days to the deadline; GW index.
 - **Model:** LightGBM (the pinned `fplopt-lgbm`), two binary boosters (rise, fall). **VERIFY** that `fplopt-lgbm` runs the `binary` objective as LightGBM does; if not, a regression on the change in tenths, clipped.
 - **Gate N (2022/23, develop):** log loss of each booster against two baselines: the base rate and a threshold rule on net transfers per owner (fitted on the training seasons); one-sided Diebold–Mariano by night, p < 0.10; calibration table in the note. If N fails, T is not run.
+- **Calibration (amended 2026-11-09, before Gate N's run, after the 2021/22 smoke run):**
+  - **The problem:** the smoke run's raw probabilities were overconfident above 0.1. For example, predicted 0.55 against an observed 0.14 for rises. T acts on the probabilities themselves (τ = 0.5), so ranking well is not enough.
+  - **The fix:**
+    - Both the model and B1 are recalibrated by Platt scaling: a logistic regression of the label on logit(p).
+    - The scaling is fitted on out-of-fold predictions over the training rows only: 5 folds of contiguous training nights, with each fold's boosters fitted on the other four, using the same parameters.
+    - The final boosters are fitted on all training rows, and the map is applied to their predictions.
+  - **What the gate scores:** the log-loss comparisons use the calibrated probabilities. The raw ones are reported too.
+  - **An added gate condition, per target, for the model:** among the evaluated rows with calibrated p ≥ 0.3 (the region where T can act), there must be at least 30 rows, and the observed rate must be at least the mean calibrated p − 0.10.
+  - **The overall rule:** N passes only if all four log-loss tests pass and both calibration conditions hold.
 
 ## Measurement
 

@@ -1209,6 +1209,33 @@ git commit -m "test(models): night features equal on real early views (ignored)"
 
 ---
 
+### Task 4b: Calibration in Gate N (amended 2026-11-09, before Gate N's run)
+
+The smoke run on 2021/22 (282 nights and 186,929 player-nights; the plan's earlier estimate of 330–370 nights was wrong) beat both baselines on log loss. Above p = 0.1, though, its probabilities were overconfident: predicted 0.55 against an observed 0.14 for rises, and 0.55 against 0.24 for falls. The spec's "Calibration" bullet (Gate N) now adds two things:
+
+- **Platt recalibration** of the model and of B1, using out-of-fold predictions on the training rows. The folds are 5 contiguous blocks of training nights.
+- **A calibration condition**, per target: among rows with calibrated p ≥ 0.3, n ≥ 30 and the observed rate ≥ the mean calibrated p − 0.10.
+
+What changes in the code:
+
+- **`fplopt_models::night`** gets:
+  - `Platt { a, b }`, where p' = σ(a + b·logit(p)), with p clipped to [1e-6, 1 − 1e-6];
+  - `fit_platt(&[(y, p)])`, a Newton/IRLS logistic fit with two parameters;
+  - `oof_predictions(rows, features, params, folds = 5)`, out-of-fold predictions by contiguous night blocks;
+  - `CalibratedFit { fit, rise, fall }`, built by `fit_calibrated(rows, features, params)`, plus `predict_calibrated`.
+- **`night_eval`**:
+  - `NightRow` gets `raw_p_rise`/`raw_p_fall` and `raw_b1_rise`/`raw_b1_fall`.
+  - `p_*` and `b1_*` hold the calibrated probabilities.
+  - The metrics add `log_loss_raw`, the Platt coefficients per season and target, and `calibration_gate` (per target: n, mean_p, rate, pass).
+  - `gate_pass` requires the four DM tests and both calibration conditions.
+  - The CLI prints the calibration-gate rows.
+- **Tests:**
+  - Platt recovers known coefficients on synthetic data.
+  - The out-of-fold predictions never use a row's own fold.
+  - The calibration condition fails with n < 30, or when the observed rate < mean_p − 0.10.
+  - `gate_pass` needs both the DM tests and the calibration condition.
+- **The smoke run on 2021** is run again once the changes are in, as a mechanics check.
+
 ### Task 5 (controller): Gate N run, docs
 
 - [ ] **Step 1:** Add to `CLAUDE.md` Commands, after `research price-eval`:
