@@ -9,6 +9,7 @@ pub mod bans;
 pub mod baseline;
 pub mod history;
 pub mod leakcheck;
+pub mod night;
 pub mod price;
 pub mod util;
 
@@ -30,8 +31,9 @@ pub const FEATURES: &[(&str, FeatureBuilder)] = &[
 
 /// Every registered feature plus the minutes model's history frames: what the batch 3 parity
 /// gate compares (`fplopt-rs features dump`), and the price forecast's snapshot frame
-/// (`price_features`, Rust only: the parity gate compares only Python's frames). All of them
-/// are covered by `check leakage`.
+/// (`price_features`) and the move-timing model's night frame (`night_features`), both Rust
+/// only: the parity gate compares only Python's frames. All of them are covered by
+/// `check leakage`.
 pub const FRAMES: &[(&str, FeatureBuilder)] = &[
     ("player_pool", baseline::player_pool),
     ("availability", baseline::availability),
@@ -43,6 +45,7 @@ pub const FRAMES: &[(&str, FeatureBuilder)] = &[
     ("history_training", history::training_frame),
     ("history_prediction", history::prediction_frame),
     ("price_features", price::price_features),
+    ("night_features", night::night_features),
 ];
 
 /// Every registered feature at the view's deadline, in FEATURES order.

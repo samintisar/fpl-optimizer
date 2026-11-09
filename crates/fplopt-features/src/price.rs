@@ -56,7 +56,7 @@ struct Snap {
     news: Option<Micros>,
 }
 
-fn status_code(status: Option<&str>) -> f64 {
+pub(crate) fn status_code(status: Option<&str>) -> f64 {
     match status {
         Some("a") => 0.0,
         Some("d") => 1.0,
