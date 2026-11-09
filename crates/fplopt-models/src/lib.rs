@@ -18,6 +18,7 @@ pub mod components;
 pub mod fitted;
 pub mod gbm;
 pub mod minutes;
+pub mod night;
 pub mod optim;
 pub mod price;
 pub mod shares;
