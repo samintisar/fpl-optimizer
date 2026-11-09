@@ -2,7 +2,9 @@
 //! P(rise tonight) and P(fall tonight) per player from `fplopt_features::night` at 22:00 UK,
 //! labelled by the next morning's price (the first snapshot from 04:00 to 12:00 UK; FPL
 //! changes prices at about 02:30). Two binary boosters, fitted on the nights of earlier
-//! seasons only; the holdout season is refused.
+//! seasons only; the holdout season is refused. The boosters' probabilities are recalibrated
+//! by Platt scaling (`fit_calibrated`; spec's "Calibration", amended 2026-11-09), fitted on
+//! out-of-fold predictions over the training rows (5 contiguous blocks of training nights).
 
 use std::collections::BTreeSet;
 
@@ -13,6 +15,7 @@ use fplopt_store::{AsOfView, Column, DataStore, Micros, Table};
 
 use crate::gbm::{Gbm, GbmParams, train};
 use crate::price::refuse_holdout;
+use crate::util::{expit, logit};
 
 /// The decision moment and the label window, UK wall-clock hours.
 pub const NIGHT_HOUR: u32 = 22;
@@ -189,6 +192,153 @@ pub fn predict_night(fit: &NightFit, features: &Table) -> Result<Table> {
         .with("player_key", Column::I64(features.i64("player_key")?.to_vec()))
         .with("p_rise", Column::F64(fit.rise.predict(features)?))
         .with("p_fall", Column::F64(fit.fall.predict(features)?)))
+}
+
+/// The out-of-fold blocks of the Platt calibration (contiguous blocks of training nights).
+pub const CALIBRATION_FOLDS: usize = 5;
+/// Probabilities are clipped to [PLATT_CLIP, 1 − PLATT_CLIP] before the logit.
+pub const PLATT_CLIP: f64 = 1e-6;
+const PLATT_RIDGE: f64 = 1e-9;
+const PLATT_TOL: f64 = 1e-10;
+const PLATT_MAX_ITER: usize = 100;
+
+/// Platt scaling: p' = σ(a + b·logit(p)), p clipped to [1e-6, 1 − 1e-6].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Platt {
+    pub a: f64,
+    pub b: f64,
+}
+
+impl Platt {
+    pub fn apply(&self, p: f64) -> f64 {
+        expit(self.a + self.b * logit(p.clamp(PLATT_CLIP, 1.0 - PLATT_CLIP)))
+    }
+}
+
+/// The two-parameter logistic regression of y on logit(p) over (y, p) pairs (y 0/1, p
+/// finite), by Newton's method (IRLS) from (a, b) = (0, 1), the identity map, with a 1e-9
+/// ridge on the Hessian; it stops when the step's largest component is below 1e-10, after at
+/// most 100 iterations. Refuses pairs without both classes (no finite fit).
+pub fn fit_platt(pairs: &[(f64, f64)]) -> Result<Platt> {
+    if let Some(&(y, p)) = pairs.iter().find(|&&(y, p)| !(y == 0.0 || y == 1.0) || !p.is_finite()) {
+        bail!("Platt: a pair (y {y}, p {p}) is not a 0/1 label with a finite probability");
+    }
+    let positives = pairs.iter().filter(|&&(y, _)| y == 1.0).count();
+    if positives == 0 || positives == pairs.len() {
+        bail!("Platt: {positives} positive(s) of {} pairs; both classes are needed", pairs.len());
+    }
+    let xs: Vec<(f64, f64)> =
+        pairs.iter().map(|&(y, p)| (y, logit(p.clamp(PLATT_CLIP, 1.0 - PLATT_CLIP)))).collect();
+    let (mut a, mut b) = (0.0, 1.0);
+    for _ in 0..PLATT_MAX_ITER {
+        let (mut ga, mut gb, mut haa, mut hab, mut hbb) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for &(y, x) in &xs {
+            let mu = expit(a + b * x);
+            let w = mu * (1.0 - mu);
+            ga += y - mu;
+            gb += (y - mu) * x;
+            haa += w;
+            hab += w * x;
+            hbb += w * x * x;
+        }
+        haa += PLATT_RIDGE;
+        hbb += PLATT_RIDGE;
+        let det = haa * hbb - hab * hab;
+        if !(det.is_finite() && det > 0.0) {
+            bail!("Platt: singular Hessian (det {det})");
+        }
+        let da = (hbb * ga - hab * gb) / det;
+        let db = (haa * gb - hab * ga) / det;
+        a += da;
+        b += db;
+        if !(a.is_finite() && b.is_finite()) {
+            bail!("Platt: the fit diverged");
+        }
+        if da.abs().max(db.abs()) < PLATT_TOL {
+            break;
+        }
+    }
+    Ok(Platt { a, b })
+}
+
+/// The fold of each of `n` nights in time order: `folds` contiguous blocks covering all of
+/// them (night i is in block ⌊i·folds/n⌋). Refuses fewer nights than folds.
+pub fn night_folds(n: usize, folds: usize) -> Result<Vec<usize>> {
+    if folds == 0 || n < folds {
+        bail!("{n} night(s) for {folds} fold(s)");
+    }
+    Ok((0..n).map(|i| i * folds / n).collect())
+}
+
+/// Out-of-fold predictions (rise, fall) for every row of `rows`, in the rows' order: the
+/// distinct nights in time order are split into `folds` contiguous blocks (`night_folds`),
+/// and each block's rows are predicted by `fit_on` fitted on the other blocks' rows. Rows
+/// with a NaN label are predicted too (`fit_on` trains on the finite labels only).
+pub fn oof_predictions(
+    rows: &Table,
+    features: &[&'static str],
+    params: &NightParams,
+    folds: usize,
+) -> Result<(Vec<f64>, Vec<f64>)> {
+    let night = rows.i64("night")?;
+    let distinct: Vec<Micros> =
+        night.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();
+    let block = night_folds(distinct.len(), folds)?;
+    let fold_of = |t: Micros| block[distinct.partition_point(|&d| d < t)];
+    let row_fold: Vec<usize> = night.iter().map(|&t| fold_of(t)).collect();
+    let (mut rise, mut fall) = (vec![f64::NAN; rows.height()], vec![f64::NAN; rows.height()]);
+    for k in 0..folds {
+        let (test, train): (Vec<usize>, Vec<usize>) =
+            (0..rows.height()).partition(|&i| row_fold[i] == k);
+        let fit = fit_on(&rows.take(&train), features, params)?;
+        let held = rows.take(&test);
+        let (r, f) = (fit.rise.predict(&held)?, fit.fall.predict(&held)?);
+        for (j, &i) in test.iter().enumerate() {
+            rise[i] = r[j];
+            fall[i] = f[j];
+        }
+    }
+    Ok((rise, fall))
+}
+
+/// The boosters fitted on all training rows and the Platt maps of their probabilities.
+pub struct CalibratedFit {
+    pub fit: NightFit,
+    pub rise: Platt,
+    pub fall: Platt,
+}
+
+/// Boosters on `features` (`fit_on` on all of `rows`) with Platt maps fitted on the
+/// out-of-fold predictions over the same rows (`CALIBRATION_FOLDS` contiguous night blocks,
+/// the same parameters) against the finite labels.
+pub fn fit_calibrated(
+    rows: &Table,
+    features: &[&'static str],
+    params: &NightParams,
+) -> Result<CalibratedFit> {
+    let (oof_rise, oof_fall) = oof_predictions(rows, features, params, CALIBRATION_FOLDS)?;
+    let platt = |label: &str, p: &[f64]| -> Result<Platt> {
+        let y = rows.f64(label)?;
+        let pairs: Vec<(f64, f64)> =
+            (0..rows.height()).filter(|&i| y[i].is_finite()).map(|i| (y[i], p[i])).collect();
+        fit_platt(&pairs)
+    };
+    let (rise, fall) = (platt("rise", &oof_rise)?, platt("fall", &oof_fall)?);
+    Ok(CalibratedFit { fit: fit_on(rows, features, params)?, rise, fall })
+}
+
+/// `player_key, p_rise, p_fall, raw_p_rise, raw_p_fall` for `features`' rows, in order:
+/// `p_*` calibrated, `raw_p_*` the boosters' own.
+pub fn predict_calibrated(fit: &CalibratedFit, features: &Table) -> Result<Table> {
+    let raw_rise = fit.fit.rise.predict(features)?;
+    let raw_fall = fit.fit.fall.predict(features)?;
+    let map = |platt: &Platt, raw: &[f64]| raw.iter().map(|&p| platt.apply(p)).collect();
+    Ok(Table::new()
+        .with("player_key", Column::I64(features.i64("player_key")?.to_vec()))
+        .with("p_rise", Column::F64(map(&fit.rise, &raw_rise)))
+        .with("p_fall", Column::F64(map(&fit.fall, &raw_fall)))
+        .with("raw_p_rise", Column::F64(raw_rise))
+        .with("raw_p_fall", Column::F64(raw_fall)))
 }
 
 #[cfg(test)]
@@ -410,5 +560,147 @@ mod tests {
         for c in ["p_rise", "p_fall"] {
             assert!(p.f64(c).unwrap().iter().all(|v| (0.0..=1.0).contains(v)), "{c}");
         }
+    }
+
+    /// A 64-bit LCG (Knuth's MMIX constants): uniform draws in [0, 1).
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    #[test]
+    fn platt_recovers_known_coefficients() {
+        let truth = Platt { a: -1.0, b: 0.6 };
+        let mut rng = Lcg(42);
+        let pairs: Vec<(f64, f64)> = (0..20_000)
+            .map(|_| {
+                let p = 0.01 + 0.98 * rng.next();
+                let y = f64::from(u8::from(rng.next() < truth.apply(p)));
+                (y, p)
+            })
+            .collect();
+        let fit = fit_platt(&pairs).unwrap();
+        assert!((fit.a - truth.a).abs() < 0.1, "a {}", fit.a);
+        assert!((fit.b - truth.b).abs() < 0.1, "b {}", fit.b);
+        // already calibrated probabilities map to about the identity
+        let mut rng = Lcg(7);
+        let calibrated: Vec<(f64, f64)> = (0..20_000)
+            .map(|_| {
+                let p = 0.01 + 0.98 * rng.next();
+                (f64::from(u8::from(rng.next() < p)), p)
+            })
+            .collect();
+        let id = fit_platt(&calibrated).unwrap();
+        assert!(id.a.abs() < 0.1 && (id.b - 1.0).abs() < 0.1, "{id:?}");
+    }
+
+    #[test]
+    fn platt_needs_both_classes() {
+        assert!(fit_platt(&[(1.0, 0.3), (1.0, 0.6)]).is_err());
+        assert!(fit_platt(&[(0.0, 0.3), (0.0, 0.6)]).is_err());
+        assert!(fit_platt(&[]).is_err());
+        assert!(fit_platt(&[(0.0, 0.3), (1.0, f64::NAN)]).is_err());
+        assert!(fit_platt(&[(0.0, 0.3), (1.0, 0.6), (0.0, 0.4)]).is_ok());
+    }
+
+    #[test]
+    fn night_folds_are_contiguous_blocks_covering_every_night() {
+        let f = night_folds(12, 5).unwrap();
+        assert_eq!(f, [0, 0, 0, 1, 1, 2, 2, 2, 3, 3, 4, 4]);
+        assert!(f.windows(2).all(|w| w[1] == w[0] || w[1] == w[0] + 1));
+        assert_eq!(night_folds(5, 5).unwrap(), [0, 1, 2, 3, 4]);
+        assert!(night_folds(4, 5).is_err());
+        assert!(night_folds(3, 0).is_err());
+    }
+
+    /// 10 nights × 20 rows, feature `price` uniform-ish: on nights 0–7 rise = price < 0.5;
+    /// on nights 8–9 (the last fold) price is 10–11 and every row rises. Fitted without
+    /// that fold, its rows land on the high-price side (no rise): low probabilities; any
+    /// leak of the fold's own labels would push them up.
+    #[test]
+    fn out_of_fold_predictions_never_see_their_own_fold() {
+        let (mut night, mut key, mut price, mut rise) = (vec![], vec![], vec![], vec![]);
+        for n in 0..10i64 {
+            for j in 0..20i64 {
+                let x = j as f64 / 20.0;
+                night.push(n * DAY);
+                key.push(j);
+                if n >= 8 {
+                    price.push(10.0 + x);
+                    rise.push(1.0);
+                } else {
+                    price.push(x);
+                    rise.push(f64::from(u8::from(x < 0.5)));
+                }
+            }
+        }
+        let n = night.len();
+        let fall: Vec<f64> = rise.iter().map(|r| 1.0 - r).collect();
+        let rows = Table::new()
+            .with("season", Column::I64(vec![2021; n]))
+            .with("night", Column::Ts(night))
+            .with("player_key", Column::I64(key))
+            .with("price", Column::F64(price))
+            .with("rise", Column::F64(rise))
+            .with("fall", Column::F64(fall));
+        let params = NightParams {
+            gbm: GbmParams {
+                num_boost_round: 30,
+                learning_rate: 0.3,
+                min_data_in_leaf: 5,
+                ..NightParams::default().gbm
+            },
+        };
+        let (r, f) = oof_predictions(&rows, &["price"], &params, 5).unwrap();
+        assert!(r.iter().chain(&f).all(|v| v.is_finite()));
+        // the last fold (rows 160..200): its own labels (all rises) are never seen
+        assert!(r[160..].iter().all(|&p| p < 0.2), "{:?}", &r[160..165]);
+        assert!(f[160..].iter().all(|&p| p > 0.8));
+        // the first fold is predicted from the pattern of the others
+        assert!(r[..10].iter().all(|&p| p > 0.5) && r[10..20].iter().all(|&p| p < 0.5));
+        // fitted on everything instead, the last fold's rows do rise
+        let all = fit_on(&rows, &["price"], &params).unwrap();
+        let held = rows.take(&(160..200).collect::<Vec<_>>());
+        assert!(all.rise.predict(&held).unwrap().iter().all(|&p| p > 0.8));
+    }
+
+    #[test]
+    fn calibrated_predictions_map_the_raw_ones() {
+        let s = store();
+        let rows = training_rows(&s, &[2021], uk_wall_clock(date(8, 25), 0)).unwrap();
+        // a single rise in the fixture: give the Platt fits both classes on every fold
+        let params = NightParams {
+            gbm: GbmParams {
+                num_boost_round: 5,
+                min_data_in_leaf: 1,
+                ..NightParams::default().gbm
+            },
+        };
+        let mut rise = rows.f64("rise").unwrap().to_vec();
+        let mut fall = rows.f64("fall").unwrap().to_vec();
+        for i in (0..rows.height()).step_by(3) {
+            rise[i] = 1.0;
+            fall[i] = 1.0;
+        }
+        let mut relabelled = Table::new();
+        for name in rows.names().into_iter().filter(|n| !["rise", "fall"].contains(n)) {
+            relabelled = relabelled.with(name, rows.column(name).unwrap().clone());
+        }
+        let rows = relabelled.with("rise", Column::F64(rise)).with("fall", Column::F64(fall));
+        let fit = fit_calibrated(&rows, FEATURES, &params).unwrap();
+        let p = predict_calibrated(&fit, &rows).unwrap();
+        assert_eq!(p.names(), ["player_key", "p_rise", "p_fall", "raw_p_rise", "raw_p_fall"]);
+        let (cal, raw) = (p.f64("p_rise").unwrap(), p.f64("raw_p_rise").unwrap());
+        for i in 0..p.height() {
+            assert!((cal[i] - fit.rise.apply(raw[i])).abs() < 1e-15);
+        }
+        assert_eq!(raw, fit.fit.rise.predict(&rows).unwrap());
     }
 }
