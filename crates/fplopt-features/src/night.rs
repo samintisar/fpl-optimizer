@@ -55,6 +55,7 @@ pub struct NightSnap {
     pub at: Micros,
     pub cost: f64,
     pub net: f64,
+    pub cum: f64,
     pub own: Option<f64>,
     pub status: Option<String>,
     pub chance: Option<f64>,
@@ -93,12 +94,14 @@ impl SeasonSnaps {
                 at,
                 cost: costs[i].unwrap_or(f64::NAN),
                 net,
+                cum: f64::NAN, // set by `accumulate`
                 own: owns[i],
                 status: statuses[i].clone(),
                 chance: chances[i],
             };
             raw.entry(player).or_default().push((at, sources[i].as_deref() == Some("fpl"), snap));
         }
+        let deadlines = season_deadlines(view, season)?;
         let mut by_player = BTreeMap::new();
         for (player, mut rows) in raw {
             rows.sort_by_key(|r| (r.0, r.1));
@@ -110,6 +113,7 @@ impl SeasonSnaps {
                 }
                 kept.push(snap);
             }
+            accumulate(&mut kept, &deadlines);
             by_player.insert(player, kept);
         }
         Ok(SeasonSnaps { by_player })
@@ -127,16 +131,43 @@ impl SeasonSnaps {
     }
 }
 
-/// The latest deadline of `season` at or before `cutoff` (the current GW's start: FPL resets
-/// `transfers_in_event` there), i64::MIN before the first.
-pub fn gw_start(view: &AsOfView, season: i64, cutoff: Micros) -> Result<Micros> {
+/// `season`'s deadlines visible in `view`, sorted.
+fn season_deadlines(view: &AsOfView, season: i64) -> Result<Vec<Micros>> {
     let g = view.table("gameweek", Some(&["season", "deadline_time"]))?;
     let seasons = g.i64("season")?;
     let deadlines = g.opt_i64("deadline_time")?;
-    Ok((0..g.height())
-        .filter(|&i| seasons[i] == season)
-        .filter_map(|i| deadlines[i])
-        .filter(|&d| d <= cutoff)
+    let mut out: Vec<Micros> =
+        (0..g.height()).filter(|&i| seasons[i] == season).filter_map(|i| deadlines[i]).collect();
+    out.sort_unstable();
+    Ok(out)
+}
+
+/// Sets `cum`, the season-cumulative net transfers: FPL resets the event counters at each
+/// deadline but not its price progress, so at every deadline at or before a snapshot the
+/// player's last `net` strictly before that deadline (and after the previous one, so a GW
+/// without his snapshots adds nothing; a missing net adds 0) is carried into the offset.
+/// Transfers between his last snapshot and each deadline are lost.
+fn accumulate(rows: &mut [NightSnap], deadlines: &[Micros]) {
+    let mut offset = 0.0;
+    let mut pending: Option<f64> = None; // the last net since the previous deadline
+    let mut next = 0;
+    for s in rows.iter_mut() {
+        while next < deadlines.len() && deadlines[next] <= s.at {
+            offset += pending.take().filter(|n| n.is_finite()).unwrap_or(0.0);
+            next += 1;
+        }
+        s.cum = s.net + offset;
+        pending = Some(s.net);
+    }
+}
+
+/// The latest deadline of `season` strictly before `cutoff` (the current GW's start: FPL
+/// resets `transfers_in_event` there; a view whose cutoff is a deadline sees only snapshots
+/// before it, so its GW is still the previous one), i64::MIN before the first.
+pub fn gw_start(view: &AsOfView, season: i64, cutoff: Micros) -> Result<Micros> {
+    Ok(season_deadlines(view, season)?
+        .into_iter()
+        .filter(|&d| d < cutoff)
         .max()
         .unwrap_or(i64::MIN))
 }
@@ -145,19 +176,21 @@ pub fn gw_start(view: &AsOfView, season: i64, cutoff: Micros) -> Result<Micros> 
 /// snapshots before `cutoff` (`rows` sorted by time, all before the cutoff, non-empty).
 fn player_row(rows: &[NightSnap], cutoff: Micros, gw_start: Micros) -> [f64; 12] {
     let last = &rows[rows.len() - 1];
-    let since_gw = |s: &NightSnap| if s.at >= gw_start { s.net } else { 0.0 };
+    // the counter restarted at the GW start if the newest snapshot is before it
+    let net_event = if last.at >= gw_start { last.net } else { 0.0 };
     let changes: Vec<usize> = (1..rows.len())
         .filter(|&i| {
             let (a, b) = (rows[i - 1].cost, rows[i].cost);
             a.is_finite() && b.is_finite() && a != b
         })
         .collect();
+    // season-cumulative net (`cum`), so progress carries across GW resets
     let net_since_change = match changes.last() {
-        Some(&c) if rows[c].at >= gw_start => last.net - since_gw(&rows[c - 1]),
-        _ => last.net,
+        Some(&c) => last.cum - rows[c - 1].cum,
+        None => last.cum,
     };
     let k = rows.partition_point(|s| s.at <= cutoff - DAY);
-    let net_24h = if k > 0 { last.net - since_gw(&rows[k - 1]) } else { last.net };
+    let net_24h = if k > 0 { last.cum - rows[k - 1].cum } else { last.cum };
     let nights_since_change =
         changes.last().map_or(f64::NAN, |&c| (cutoff - rows[c].at) as f64 / DAY as f64);
     let in_gw = |up: bool| {
@@ -173,7 +206,7 @@ fn player_row(rows: &[NightSnap], cutoff: Micros, gw_start: Micros) -> [f64; 12]
     let own = last.own.unwrap_or(f64::NAN);
     [
         last.cost,
-        last.net,
+        net_event,
         net_since_change,
         net_24h,
         own,
@@ -265,11 +298,14 @@ mod tests {
             )
             .with("available_at", Column::Ts(rows.iter().map(|r| r.0).collect()));
         let gameweek = Table::new()
-            .with("season", Column::I64(vec![2021; 2]))
-            .with("gw", Column::I64(vec![1, 2]))
-            .with("gw_index", Column::I64(vec![1, 2]))
-            .with("deadline_time", Column::Ts(vec![aug(13, 17, 30), aug(21, 10, 0)]))
-            .with("available_at", Column::Ts(vec![0; 2]));
+            .with("season", Column::I64(vec![2021; 3]))
+            .with("gw", Column::I64(vec![1, 2, 3]))
+            .with("gw_index", Column::I64(vec![1, 2, 3]))
+            .with(
+                "deadline_time",
+                Column::Ts(vec![aug(13, 17, 30), aug(21, 10, 0), aug(28, 10, 0)]),
+            )
+            .with("available_at", Column::Ts(vec![0; 3]));
         DataStore::from_tables(HashMap::from([
             ("gameweek".to_string(), gameweek),
             ("player_snapshot".to_string(), snapshots),
@@ -330,7 +366,7 @@ mod tests {
         let s = store(&rows());
         let late = s.as_of(aug(23, 0, 0));
         let season = SeasonSnaps::read(&late, 2021).unwrap();
-        for cutoff in [aug(15, 21, 0), aug(18, 21, 0), aug(20, 21, 0)] {
+        for cutoff in [aug(15, 21, 0), aug(18, 21, 0), aug(20, 21, 0), aug(21, 10, 0)] {
             let view = s.as_of_early(aug(21, 10, 0), cutoff).unwrap();
             let a = night_features(&view).unwrap();
             let b = features_at(&season, cutoff, aug(21, 10, 0), aug(13, 17, 30), 2);
@@ -351,11 +387,48 @@ mod tests {
         let s = store(&r);
         let out = night_features(&s.as_of_early(aug(21, 10, 0), aug(20, 21, 0)).unwrap()).unwrap();
         assert_eq!(out.f64("red_lock").unwrap(), &[0.0, 1.0]);
-        // more than a week after Aug 18 the lock has passed (the fixture has no GW3, so call
-        // features_at directly rather than through a view)
-        let season = SeasonSnaps::read(&s.as_of(aug(23, 0, 0)), 2021).unwrap();
-        let later = features_at(&season, aug(25, 21, 0), aug(28, 10, 0), aug(21, 10, 0), 3);
+        // more than a week after Aug 18 the lock has passed
+        let later =
+            night_features(&s.as_of_early(aug(28, 10, 0), aug(25, 21, 0)).unwrap()).unwrap();
         assert_eq!(later.f64("red_lock").unwrap()[1], 0.0);
+    }
+
+    #[test]
+    fn cumulative_net_carries_across_the_gw2_deadline() {
+        // Aug 22's counters restarted at the GW2 deadline: cum = 50,000 + the last net before
+        // it (player 1: 8,000 at Aug 20 12:00; player 2: −2,000)
+        let s = store(&rows());
+        let season = SeasonSnaps::read(&s.as_of(aug(23, 0, 0)), 2021).unwrap();
+        let cums = |p: i64| season.by_player[&p].iter().map(|n| n.cum).collect::<Vec<_>>();
+        assert_eq!(cums(1), [1_000.0, 5_000.0, 8_000.0, 58_000.0]);
+        assert_eq!(cums(2), [-500.0, -1_000.0, -2_000.0, 48_000.0]);
+    }
+
+    #[test]
+    fn a_view_at_a_deadline_is_still_in_the_previous_gw() {
+        // cutoff = the GW2 deadline: the view sees only snapshots before it, so GW2 started at
+        // the GW1 deadline and player 1's Aug 18 rise is in it
+        let s = store(&rows());
+        let out = night_features(&s.as_of(aug(21, 10, 0))).unwrap();
+        assert_eq!(out.f64("rises_gw").unwrap(), &[1.0, 0.0]);
+        assert_eq!(out.f64("net_event").unwrap(), &[8_000.0, -2_000.0]);
+        assert_eq!(out.f64("net_since_change").unwrap(), &[7_000.0, -2_000.0]);
+        assert_eq!(out.f64("hours_to_deadline").unwrap(), &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn the_counter_resets_when_the_newest_snapshot_is_before_the_gw_start() {
+        // GW3's first night (Aug 21 21:00): the newest snapshot (Aug 20 12:00) is before the
+        // GW2 deadline, so the event counter is 0 and nothing changed this GW; the progress
+        // since the last change carries over
+        let s = store(&rows());
+        let out = night_features(&s.as_of_early(aug(28, 10, 0), aug(21, 21, 0)).unwrap()).unwrap();
+        assert_eq!(out.f64("net_event").unwrap(), &[0.0, 0.0]);
+        assert_eq!(out.f64("rises_gw").unwrap(), &[0.0, 0.0]);
+        assert_eq!(out.f64("falls_gw").unwrap(), &[0.0, 0.0]);
+        assert_eq!(out.f64("net_since_change").unwrap(), &[7_000.0, -2_000.0]);
+        assert_eq!(out.f64("net_24h").unwrap(), &[0.0, 0.0]);
+        assert_eq!(out.f64("gw_index").unwrap(), &[3.0, 3.0]);
     }
 
     #[test]
