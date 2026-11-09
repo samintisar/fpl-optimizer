@@ -430,6 +430,7 @@ struct NightTables {
     dm: String,
     gate: String,
     calibration: String,
+    tau: String,
 }
 
 /// The log-loss table (calibrated and raw), the Platt table, the Diebold-Mariano table, the
@@ -456,6 +457,19 @@ fn night_tables(metrics: &Ordered) -> NightTables {
                 text(get(r, "arm")),
                 num_text(number(get(r, "a")), 4, true),
                 num_text(number(get(r, "b")), 4, true),
+            ]
+        })
+        .collect();
+    let tau: Vec<Vec<String>> = items(metrics, "calibration_tau")
+        .iter()
+        .map(|r| {
+            let n = |k: &str| num_text(number(get(r, k)), 3, false);
+            vec![
+                text(get(r, "target")),
+                text(get(r, "n")),
+                n("mean_p"),
+                n("rate"),
+                format!("{} - {}", n("lo90"), n("hi90")),
             ]
         })
         .collect();
@@ -522,6 +536,11 @@ fn night_tables(metrics: &Ordered) -> NightTables {
         calibration: text_table(
             &headers(&["target", "n (p>=0.3)", "mean p", "rate", "result"]),
             &calibration,
+            1,
+        ),
+        tau: text_table(
+            &headers(&["target", "n (p>=0.5)", "mean p", "rate", "rate 90% Wilson"]),
+            &tau,
             1,
         ),
     }
@@ -641,6 +660,8 @@ fn night_eval(args: &NightEvalArgs) -> Result<()> {
         night_eval::CAL_MIN_N,
         night_eval::CAL_TOL,
         t.calibration,
+        night_eval::TAU_REPORT,
+        t.tau,
         args.out.display()
     );
     Ok(())

@@ -218,8 +218,8 @@ impl Platt {
 /// The two-parameter logistic regression of y on logit(p) over (y, p) pairs (y 0/1, p
 /// finite), by Newton's method (IRLS) from (a, b) = (0, 1), the identity map, with a 1e-9
 /// ridge on the Hessian and step-halving (a step is halved until the log-likelihood does not
-/// fall); it stops when the step's largest component is below 1e-10, after at most 100
-/// iterations. Refuses pairs without both classes (no finite fit).
+/// fall); it stops when the step's largest component is below 1e-10 and fails if that takes
+/// more than 100 iterations. Refuses pairs without both classes (no finite fit).
 pub fn fit_platt(pairs: &[(f64, f64)]) -> Result<Platt> {
     if let Some(&(y, p)) = pairs.iter().find(|&&(y, p)| !(y == 0.0 || y == 1.0) || !p.is_finite()) {
         bail!("Platt: a pair (y {y}, p {p}) is not a 0/1 label with a finite probability");
@@ -263,10 +263,10 @@ pub fn fit_platt(pairs: &[(f64, f64)]) -> Result<Platt> {
             bail!("Platt: the fit diverged");
         }
         if da.abs().max(db.abs()) < PLATT_TOL {
-            break;
+            return Ok(Platt { a, b });
         }
     }
-    Ok(Platt { a, b })
+    bail!("Platt: no convergence in {PLATT_MAX_ITER} iterations (a {a}, b {b})")
 }
 
 /// The negative log-likelihood of y given σ(a + b·x), summed (softplus kept stable).
@@ -636,7 +636,15 @@ mod tests {
         assert!(fit_platt(&[(0.0, 0.3), (0.0, 0.6)]).is_err());
         assert!(fit_platt(&[]).is_err());
         assert!(fit_platt(&[(0.0, 0.3), (1.0, f64::NAN)]).is_err());
-        assert!(fit_platt(&[(0.0, 0.3), (1.0, 0.6), (0.0, 0.4)]).is_ok());
+        assert!(fit_platt(&[(0.0, 0.3), (1.0, 0.6), (0.0, 0.4), (1.0, 0.35)]).is_ok());
+    }
+
+    #[test]
+    fn platt_fails_rather_than_returning_an_unconverged_map() {
+        // perfectly separated by p: the likelihood has no maximum (b grows without bound)
+        let pairs: Vec<(f64, f64)> =
+            (1..=40).map(|i| ((i > 20) as u8 as f64, i as f64 / 41.0)).collect();
+        assert!(fit_platt(&pairs).is_err());
     }
 
     #[test]

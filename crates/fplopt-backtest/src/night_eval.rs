@@ -256,6 +256,38 @@ pub fn calibration_condition(target: &'static str, pairs: &[(f64, f64)]) -> CalG
     CalGateRow { target, n, mean_p, rate, pass }
 }
 
+/// Report only (not in the gate): the calibration at policy T's threshold τ = 0.5.
+pub const TAU_REPORT: f64 = 0.5;
+/// z of the two-sided 90% Wilson interval on the observed rate.
+const WILSON_Z: f64 = 1.644_853_626_951_472_2;
+
+/// The rows with calibrated p ≥ `p_min`: their count, mean p, observed rate and its 90%
+/// Wilson interval (NaN without rows).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CalAt {
+    pub n: usize,
+    pub mean_p: f64,
+    pub rate: f64,
+    pub lo: f64,
+    pub hi: f64,
+}
+
+pub fn calibration_at(pairs: &[(f64, f64)], p_min: f64) -> CalAt {
+    let high: Vec<(f64, f64)> = pairs.iter().copied().filter(|&(_, p)| p >= p_min).collect();
+    let n = high.len();
+    if n == 0 {
+        return CalAt { n, mean_p: f64::NAN, rate: f64::NAN, lo: f64::NAN, hi: f64::NAN };
+    }
+    let nf = n as f64;
+    let mean_p = high.iter().map(|x| x.1).sum::<f64>() / nf;
+    let rate = high.iter().map(|x| x.0).sum::<f64>() / nf;
+    let z2 = WILSON_Z * WILSON_Z;
+    let centre = (rate + z2 / (2.0 * nf)) / (1.0 + z2 / nf);
+    let half =
+        WILSON_Z / (1.0 + z2 / nf) * (rate * (1.0 - rate) / nf + z2 / (4.0 * nf * nf)).sqrt();
+    CalAt { n, mean_p, rate, lo: centre - half, hi: centre + half }
+}
+
 /// (truth, model, B0, B1) of a target.
 type Pick = fn(&NightRow) -> (f64, f64, f64, f64);
 /// (truth, raw model, raw B1) of a target.
@@ -310,12 +342,15 @@ pub fn per_night(rows: &[NightRow], pick: Pick, baseline: usize) -> Vec<(Micros,
 /// `diebold_mariano`'s mean_diff, t_stat, p_a_better, p_b_better, n_clusters, lag),
 /// `calibration` and `calibration_raw` (the model's calibrated and raw p, per target and
 /// bin: lo, hi, n, mean_p, rate), `gate` (per target and baseline: p, pass),
-/// `calibration_gate` (per target: n, mean_p, rate, pass; `calibration_condition`) and
-/// `gate_pass` (every DM gate and both calibration conditions).
+/// `calibration_gate` (per target: n, mean_p, rate, pass; `calibration_condition`),
+/// `calibration_tau` (report only, per target: the rows with calibrated p ≥ `TAU_REPORT`:
+/// p_min, n, mean_p, rate, lo90, hi90; `calibration_at`) and `gate_pass` (every DM gate and
+/// both calibration conditions).
 pub fn night_metrics(rows: &[NightRow]) -> Ordered {
     let nights: BTreeSet<Micros> = rows.iter().map(|r| r.night).collect();
     let (mut losses, mut dm, mut cal, mut gate) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut raw_losses, mut cal_raw, mut cal_gate) = (Vec::new(), Vec::new(), Vec::new());
+    let mut cal_tau = Vec::new();
     let mut all_pass = true;
     for (target, pick, raw) in TARGETS {
         let arm = |k: usize| {
@@ -407,6 +442,16 @@ pub fn night_metrics(rows: &[NightRow]) -> Ordered {
             ("rate", f(c.rate)),
             ("pass", Ordered::Bool(c.pass)),
         ]));
+        let t = calibration_at(&pairs, TAU_REPORT);
+        cal_tau.push(rec(vec![
+            ("target", text(target)),
+            ("p_min", f(TAU_REPORT)),
+            ("n", int(t.n)),
+            ("mean_p", f(t.mean_p)),
+            ("rate", f(t.rate)),
+            ("lo90", f(t.lo)),
+            ("hi90", f(t.hi)),
+        ]));
     }
     rec(vec![
         ("n_rows", int(rows.len())),
@@ -418,6 +463,7 @@ pub fn night_metrics(rows: &[NightRow]) -> Ordered {
         ("calibration_raw", Ordered::Array(cal_raw)),
         ("gate", Ordered::Array(gate)),
         ("calibration_gate", Ordered::Array(cal_gate)),
+        ("calibration_tau", Ordered::Array(cal_tau)),
         ("gate_pass", Ordered::Bool(all_pass)),
     ])
 }
@@ -648,6 +694,29 @@ mod tests {
         assert_eq!(cal.len(), 2);
         assert!(cal.iter().all(|c| c.pass && c.n == 40 && c.rate == 1.0), "{cal:?}");
         assert!(gate_pass(&m));
+    }
+
+    #[test]
+    fn calibration_at_tau_reports_a_wilson_interval() {
+        // 10 rows at p 0.6, 3 positive; 5 rows below τ are left out
+        let mut pairs: Vec<(f64, f64)> = (0..10).map(|i| ((i < 3) as u8 as f64, 0.6)).collect();
+        pairs.extend((0..5).map(|_| (1.0, 0.2)));
+        let c = calibration_at(&pairs, TAU_REPORT);
+        assert_eq!(c.n, 10);
+        assert!((c.mean_p - 0.6).abs() < 1e-12 && (c.rate - 0.3).abs() < 1e-12, "{c:?}");
+        // Wilson 90% for 3/10: 0.1269 – 0.5583 (z 1.645)
+        assert!((c.lo - 0.126877).abs() < 1e-5 && (c.hi - 0.558300).abs() < 1e-5, "{c:?}");
+        let none = calibration_at(&pairs, 0.9);
+        assert_eq!(none.n, 0);
+        assert!(none.rate.is_nan() && none.lo.is_nan());
+        // in the metrics, per target
+        let m = night_metrics(&beaten(80, true));
+        let Ordered::Object(top) = &m else { panic!() };
+        let Some((_, Ordered::Array(rows))) = top.iter().find(|(k, _)| k == "calibration_tau")
+        else {
+            panic!("no calibration_tau")
+        };
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]
