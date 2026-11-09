@@ -184,7 +184,8 @@ def n_cached(root: Path) -> int:
     return sum(1 for _ in root.rglob("*.parquet")) if root.exists() else 0
 
 
-RUST_ONLY = ("market_value",)  # gws.parquet columns Python never wrote (price sizing, 2026-11)
+# gws.parquet columns Python never wrote (price sizing and early moves, 2026-11)
+RUST_ONLY = ("market_value", "decided_at", "early_kept")
 
 
 def compare_tables(a: Path, b: Path, rtol: float) -> list[str]:

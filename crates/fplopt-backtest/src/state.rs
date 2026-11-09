@@ -15,8 +15,8 @@ use crate::pyrepr;
 
 /// One GW's decision: transfers (executed together), the lineup for the post-transfer
 /// squad and an optional chip. `solver_status`, `mip_gap` and `diagnostics` (chip
-/// quantities, `policies::CHIP_DIAGNOSTICS`) are recorded in the GW rows only and take no
-/// part in equality.
+/// quantities, `policies::CHIP_DIAGNOSTICS`) are recorded in the GW rows only; they and
+/// `priced_at` take no part in equality.
 #[derive(Clone, Debug, Default)]
 pub struct Decision {
     pub transfers: Vec<Transfer>,
@@ -25,6 +25,9 @@ pub struct Decision {
     pub solver_status: Option<String>,
     pub mip_gap: Option<f64>,
     pub diagnostics: Option<BTreeMap<String, Option<f64>>>,
+    /// The moment the transfers were priced when not at the deadline (the early policy's
+    /// lockdown + 1 µs): the decision is applied, and replayed, at that moment's pool.
+    pub priced_at: Option<fplopt_store::Micros>,
 }
 
 impl PartialEq for Decision {

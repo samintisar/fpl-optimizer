@@ -474,9 +474,11 @@ pub fn per_decision(
                 decisions.insert(side, d);
             }
             let same = decisions["a"] == decisions["b"];
+            // equal decisions priced at different moments leave different banks
+            let same_priced = same && decisions["a"].priced_at == decisions["b"].priced_at;
             let mut scores: BTreeMap<&str, ((i64, Option<f64>), i64)> = BTreeMap::new();
             for (side, policy) in [("a", policy_a), ("b", policy_b)] {
-                if side == "b" && same && continuation.is_some() {
+                if side == "b" && same_priced && continuation.is_some() {
                     let a = scores["a"];
                     scores.insert("b", a);
                     continue;

@@ -328,6 +328,8 @@ fn grid_table(results: &[GridRow]) -> Table {
         .with("free_transfers", r(&|g| g.row.free_transfers))
         .with("squad_value", r(&|g| g.row.squad_value))
         .with("market_value", r(&|g| g.row.market_value))
+        .with("decided_at", Column::Ts(results.iter().map(|g| g.row.decided_at).collect()))
+        .with("early_kept", oi(&|g| g.row.early_kept))
         .with("transfers", s(&|g| g.row.transfers.clone()))
         .with("autosubs", s(&|g| g.row.autosubs.clone()))
         .with("pred_gain", of(&|g| g.row.pred_gain))
