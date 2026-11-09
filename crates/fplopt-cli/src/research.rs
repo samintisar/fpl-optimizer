@@ -5,9 +5,10 @@
 //! Stage B): the walk-forward evaluation of the price forecast against no change and
 //! momentum (`fplopt_backtest::price_eval`); writes predictions.parquet and metrics.json to
 //! --out and appends the run to the experiment log. `research night-eval` (Gate N): the
-//! walk-forward evaluation of the night price model against a base rate and net transfers
-//! per owner, by log loss (`fplopt_backtest::night_eval`); writes predictions.parquet and
-//! metrics.json to --out and appends the run to the experiment log. Usage errors exit 2.
+//! walk-forward evaluation of the night price model (Platt-calibrated) against a base rate
+//! and net transfers per owner, by log loss, plus the calibration condition
+//! (`fplopt_backtest::night_eval`); writes predictions.parquet and metrics.json to --out and
+//! appends the run to the experiment log. Usage errors exit 2.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -44,7 +45,8 @@ pub enum ResearchJob {
     MoneyValue(MoneyValueArgs),
     /// Walk-forward evaluation of the price forecast against no change and momentum.
     PriceEval(PriceEvalArgs),
-    /// Gate N: walk-forward log loss of the night price model against two baselines.
+    /// Gate N: walk-forward log loss of the Platt-calibrated night price model against two
+    /// baselines, and its calibration where p >= 0.3.
     NightEval(NightEvalArgs),
 }
 
@@ -421,14 +423,52 @@ fn price_eval(args: &PriceEvalArgs) -> Result<()> {
     Ok(())
 }
 
-/// The log-loss table, the Diebold-Mariano table and the gate table of a night-eval run.
-fn night_tables(metrics: &Ordered) -> (String, String, String) {
+/// The tables of a night-eval run.
+struct NightTables {
+    loss: String,
+    platt: String,
+    dm: String,
+    gate: String,
+    calibration: String,
+}
+
+/// The log-loss table (calibrated and raw), the Platt table, the Diebold-Mariano table, the
+/// gate table and the calibration-gate table of a night-eval run.
+fn night_tables(metrics: &Ordered) -> NightTables {
     let headers = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let raw = items(metrics, "log_loss_raw");
     let loss: Vec<Vec<String>> = items(metrics, "log_loss")
         .iter()
         .map(|r| {
             let n = |k: &str| num_text(number(get(r, k)), 5, false);
-            vec![text(get(r, "target")), n("model"), n("b0"), n("b1")]
+            let target = text(get(r, "target"));
+            let raw_row = raw.iter().find(|x| text(get(x, "target")) == target);
+            let rn = |k: &str| num_text(raw_row.map_or(f64::NAN, |x| number(get(x, k))), 5, false);
+            vec![target, n("model"), rn("model"), n("b0"), n("b1"), rn("b1")]
+        })
+        .collect();
+    let platt: Vec<Vec<String>> = items(metrics, "platt")
+        .iter()
+        .map(|r| {
+            vec![
+                text(get(r, "season")),
+                text(get(r, "target")),
+                text(get(r, "arm")),
+                num_text(number(get(r, "a")), 4, true),
+                num_text(number(get(r, "b")), 4, true),
+            ]
+        })
+        .collect();
+    let calibration: Vec<Vec<String>> = night_eval::calibration_gate_of(metrics)
+        .iter()
+        .map(|c| {
+            vec![
+                c.target.to_owned(),
+                c.n.to_string(),
+                num_text(c.mean_p, 3, false),
+                num_text(c.rate, 3, false),
+                (if c.pass { "pass" } else { "fail" }).to_owned(),
+            ]
         })
         .collect();
     let dm: Vec<Vec<String>> = items(metrics, "dm")
@@ -457,9 +497,14 @@ fn night_tables(metrics: &Ordered) -> (String, String, String) {
             ]
         })
         .collect();
-    (
-        text_table(&headers(&["target", "model", "B0", "B1"]), &loss, 1),
-        text_table(
+    NightTables {
+        loss: text_table(
+            &headers(&["target", "model", "model raw", "B0", "B1", "B1 raw"]),
+            &loss,
+            1,
+        ),
+        platt: text_table(&headers(&["season", "target", "arm", "a", "b"]), &platt, 3),
+        dm: text_table(
             &headers(&[
                 "target",
                 "B",
@@ -473,8 +518,13 @@ fn night_tables(metrics: &Ordered) -> (String, String, String) {
             &dm,
             2,
         ),
-        text_table(&headers(&["target", "B", "p", "result"]), &gate, 2),
-    )
+        gate: text_table(&headers(&["target", "B", "p", "result"]), &gate, 2),
+        calibration: text_table(
+            &headers(&["target", "n (p>=0.3)", "mean p", "rate", "result"]),
+            &calibration,
+            1,
+        ),
+    }
 }
 
 fn night_eval(args: &NightEvalArgs) -> Result<()> {
@@ -559,7 +609,7 @@ fn night_eval(args: &NightEvalArgs) -> Result<()> {
         n_variants,
         &family,
     )?;
-    let (loss, dm, gate) = night_tables(&metrics);
+    let t = night_tables(&metrics);
     let verdict = if matches!(get(&metrics, "gate_pass"), Some(Ordered::Bool(true))) {
         "PASS"
     } else {
@@ -567,16 +617,30 @@ fn night_eval(args: &NightEvalArgs) -> Result<()> {
     };
     println!(
         "night eval: {}, fitted from {}; {} night(s), {} scored player-night(s) ({runtime:.0}s)\n\n\
-         Log loss (B0 training base rate, B1 net transfers per owner)\n{loss}\n\n\
-         Diebold-Mariano, one-sided, per-night mean log loss, lag {}, clustered by night\n{dm}\n\n\
-         Gate N: {verdict} (the model beats both baselines on both targets, p < {})\n{gate}\n\n\
+         Log loss (model and B1 Platt-calibrated, raw before the map; B0 training base rate, \
+         B1 net transfers per owner)\n{}\n\n\
+         Platt maps p' = s(a + b logit p), fitted out of fold on the training nights\n{}\n\n\
+         Diebold-Mariano, calibrated, one-sided, per-night mean log loss, lag {}, clustered by \
+         night\n{}\n\n\
+         Gate N: {verdict} (the model beats both baselines on both targets, p < {}, and is \
+         calibrated where p >= {})\n{}\n\n\
+         Calibration condition (the model's calibrated p >= {}: n >= {}, rate >= mean p - {})\n{}\n\n\
          Written to {}",
         format_seasons(&seasons),
         season_label(args.first_fit as i32),
         text(get(&metrics, "n_nights")),
         text(get(&metrics, "n_rows")),
+        t.loss,
+        t.platt,
         night_eval::DM_LAG,
+        t.dm,
         night_eval::ALPHA,
+        night_eval::CAL_P_MIN,
+        t.gate,
+        night_eval::CAL_P_MIN,
+        night_eval::CAL_MIN_N,
+        night_eval::CAL_TOL,
+        t.calibration,
         args.out.display()
     );
     Ok(())
