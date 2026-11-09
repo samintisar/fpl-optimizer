@@ -16,6 +16,13 @@ pub const DEFAULT_PRUNE_N: [(i64, i64); 4] = [(1, 20), (2, 60), (3, 60), (4, 30)
 pub const DEFAULT_NODE_LIMIT: i64 = 20_000;
 pub const DEFAULT_TIE_EPSILON: f64 = 1e-4;
 pub const DEFAULT_MIN_MINUTES: f64 = 180.0;
+/// Expected points per GW per £1m of team value (`research money-value`, develop GW8–29)
+/// and the realized-on-predicted slope: the end-of-horizon money value's rate
+/// (`docs/research/2026-11-price-sizing.md`).
+pub const MONEY_V: f64 = 0.395;
+pub const MONEY_C: f64 = 0.93;
+/// GWs in a season: money is worth nothing after the last.
+pub const SEASON_GWS: i64 = 38;
 /// FPL's chip names (Python `backtest.rules.CHIP_NAMES`).
 pub const CHIP_NAMES: [&str; 4] = ["wildcard", "freehit", "bboost", "3xc"];
 
@@ -47,6 +54,8 @@ pub struct OptimizerParams {
     /// The share of a Free Hit's gain over the no-chip plan that counts when chip scenarios
     /// are ranked (`search::score`). 1 = all.
     pub fh_scale: f64,
+    /// Scale of the end-of-horizon money value λ·M (`money_rate`); 0 = off.
+    pub price_value_k: f64,
 }
 
 impl Default for OptimizerParams {
@@ -72,6 +81,7 @@ impl Default for OptimizerParams {
             chip_value_left: None,
             exclude_chips: Vec::new(),
             fh_scale: 1.0,
+            price_value_k: 0.0,
         }
     }
 }
@@ -95,6 +105,7 @@ impl OptimizerParams {
             ("hit_margin", self.hit_margin),
             ("tie_epsilon", self.tie_epsilon),
             ("min_minutes", self.min_minutes),
+            ("price_value_k", self.price_value_k),
         ] {
             if !value.is_finite() || value < 0.0 {
                 bail!("{name} must be a finite number >= 0, got {value}");
@@ -143,6 +154,15 @@ impl OptimizerParams {
             bail!("node_limit must be >= 1 or None, got {n}");
         }
         Ok(())
+    }
+
+    /// λ, the points per tenth of money held at the end of a horizon whose last GW is
+    /// `gw_index_last`: k · v · c · max(0, 38 − gw_index_last) / 10 (0 when k is 0).
+    pub fn money_rate(&self, gw_index_last: i64) -> f64 {
+        if self.price_value_k == 0.0 {
+            return 0.0;
+        }
+        self.price_value_k * MONEY_V * MONEY_C * (SEASON_GWS - gw_index_last).max(0) as f64 / 10.0
     }
 
     /// V(s) = Σ_{n ≤ s} ft_value[n]: the value of having s free transfers (summed in key

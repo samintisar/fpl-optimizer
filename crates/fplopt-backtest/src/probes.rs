@@ -3,7 +3,8 @@
 //! state at the view's deadline, runs a policy on it (the season's backtest rules, the
 //! policy's xP model) and encodes the start state and the decision, so a policy or start
 //! state that peeks past the deadline changes the frame. Registered in `check leakage` as
-//! `probe:<name>`.
+//! `probe:<name>`. `probe:early_*` runs a policy on a view for a later deadline cut at the
+//! check's deadline (`AsOfView::for_deadline`).
 //!
 //! Frame: kind, slot, player_key, value, note: `held` (slot = holding index, value =
 //! purchase price), `bank`, `free_transfers`, `out`/`in` per transfer, `starter`/`bench`
@@ -24,7 +25,7 @@ use fplopt_optimize::{OptimizerParams, XpFrame};
 use fplopt_store::AsOfView;
 
 use crate::evaluate::rules_for;
-use crate::policies::{ChipPolicy2, DecisionContext, Policy};
+use crate::policies::{ChipPolicy2, DecisionContext, Policy, PriceSource};
 use crate::state::{Decision, SquadState, apply_decision};
 
 type Row = (String, i64, i64, i64, String);
@@ -91,6 +92,7 @@ pub fn run_probe(view: &AsOfView, policy: &Policy, start: Start) -> Result<Table
         pool: &pool,
         xp: &xp,
         frame: &xp_frame,
+        prices: None,
     };
     let decision = policy.decide(&ctx)?;
     apply_decision(&state, &decision, &pool, &rules)?;
@@ -126,6 +128,9 @@ fn optimizer(xp: &str) -> Policy {
         params: probe_params(),
         chips: false,
         extra: ChipPolicy2::default(),
+        prices: PriceSource::Fixed,
+        jitter: None,
+        early: false,
     }
 }
 
@@ -149,6 +154,30 @@ fn optimizer_rolling_random0(view: &AsOfView) -> Result<Table> {
     run_probe(view, &optimizer("rolling"), random0)
 }
 
+/// The early policy's step with the check's deadline as its cutoff: E's decision for the next
+/// deadline of the season, made at the view's deadline (as at a lockdown), so the check
+/// corrupts everything at or after A. A view without a later deadline in its season is one
+/// `refused` row.
+fn early_optimizer_ep_next_template(view: &AsOfView) -> Result<Table> {
+    let (season, _) = view.gameweek_for_deadline()?;
+    let gameweeks = view.table("gameweek", Some(&["season", "deadline_time"]))?;
+    let (seasons, deadlines) = (gameweeks.i64("season")?, gameweeks.opt_i64("deadline_time")?);
+    let next = (0..gameweeks.height())
+        .filter(|&i| seasons[i] == season)
+        .filter_map(|i| deadlines[i])
+        .filter(|&d| d > view.deadline())
+        .min();
+    let Some(next) = next else {
+        return Ok(frame(vec![("refused".to_owned(), 0, -1, 0, "no later deadline".to_owned())]));
+    };
+    let early = view.for_deadline(next)?;
+    let mut policy = optimizer("ep_next");
+    if let Policy::Optimizer { early: e, .. } = &mut policy {
+        *e = true;
+    }
+    run_probe(&early, &policy, template_state)
+}
+
 /// The tables the probes read beyond the features' and models': the template start's
 /// ownership (what `check leakage` also loads).
 pub const PROBE_TABLES: &[&str] = &["player_gw_ownership"];
@@ -160,4 +189,5 @@ pub const PROBE_BUILDERS: &[(&str, FeatureBuilder)] = &[
     ("probe:roll_rolling_template", roll_rolling_template),
     ("probe:optimizer_ep_next_template", optimizer_ep_next_template),
     ("probe:optimizer_rolling_random0", optimizer_rolling_random0),
+    ("probe:early_optimizer_ep_next_template", early_optimizer_ep_next_template),
 ];

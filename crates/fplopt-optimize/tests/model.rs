@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use common::*;
 use fplopt_build::scoring::Rules;
+use fplopt_optimize::model::model_fingerprint;
 use fplopt_optimize::plans::Plan;
 use fplopt_optimize::state::{Holding, PoolPlayer, SquadState, Transfer, selling_price};
 use fplopt_optimize::{
@@ -384,6 +385,302 @@ fn first_sale_at_selling_price_later_sales_at_buy_price() {
     // first sale +55 −50, then −60 +50 (C at its buy price), then +60 (A at buy price) −50.
     assert_eq!(plan.gws.iter().map(|g| g.bank).collect::<Vec<_>>(), vec![10, 0, 10]);
     replay(&state, &plan, &pool, &rules);
+}
+
+#[test]
+fn price_path_prices_buys_and_first_sales() {
+    let rules = rules();
+    let (state, pool, xp, a, c) = churn_instance();
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let mut problem = problem(&state, &pool, &xp, &params, &rules);
+    // no path: today's prices
+    assert_eq!(player(&problem, a).buy_price(2), 60.0);
+    assert_eq!(player(&problem, a).first_sale_value(2), 55.0);
+    problem.set_price_paths(|p| match p.player_key {
+        k if k == a => Some(vec![60.0, 62.0, 66.0]),
+        k if k == c => Some(vec![50.0, 52.0, 54.0]),
+        _ => None,
+    });
+    assert_eq!(player(&problem, a).buy_price(1), 62.0);
+    // A was bought at 50: at 66 he sells for 50 + (66 - 50) / 2 = 58 (not floored)
+    assert_eq!(player(&problem, a).first_sale_value(2), 58.0);
+    assert_eq!(player(&problem, a).purchase_price, Some(50));
+    assert_eq!(player(&problem, c).purchase_price, None);
+    assert!(player(&problem, c).path_moves());
+    assert!(!player(&problem, key(1, 1, 0)).path_moves());
+}
+
+#[test]
+fn moving_prices_change_the_money_flows() {
+    // churn_instance with rising prices: the same churn A -> C -> A -> C, but the money
+    // follows the paths and FPL's selling rule per cohort.
+    let rules = rules();
+    let (state, pool, xp, a, c) = churn_instance();
+    let state = SquadState { bank: 15, ..state };
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let mut problem = problem(&state, &pool, &xp, &params, &rules);
+    problem.set_price_paths(|p| match p.player_key {
+        k if k == a => Some(vec![60.0, 62.0, 66.0]),
+        k if k == c => Some(vec![50.0, 52.0, 54.0]),
+        _ => None,
+    });
+    let plan = solve(&problem, &params);
+    let moves: Vec<(Vec<i64>, Vec<i64>)> =
+        plan.gws.iter().map(|g| (transfers_out(g), transfers_in(g))).collect();
+    assert_eq!(moves, vec![(vec![a], vec![c]), (vec![c], vec![a]), (vec![a], vec![c])]);
+    // GW0: 15 + 55 (A's first sale at 60) - 50 (C) = 20
+    // GW1: + 51 (C bought at 50, sold at 52: 50 + 1) - 62 (A) = 9
+    // GW2: + 64 (A bought at 62, sold at 66: 62 + 2) - 54 (C) = 19
+    assert_eq!(plan.gws.iter().map(|g| g.bank).collect::<Vec<_>>(), vec![20, 9, 19]);
+}
+
+#[test]
+fn moving_prices_under_a_free_hit() {
+    // A Free Hit in GW1 buys A back at his GW1 price for that GW only; the kept squad and
+    // its bank are untouched (no cohorts in a Free Hit GW).
+    let rules = rules();
+    let (state, pool, xp, a, c) = churn_instance();
+    let state = SquadState { bank: 15, ..state };
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let mut problem = problem(&state, &pool, &xp, &params, &rules);
+    problem.set_price_paths(|p| match p.player_key {
+        k if k == a => Some(vec![60.0, 62.0, 66.0]),
+        k if k == c => Some(vec![50.0, 52.0, 54.0]),
+        _ => None,
+    });
+    let fh = scenario(&problem, &[(1, "freehit")]);
+    let plan = solve_plan(&problem, &params, None, &[], &fh).expect("a plan");
+    let moves: Vec<(Vec<i64>, Vec<i64>)> =
+        plan.gws.iter().map(|g| (transfers_out(g), transfers_in(g))).collect();
+    assert_eq!(moves, vec![(vec![a], vec![c]), (vec![c], vec![a]), (vec![], vec![])]);
+    // GW0: 15 + 55 - 50 = 20; GW1 (Free Hit): 20 + 52 (C at his GW1 price) - 62 = 10;
+    // GW2: back to the kept squad and bank, 20.
+    assert_eq!(plan.gws.iter().map(|g| g.bank).collect::<Vec<_>>(), vec![20, 10, 20]);
+}
+
+#[test]
+fn gw0_trades_at_fpl_exact_prices() {
+    // A bought at 50, now 53: FPL pays 51 (floored), not 51.5, for his GW0 sale, whatever
+    // the path says. C's path starts at 49 but he costs his price 50 in GW0, and his GW0
+    // cohort sells by that 50.
+    let rules = rules();
+    let (state, mut pool, xp, a, c) = churn_instance();
+    pool.iter_mut().find(|p| p.player_key == a).unwrap().price = 53;
+    let state = make_state(
+        &pool,
+        &state.player_keys(),
+        StateOpts {
+            ft: 2,
+            bank: Some(14),
+            purchase: HashMap::from([(a, 50)]),
+            ..Default::default()
+        },
+    );
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let mut problem = problem(&state, &pool, &xp, &params, &rules);
+    problem.set_price_paths(|p| match p.player_key {
+        k if k == a => Some(vec![53.0, 55.0, 57.0]),
+        k if k == c => Some(vec![49.0, 52.0, 54.0]),
+        _ => None,
+    });
+    assert_eq!(player(&problem, a).first_sale_value(0), 51.0);
+    assert_eq!(player(&problem, a).first_sale_value(1), 52.5);
+    assert_eq!(player(&problem, c).buy_price(0), 50.0);
+    assert_eq!(player(&problem, c).price_path.as_ref().unwrap()[0], 50.0);
+    let plan = solve(&problem, &params);
+    let moves: Vec<(Vec<i64>, Vec<i64>)> =
+        plan.gws.iter().map(|g| (transfers_out(g), transfers_in(g))).collect();
+    assert_eq!(moves, vec![(vec![a], vec![c]), (vec![c], vec![a]), (vec![a], vec![c])]);
+    // GW0: 14 + 51 - 50 = 15 (exact, what apply_decision books; 51.5 would leave 15.5,
+    // reported as 16)
+    // GW1: + 51 (C bought at 50, sold at 52) - 55 (A) = 11
+    // GW2: + 56 (A bought at 55, sold at 57) - 54 (C) = 13
+    assert_eq!(plan.gws.iter().map(|g| g.bank).collect::<Vec<_>>(), vec![15, 11, 13]);
+    apply_first(&state, &plan, &pool, &rules);
+}
+
+#[test]
+fn a_cohort_sells_by_its_own_buy_price() {
+    // C bought in GW0 at 50 and sold in GW2 at 54 earns 52 (FPL's rule on his GW0 price),
+    // not 54 (his GW2 price) nor 53 (the rule on his GW1 price).
+    let rules = rules();
+    let (state, pool, mut xp, a, c) = churn_instance();
+    let state = SquadState { bank: 15, ..state };
+    // A scores in GW2 only, C in GW0 and 1: A -> C in GW0, C -> A in GW2.
+    for i in 0..xp.len() {
+        if xp.player_key[i] == a {
+            xp.xp[i] = Some([0.0, 0.0, 20.0][xp.horizon[i] as usize]);
+        } else if xp.player_key[i] == c {
+            xp.xp[i] = Some([10.0, 10.0, 0.0][xp.horizon[i] as usize]);
+        }
+    }
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let mut problem = problem(&state, &pool, &xp, &params, &rules);
+    problem.set_price_paths(|p| match p.player_key {
+        k if k == a => Some(vec![60.0, 62.0, 67.0]),
+        k if k == c => Some(vec![50.0, 52.0, 54.0]),
+        _ => None,
+    });
+    let plan = solve(&problem, &params);
+    let moves: Vec<(Vec<i64>, Vec<i64>)> =
+        plan.gws.iter().map(|g| (transfers_out(g), transfers_in(g))).collect();
+    assert_eq!(moves, vec![(vec![a], vec![c]), (vec![], vec![]), (vec![c], vec![a])]);
+    // GW0: 15 + 55 - 50 = 20; GW2: 20 + 52 - 67 = 5
+    assert_eq!(plan.gws.iter().map(|g| g.bank).collect::<Vec<_>>(), vec![20, 20, 5]);
+}
+
+/// One owned MID X (xP 0) to replace; candidates C (rising) and D (flat, 0.01 more xP).
+fn riser_instance(gw_index: i64) -> (SquadState, Vec<PoolPlayer>, XpFrame, i64, i64) {
+    let clubs = 1..=5;
+    let mut rows = Vec::new();
+    for c in clubs.clone() {
+        for et in 1..=4 {
+            rows.push((key(c, et, 0), et, c, 45));
+        }
+    }
+    rows.extend(clubs.clone().map(|c| (key(c, 3, 1), 3, c, 45)));
+    rows.extend(clubs.clone().map(|c| (key(c, 2, 1), 2, c, 45)));
+    rows.extend([1, 2].map(|c| (key(c, 4, 1), 4, c, 45)));
+    rows.push((key(1, 1, 1), 1, 1, 45));
+    let (c_key, d_key) = (key(6, 3, 0), key(7, 3, 0));
+    rows.extend([(c_key, 3, 6, 50), (d_key, 3, 7, 50)]);
+    let pool = make_pool(rows);
+    let mut owned = vec![key(1, 1, 0), key(2, 1, 0)];
+    owned.extend(clubs.clone().map(|c| key(c, 2, 0)));
+    owned.extend([1, 2, 3, 4, 5].map(|c| key(c, 3, 0)));
+    owned.extend([1, 2, 3].map(|c| key(c, 4, 0)));
+    let mut values: BTreeMap<i64, Vec<f64>> =
+        pool.iter().map(|p| (p.player_key, vec![0.5; 3])).collect();
+    for k in &owned {
+        // Above C and D: X is the only player worth replacing (at 1.0, as in churn_instance,
+        // the plan would replace a second MID with D or C too).
+        values.insert(*k, vec![6.0; 3]);
+    }
+    let x = key(5, 3, 0); // the owned MID worth replacing
+    values.insert(x, vec![0.0; 3]);
+    values.insert(c_key, vec![5.0, 5.0, 5.0]);
+    values.insert(d_key, vec![5.0, 5.0, 5.01]);
+    let xp = xp_frame(&values, gw_index);
+    let state = make_state(
+        &pool,
+        &owned,
+        StateOpts { gw_index, ft: 1, bank: Some(10), ..Default::default() },
+    );
+    (state, pool, xp, c_key, d_key)
+}
+
+/// (GW0's ins, the money value, the plan's last bank) with C rising 50 → 54.
+fn riser_plan(k: f64, gw_index: i64) -> (Vec<i64>, f64, i64) {
+    let rules = rules();
+    let (state, pool, xp, c, _) = riser_instance(gw_index);
+    let params = OptimizerParams {
+        horizon: 3,
+        ft_value: BTreeMap::new(),
+        itb_value: 0.0,
+        price_value_k: k,
+        ..exact()
+    };
+    let mut problem = problem(&state, &pool, &xp, &params, &rules);
+    problem.set_price_paths(|p| (p.player_key == c).then(|| vec![50.0, 52.0, 54.0]));
+    let plan = solve(&problem, &params);
+    // The LP's own optimum (its dual bound at gap 0) is the readout's total, money included.
+    assert!(approx(plan.bound, plan.total_objective(), 1e-6), "{plan:?}");
+    (transfers_in(&plan.gws[0]), plan.money_value, plan.gws[2].bank)
+}
+
+#[test]
+fn money_value_prefers_the_riser_only_when_k_is_positive() {
+    let (c, d) = (key(6, 3, 0), key(7, 3, 0));
+    let (ins, money, _) = riser_plan(0.0, 5);
+    assert_eq!(ins, vec![d]);
+    assert_eq!(money, 0.0);
+    let (ins, money, bank) = riser_plan(1.0, 5);
+    assert_eq!(ins, vec![c]);
+    // λ = 0.395 · 0.93 · (38 − 7) / 10, times the money's change M − M₀:
+    // M₀ = bank 10 + 15 owned players at 45 = 685;
+    // M = 14 kept players at 45 + bank 5 (10 + 45 − 50) + C held at 50 + (54 − 50)/2 = 52,
+    // = 687 (swapping C for D in GW2, 0.01 more xP, leaves M the same: bank 5 + 52 − 50 = 7
+    // plus D's 50). So money_value = 2λ: C's half of his 4-tenth rise.
+    let lambda = 0.395 * 0.93 * 31.0 / 10.0;
+    assert!([5, 7].contains(&bank), "{bank}");
+    assert!(approx(money, 2.0 * lambda, 1e-6), "{money}");
+}
+
+#[test]
+fn money_value_is_zero_late_in_the_season() {
+    // The horizon ends at gw_index 38: λ = 0, so the flat D wins on xP as with k = 0.
+    let d = key(7, 3, 0);
+    let (ins, money, _) = riser_plan(1.0, 36);
+    assert_eq!(ins, vec![d]);
+    assert_eq!(money, 0.0);
+}
+
+#[test]
+fn money_rate_follows_the_weeks_left() {
+    let params = OptimizerParams { price_value_k: 2.0, ..Default::default() };
+    assert!(approx(params.money_rate(8), 2.0 * 0.395 * 0.93 * 30.0 / 10.0, 1e-12));
+    assert_eq!(params.money_rate(38), 0.0);
+    assert_eq!(params.money_rate(40), 0.0);
+    assert_eq!(OptimizerParams::default().money_rate(8), 0.0);
+    let bad = OptimizerParams { price_value_k: -1.0, ..Default::default() };
+    assert!(bad.validate().unwrap_err().to_string().contains("price_value_k"));
+    let parsed =
+        fplopt_optimize::io::params_from_json(&serde_json::json!({"price_value_k": 0.5})).unwrap();
+    assert_eq!(parsed.price_value_k, 0.5);
+}
+
+#[test]
+fn without_paths_the_model_is_unchanged() {
+    // same columns, rows and coefficients as before the feature: compare the HiGHS model
+    // of churn_instance with and without an explicit `set_price_paths(|_| None)`.
+    let rules = rules();
+    let (state, pool, xp, _, _) = churn_instance();
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let plain = problem(&state, &pool, &xp, &params, &rules);
+    let mut with_none = plain.clone();
+    with_none.set_price_paths(|_| None);
+    let none = ChipScenario::none();
+    assert_eq!(
+        model_fingerprint(&plain, &params, &none).unwrap(),
+        model_fingerprint(&with_none, &params, &none).unwrap()
+    );
+}
+
+#[test]
+fn the_no_path_model_is_pinned() {
+    // Hashes of the LP (columns, rows, objective) without paths: it must not change. The
+    // same 5 hashes come out of the pre-feature model (commit e8e707d, a19e165's parent,
+    // with only `model_fingerprint` and this test back-ported, checked 2026-11-06).
+    // decay 0.5 keeps the objective's powers exact.
+    let rules = rules();
+    let (state, pool, xp, _, _) = churn_instance();
+    let params =
+        OptimizerParams { horizon: 3, ft_value: BTreeMap::new(), itb_value: 0.0, ..exact() };
+    let churn = problem(&state, &pool, &xp, &params, &rules);
+    let mut hashes = vec![model_fingerprint(&churn, &params, &ChipScenario::none()).unwrap()];
+    let (state, pool, xp) = medium_instance(0, 1, 5, 4);
+    let params = OptimizerParams { horizon: 4, decay: 0.5, itb_value: 0.1, ..Default::default() };
+    let medium = problem(&state, &pool, &xp, &params, &rules);
+    for chips in [vec![], vec![(1, "freehit")], vec![(2, "wildcard")], vec![(0, "bboost")]] {
+        let s = scenario(&medium, &chips);
+        hashes.push(model_fingerprint(&medium, &params, &s).unwrap());
+    }
+    assert_eq!(
+        hashes,
+        vec![
+            13757759063911583251,
+            14535929387418066283,
+            13798852871027025433,
+            7663879154313081341,
+            17057924474503506883
+        ]
+    );
 }
 
 #[test]

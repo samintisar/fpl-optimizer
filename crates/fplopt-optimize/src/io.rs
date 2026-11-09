@@ -137,6 +137,7 @@ pub fn params_with(base: OptimizerParams, v: &Value) -> Result<OptimizerParams> 
                 p.exclude_chips = chips;
             }
             "fh_scale" => p.fh_scale = float(x, key)?,
+            "price_value_k" => p.price_value_k = float(x, key)?,
             other => bail!("params: unknown key '{other}'"),
         }
     }
@@ -211,7 +212,7 @@ pub fn read_case(dir: &Path) -> Result<Case> {
 }
 
 pub fn plan_json(p: &Plan) -> Value {
-    json!({
+    let mut v = json!({
         "scenario": p.scenario,
         "objective": p.objective,
         "terminal_value": p.terminal_value,
@@ -239,7 +240,12 @@ pub fn plan_json(p: &Plan) -> Value {
             "bank": g.bank,
             "ft": g.ft,
         })).collect::<Vec<_>>(),
-    })
+    });
+    // Only when set, so plans without it keep their JSON.
+    if p.money_value != 0.0 {
+        v["money_value"] = json!(p.money_value);
+    }
+    v
 }
 
 fn finite(x: f64) -> Value {

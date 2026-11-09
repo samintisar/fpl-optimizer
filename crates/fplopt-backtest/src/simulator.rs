@@ -22,11 +22,16 @@ use fplopt_optimize::XpFrame;
 use fplopt_optimize::start::{FAR_FUTURE, pool_players};
 use fplopt_store::{AsOfView, DataStore, Micros, Table};
 
+use crate::forecast_prices::{ForecastConfig, ForecastPrices};
 use crate::gw_score::score_gameweek;
+use crate::oracle::FuturePrices;
 use crate::outcomes::{GwOutcomes, read_outcomes};
-use crate::policies::{CHIP_DIAGNOSTICS, DecisionContext, Policy, best_lineup};
+use crate::policies::{
+    CHIP_DIAGNOSTICS, DecisionContext, Policy, PriceInput, PriceSource, best_lineup,
+};
 use crate::state::{
-    Decision, PoolPlayer, SquadState, apply_decision, next_state, refresh, squad_value,
+    Decision, PoolPlayer, SquadState, apply_decision, market_value, next_state, refresh,
+    selling_price, squad_value,
 };
 use crate::xp_cache::DiskCache;
 
@@ -59,16 +64,35 @@ impl<K: Eq + Hash, V> OnceMap<K, V> {
     }
 }
 
-/// xP frames per (model, deadline), v1 fits per cutoff, pools per deadline and outcomes per
+/// xP frames per (model, deadline, cutoff), v1 fits per (deadline, cutoff) of the fit view,
+/// pools per (deadline, cutoff) and outcomes per
 /// (season, gw, rules label), shared across policies, start states and threads; the xP
 /// frames also on disk when given one (`xp_cache`), shared across runs.
 #[derive(Default)]
 pub struct Caches {
     disk: Option<DiskCache>,
-    xp: OnceMap<(String, Micros), Xp>,
-    fits: OnceMap<(String, Micros), V1Fit>,
-    pools: OnceMap<Micros, Vec<PoolPlayer>>,
+    xp: OnceMap<(String, Micros, Micros), Xp>,
+    fits: OnceMap<(String, Micros, Micros), V1Fit>,
+    pools: OnceMap<(Micros, Micros), Vec<PoolPlayer>>,
     outcomes: OnceMap<(i64, i64, String), GwOutcomes>,
+    future: OnceMap<i64, FuturePrices>,
+    forecast: OnceMap<i64, ForecastPrices>,
+    forecast_config: OnceLock<std::result::Result<ForecastConfig, String>>,
+}
+
+/// A season's price paths' source, as `Caches::prices_for` hands it out.
+pub enum PriceData {
+    Oracle(Arc<FuturePrices>),
+    Forecast(Arc<ForecastPrices>),
+}
+
+impl PriceData {
+    pub fn input(&self) -> PriceInput<'_> {
+        match self {
+            PriceData::Oracle(f) => PriceInput::Oracle(f),
+            PriceData::Forecast(f) => PriceInput::Forecast(f),
+        }
+    }
 }
 
 impl Caches {
@@ -78,35 +102,77 @@ impl Caches {
     }
 
     pub fn pool(&self, view: &AsOfView) -> Result<Arc<Vec<PoolPlayer>>> {
-        self.pools.get_or_compute(view.deadline(), || pool_players(&player_pool(view)?))
+        self.pools
+            .get_or_compute((view.deadline(), view.cutoff()), || pool_players(&player_pool(view)?))
     }
 
     /// The model's xP frame at the view (v1 family: predicted with the memoized fit at its refit
     /// cutoff, the same as calling the model).
     pub fn xp(&self, model: &str, view: &AsOfView) -> Result<Arc<Xp>> {
-        self.xp.get_or_compute((model.to_owned(), view.deadline()), || {
+        let key = (model.to_owned(), view.deadline(), view.cutoff());
+        self.xp.get_or_compute(key, || {
             let cached = match &self.disk {
-                Some(disk) => disk.load(model, view.deadline())?,
+                Some(disk) => disk.load(model, view.deadline(), view.cutoff())?,
                 None => None,
             };
             let hit = cached.is_some();
             let table = if let Some(t) = cached {
                 t
             } else if fplopt_models::is_v1_family(model) {
-                let cutoff = refit_deadline(view, REFIT_EVERY)?;
-                let fit = self.fits.get_or_compute((model.to_owned(), cutoff), || {
-                    fit_v1(&view.earlier(cutoff)?, &V1Params::for_model(model)?)
-                })?;
+                let refit = refit_deadline(view, REFIT_EVERY)?;
+                let fit_view = view.earlier(refit)?;
+                let fit_key = (model.to_owned(), fit_view.deadline(), fit_view.cutoff());
+                let fit = self
+                    .fits
+                    .get_or_compute(fit_key, || fit_v1(&fit_view, &V1Params::for_model(model)?))?;
                 predict_v1(view, &fit)?
             } else {
                 fplopt_models::predict(model, view)?
             };
             if let (Some(disk), false) = (&self.disk, hit) {
-                disk.store(model, view.deadline(), &table)?;
+                disk.store(model, view.deadline(), view.cutoff(), &table)?;
             }
             let frame = XpFrame::from_table(&table)?;
             Ok(Xp { table, frame })
         })
+    }
+
+    /// The season's price paths' source for `policy` (`Policy::price_source`): None for
+    /// fixed prices; the future deadline prices for `prices=oracle` (read once per season;
+    /// **reads the future: backtest only**); the price forecast for `prices=forecast`
+    /// (`forecast_prices_for`).
+    pub fn prices_for(
+        &self,
+        policy: &Policy,
+        store: &DataStore,
+        season: i64,
+    ) -> Result<Option<PriceData>> {
+        Ok(match policy.price_source() {
+            PriceSource::Fixed => None,
+            PriceSource::Oracle => Some(PriceData::Oracle(
+                self.future.get_or_compute(season, || FuturePrices::load(store, season))?,
+            )),
+            PriceSource::Forecast => {
+                Some(PriceData::Forecast(self.forecast_prices_for(store, season)?))
+            }
+        })
+    }
+
+    /// The season's price forecast, fitted once per season (`ForecastPrices::fit`) with the
+    /// frozen settings of `config/prices/forecast.json` (read once per `Caches`).
+    pub fn forecast_prices_for(
+        &self,
+        store: &DataStore,
+        season: i64,
+    ) -> Result<Arc<ForecastPrices>> {
+        let config = self
+            .forecast_config
+            .get_or_init(|| {
+                ForecastConfig::load(&ForecastConfig::default_path()).map_err(|e| format!("{e:#}"))
+            })
+            .clone()
+            .map_err(|e| anyhow!(e))?;
+        self.forecast.get_or_compute(season, || ForecastPrices::fit(store, self, season, &config))
     }
 
     pub fn outcomes(
@@ -211,6 +277,14 @@ pub struct GwRow {
     pub bank: i64,
     pub free_transfers: i64,
     pub squad_value: i64,
+    /// state::market_value of gw_state (Rust only; dev/backtest_parity.py ignores it).
+    pub market_value: i64,
+    /// When the transfers were decided and priced: the deadline, or the previous lockdown +
+    /// 1 µs for the early policy (Rust only; dev/backtest_parity.py ignores it).
+    pub decided_at: Micros,
+    /// Early policy only: tenths of £m its moves kept against making them at the deadline
+    /// (`early_kept`; Rust only).
+    pub early_kept: Option<i64>,
     pub transfers: String,
     pub autosubs: String,
     pub pred_gain: Option<f64>,
@@ -221,11 +295,18 @@ pub struct GwRow {
     pub diagnostics: [Option<f64>; 7],
 }
 
-/// A GW's decision: the refreshed pre-decision state, the pool and the policy's decision.
+/// A GW's decision: the refreshed pre-decision state, the pool and the policy's decision
+/// (state and pool at the moment the transfers are priced: the deadline, or the early
+/// policy's `priced_at`).
 pub struct Step {
     pub state: SquadState,
     pub pool: Arc<Vec<PoolPlayer>>,
+    /// The deadline's pool, at which the GW row values the squad (`pool` for a deadline
+    /// decision).
+    pub deadline_pool: Arc<Vec<PoolPlayer>>,
     pub decision: Decision,
+    /// `early_kept` of an early decision.
+    pub early_kept: Option<i64>,
 }
 
 /// Who decides a GW: a policy, or a decision already made for it (a per-decision arm's
@@ -236,7 +317,65 @@ pub enum Decider<'a> {
     Decided(&'a Decision),
 }
 
-/// Decide one GW: only the deadline view is read.
+/// The lockdown of `season`'s last GW whose deadline is before `deadline`, from a gameweek
+/// table (season, deadline_time, lockdown_time); None for the season's first GW.
+pub fn previous_lockdown(
+    gameweeks: &Table,
+    season: i64,
+    deadline: Micros,
+) -> Result<Option<Micros>> {
+    let seasons = gameweeks.opt_i64("season")?;
+    let deadlines = gameweeks.opt_i64("deadline_time")?;
+    let lockdowns = gameweeks.opt_i64("lockdown_time")?;
+    Ok((0..gameweeks.height())
+        .filter(|&i| seasons[i] == Some(season) && deadlines[i].is_some_and(|d| d < deadline))
+        .max_by_key(|&i| deadlines[i])
+        .and_then(|i| lockdowns[i]))
+}
+
+/// Tenths of £m kept by making `decision`'s transfers at the `early` pool's prices rather than
+/// the `deadline` pool's: per in-player the deadline's price minus the early one, per out-player
+/// the early selling price minus the deadline's (FPL's selling rule on `state`'s purchase price).
+pub fn early_kept(
+    state: &SquadState,
+    decision: &Decision,
+    early: &[PoolPlayer],
+    deadline: &[PoolPlayer],
+    sell_on_fee: f64,
+) -> i64 {
+    let price =
+        |pool: &[PoolPlayer], key: i64| pool.iter().find(|p| p.player_key == key).map(|p| p.price);
+    let (at_a, at_d) = (refresh(state, early), refresh(state, deadline));
+    // `refresh` keeps a player's previous price when he is absent from the pool: count an
+    // out-player only when both pools price him
+    let selling = |s: &SquadState, pool: &[PoolPlayer], key: i64| {
+        price(pool, key)?;
+        s.holdings.iter().find(|h| h.player_key == key).map(|h| selling_price(h, sell_on_fee))
+    };
+    let mut kept = 0;
+    for t in &decision.transfers {
+        if let (Some(a), Some(d)) = (price(early, t.in_key), price(deadline, t.in_key)) {
+            kept += d - a;
+        }
+        if let (Some(a), Some(d)) =
+            (selling(&at_a, early, t.out_key), selling(&at_d, deadline, t.out_key))
+        {
+            kept += a - d;
+        }
+    }
+    kept
+}
+
+/// First season the early policy runs in: before it there are no player snapshots, so the
+/// pool at the lockdown has no prices.
+pub const EARLY_FIRST_SEASON: i64 = 2021;
+
+/// Decide one GW. A deadline decision reads only the deadline view. The early policy, at a GW
+/// after the season's first, decides its transfers on the view for this deadline cut at the
+/// previous lockdown + 1 µs (A: the previous GW's outcomes are visible, as `read_outcomes`
+/// sees them), at A's pool, and its lineup at the deadline with those transfers fixed; the
+/// decision carries `priced_at = A`. A decision made earlier (`Decider::Decided`) is replayed
+/// at its own pool.
 pub fn decide_step(
     store: &DataStore,
     rules: &Rules,
@@ -246,25 +385,112 @@ pub fn decide_step(
     caches: &Caches,
 ) -> Result<Step> {
     let view = store.as_of(deadline);
-    let pool = caches.pool(&view)?;
-    let state = refresh(state, &pool);
+    let deadline_pool = caches.pool(&view)?;
     let policy = match decider {
         Decider::Decided(decision) => {
-            return Ok(Step { state, pool, decision: decision.clone() });
+            let Some(at) = decision.priced_at else {
+                let state = refresh(state, &deadline_pool);
+                return Ok(Step {
+                    state,
+                    pool: deadline_pool.clone(),
+                    deadline_pool,
+                    decision: decision.clone(),
+                    early_kept: None,
+                });
+            };
+            let pool = caches.pool(&store.as_of_early(deadline, at)?)?;
+            let kept = early_kept(state, decision, &pool, &deadline_pool, rules.sell_on_fee);
+            let state = refresh(state, &pool);
+            return Ok(Step {
+                state,
+                pool,
+                deadline_pool,
+                decision: decision.clone(),
+                early_kept: Some(kept),
+            });
         }
         Decider::Policy(policy) => policy,
     };
-    let xp = caches.xp(policy.xp_model(), &view)?;
-    let ctx = DecisionContext {
-        view: &view,
-        state: &state,
+    let early_at = match policy {
+        Policy::Optimizer { early: true, .. } => {
+            if state.season < EARLY_FIRST_SEASON {
+                bail!(
+                    "early=1 needs player snapshots (from {}); {} has none",
+                    season_label(EARLY_FIRST_SEASON as i32),
+                    season_label(state.season as i32)
+                );
+            }
+            let gameweeks =
+                view.table("gameweek", Some(&["season", "deadline_time", "lockdown_time"]))?;
+            previous_lockdown(&gameweeks, state.season, deadline)?.map(|l| l + 1)
+        }
+        _ => None,
+    };
+    let Some(at) = early_at else {
+        let state = refresh(state, &deadline_pool);
+        let xp = caches.xp(policy.xp_model(), &view)?;
+        let prices = caches.prices_for(policy, store, state.season)?;
+        let ctx = DecisionContext {
+            view: &view,
+            state: &state,
+            rules,
+            pool: &deadline_pool,
+            xp: &xp.table,
+            frame: &xp.frame,
+            prices: prices.as_ref().map(PriceData::input),
+        };
+        let decision = policy.decide(&ctx)?;
+        return Ok(Step {
+            state,
+            pool: deadline_pool.clone(),
+            deadline_pool,
+            decision,
+            early_kept: None,
+        });
+    };
+    // Transfers at A.
+    let early_view = store.as_of_early(deadline, at)?;
+    let pool = caches.pool(&early_view)?;
+    let state_a = refresh(state, &pool);
+    let xp_a = caches.xp(policy.xp_model(), &early_view)?;
+    let ctx_a = DecisionContext {
+        view: &early_view,
+        state: &state_a,
         rules,
         pool: &pool,
-        xp: &xp.table,
-        frame: &xp.frame,
+        xp: &xp_a.table,
+        frame: &xp_a.frame,
+        prices: None,
     };
-    let decision = policy.decide(&ctx)?;
-    Ok(Step { state, pool, decision })
+    let at_a = policy.decide(&ctx_a)?;
+    // Lineup at the deadline, transfers fixed: the post-transfer squad (same gw_index) at the
+    // deadline's prices, with the free transfers left after A's moves so the plan's later GWs
+    // see the free transfers `next_state` will give.
+    let (squad, applied) = apply_decision(&state_a, &at_a, &pool, rules)?;
+    let mut squad = refresh(&squad, &deadline_pool);
+    squad.free_transfers = (squad.free_transfers - applied.n_transfers).max(0);
+    let xp_d = caches.xp(policy.xp_model(), &view)?;
+    let ctx_d = DecisionContext {
+        view: &view,
+        state: &squad,
+        rules,
+        pool: &deadline_pool,
+        xp: &xp_d.table,
+        frame: &xp_d.frame,
+        prices: None,
+    };
+    let (lineup, status, gap) = policy.deadline_lineup(&ctx_d)?;
+    let decision = Decision {
+        transfers: at_a.transfers,
+        lineup,
+        chip: None,
+        solver_status: at_a.solver_status.or(Some(status)),
+        mip_gap: at_a.mip_gap.map(|g| g.max(gap)).or(Some(gap)),
+        diagnostics: at_a.diagnostics,
+        priced_at: Some(at),
+    };
+    let kept = early_kept(state, &decision, &pool, &deadline_pool, rules.sell_on_fee);
+    Ok(Step { state: state_a, pool, deadline_pool, decision, early_kept: Some(kept) })
 }
 
 /// The squad's best GW score in hindsight: the best valid XI on realized points plus the
@@ -293,7 +519,9 @@ fn pairs_json(pairs: impl IntoIterator<Item = (i64, i64)>) -> String {
     format!("[{}]", items.join(", "))
 }
 
-/// Apply the decision, score it, and return (gw_state, record, GW row).
+/// Apply the decision, score it, and return (gw_state, record, GW row). The transfers are
+/// made at `step.pool` (gw_state carries its bank and purchase prices); the row's squad and
+/// market values are at the deadline's pool.
 pub fn play_step(
     step: &Step,
     rules: &Rules,
@@ -320,6 +548,7 @@ pub fn play_step(
     } else {
         None
     };
+    let valued = refresh(&gw_state, &step.deadline_pool);
     let mut diagnostics = [None; 7];
     if let Some(d) = &decision.diagnostics {
         for (slot, key) in diagnostics.iter_mut().zip(CHIP_DIAGNOSTICS) {
@@ -348,7 +577,10 @@ pub fn play_step(
         xi_regret,
         bank: gw_state.bank,
         free_transfers: state.free_transfers,
-        squad_value: squad_value(&gw_state, rules.sell_on_fee),
+        squad_value: squad_value(&valued, rules.sell_on_fee),
+        market_value: market_value(&valued),
+        decided_at: decision.priced_at.unwrap_or(deadline),
+        early_kept: step.early_kept,
         transfers: pairs_json(decision.transfers.iter().map(|t| (t.out_key, t.in_key))),
         autosubs: pairs_json(score.autosubs.iter().copied()),
         pred_gain: None,
@@ -377,8 +609,8 @@ fn kahan(values: impl IntoIterator<Item = f64>) -> f64 {
 
 /// Per decision i (decided at schedule row i): (predicted, realized) gain of its transfers
 /// over schedule rows i..i+window−1 that were recorded (a Free Hit: row i only), or (None,
-/// None) without transfers. xP from the decision deadline's frame (the one the policy
-/// saw), points from the outcomes.
+/// None) without transfers. xP from the frame the transfers were decided on (the decision
+/// deadline's, or for an early decision its view at `priced_at`), points from the outcomes.
 pub fn transfer_gains(
     store: &DataStore,
     rules: &Rules,
@@ -399,7 +631,11 @@ pub fn transfer_gains(
         let gws = &gameweeks[i..(i + span).min(gameweeks.len())];
         let ins: Vec<i64> = decision.transfers.iter().map(|t| t.in_key).collect();
         let outs: Vec<i64> = decision.transfers.iter().map(|t| t.out_key).collect();
-        let xp = caches.xp(xp_model, &store.as_of(gws[0].deadline))?;
+        let view = match decision.priced_at {
+            Some(at) => store.as_of_early(gws[0].deadline, at)?,
+            None => store.as_of(gws[0].deadline),
+        };
+        let xp = caches.xp(xp_model, &view)?;
         let offsets: Vec<i64> = gws.iter().map(|g| g.gw_index - gws[0].gw_index).collect();
         let f = &xp.frame;
         let by_key = |key: i64| -> f64 {
@@ -593,5 +829,160 @@ mod tests {
             assert_eq!(err.to_string(), "no fit at 1: cause");
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    use crate::gw_score::Lineup;
+    use crate::state::{Holding, PoolPlayer, Transfer};
+    use fplopt_build::table::Column;
+
+    fn pool(prices: &[(i64, i64)]) -> Vec<PoolPlayer> {
+        prices
+            .iter()
+            .map(|&(k, p)| PoolPlayer { player_key: k, element_type: 3, team_key: 1, price: p })
+            .collect()
+    }
+
+    #[test]
+    fn previous_lockdown_is_the_lockdown_of_the_seasons_last_earlier_gameweek() {
+        let gameweeks = Table::new()
+            .with("season", Column::I64(vec![2021, 2022, 2022, 2022]))
+            .with("deadline_time", Column::OptI64(vec![Some(5), Some(10), Some(20), Some(30)]))
+            .with("lockdown_time", Column::OptI64(vec![Some(8), Some(15), Some(25), Some(35)]));
+        assert_eq!(previous_lockdown(&gameweeks, 2022, 30).unwrap(), Some(25));
+        assert_eq!(previous_lockdown(&gameweeks, 2022, 20).unwrap(), Some(15));
+        // the season's first GW has none (the previous season's doesn't count)
+        assert_eq!(previous_lockdown(&gameweeks, 2022, 10).unwrap(), None);
+    }
+
+    #[test]
+    fn early_kept_counts_the_buy_and_sell_prices_saved_by_moving_at_the_lockdown() {
+        let state = SquadState {
+            season: 2022,
+            gw_index: 5,
+            holdings: vec![Holding {
+                player_key: 1,
+                element_type: 3,
+                team_key: 1,
+                purchase_price: 50,
+                price: 50,
+            }],
+            bank: 0,
+            free_transfers: 1,
+            chips_used: vec![],
+            freehit_backup: None,
+            freehit_bank: None,
+        };
+        let decision =
+            Decision { transfers: vec![Transfer { out_key: 1, in_key: 2 }], ..Decision::default() };
+        // out 1: 52 at A (sells for 51), 49 at the deadline; in 2: 60 at A, 61 at the deadline
+        let at_a = pool(&[(1, 52), (2, 60)]);
+        let at_d = pool(&[(1, 49), (2, 61)]);
+        let kept = early_kept(&state, &decision, &at_a, &at_d, 0.5);
+        assert_eq!(kept, (61 - 60) + (51 - 49));
+        // nothing moved: nothing kept
+        assert_eq!(early_kept(&state, &Decision::default(), &at_a, &at_d, 0.5), 0);
+        // out-player absent from the deadline pool: his deadline price is stale, nothing counted
+        let at_d = pool(&[(2, 61)]);
+        assert_eq!(early_kept(&state, &decision, &at_a, &at_d, 0.5), 61 - 60);
+        // ... or from A's
+        let at_a = pool(&[(2, 60)]);
+        let at_d = pool(&[(1, 49), (2, 61)]);
+        assert_eq!(early_kept(&state, &decision, &at_a, &at_d, 0.5), 61 - 60);
+    }
+
+    fn rules() -> Rules {
+        let dir =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/scoring"));
+        fplopt_build::scoring::backtest_rules(2024, dir).unwrap()
+    }
+
+    /// GK 1-2, DEF 3-7, MID 8-12, FWD 13-16 (16 not held).
+    fn element_type(k: i64) -> i64 {
+        match k {
+            1..=2 => 1,
+            3..=7 => 2,
+            8..=12 => 3,
+            _ => 4,
+        }
+    }
+
+    fn typed_pool(prices: &[(i64, i64)]) -> Vec<PoolPlayer> {
+        prices
+            .iter()
+            .map(|&(k, p)| PoolPlayer {
+                player_key: k,
+                element_type: element_type(k),
+                team_key: k,
+                price: p,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn play_step_values_the_squad_at_the_deadline_and_keeps_the_early_prices_in_the_state() {
+        let state = SquadState {
+            season: 2022,
+            gw_index: 5,
+            holdings: (1..=15)
+                .map(|k| Holding {
+                    player_key: k,
+                    element_type: element_type(k),
+                    team_key: k,
+                    purchase_price: 50,
+                    price: 50,
+                })
+                .collect(),
+            bank: 100,
+            free_transfers: 1,
+            chips_used: vec![],
+            freehit_backup: None,
+            freehit_bank: None,
+        };
+        let decision = Decision {
+            transfers: vec![Transfer { out_key: 15, in_key: 16 }],
+            lineup: Lineup {
+                starters: vec![1, 3, 4, 5, 6, 8, 9, 10, 11, 13, 14],
+                bench: vec![2, 7, 12, 16],
+                captain: 13,
+                vice: 8,
+            },
+            priced_at: Some(1),
+            ..Decision::default()
+        };
+        // A: everyone 50, 16 at 60; deadline: held 55, 16 at 62
+        let at_a: Vec<(i64, i64)> = (1..=15).map(|k| (k, 50)).chain([(16, 60)]).collect();
+        let at_d: Vec<(i64, i64)> = (1..=15).map(|k| (k, 55)).chain([(16, 62)]).collect();
+        let outcomes = GwOutcomes {
+            realized: (1..=16).map(|k| (k, (2, 90))).collect(),
+            xg: (1..=16).map(|k| (k, (2.0, 90))).collect(),
+        };
+        let rules = rules();
+        let step = Step {
+            state: state.clone(),
+            pool: Arc::new(typed_pool(&at_a)),
+            deadline_pool: Arc::new(typed_pool(&at_d)),
+            decision: decision.clone(),
+            early_kept: None,
+        };
+        let (gw_state, _, row) = play_step(&step, &rules, &outcomes, 5, 10).unwrap();
+        // bought and sold at A: the state carries A's bank and purchase price
+        assert_eq!(gw_state.bank, 100 + 50 - 60);
+        let bought = gw_state.holdings.iter().find(|h| h.player_key == 16).unwrap();
+        assert_eq!((bought.purchase_price, bought.price), (60, 60));
+        assert_eq!(row.bank, 90);
+        // valued at the deadline: 14 × 55 + 62 + bank; selling 14 × (50 + 2) + (60 + 1)
+        assert_eq!(row.market_value, 14 * 55 + 62 + 90);
+        assert_eq!(row.squad_value, 14 * 52 + 61);
+        // a deadline decision (deadline pool = pool): valued at the pool, as before
+        let step = Step {
+            state,
+            pool: Arc::new(typed_pool(&at_d)),
+            deadline_pool: Arc::new(typed_pool(&at_d)),
+            decision: Decision { priced_at: None, ..decision },
+            early_kept: None,
+        };
+        let (gw_state, _, row) = play_step(&step, &rules, &outcomes, 5, 10).unwrap();
+        assert_eq!(row.market_value, market_value(&gw_state));
+        assert_eq!(row.squad_value, squad_value(&gw_state, rules.sell_on_fee));
     }
 }

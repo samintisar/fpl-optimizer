@@ -15,7 +15,8 @@ use fplopt_backtest::evaluate::{
     Bootstrap, GridRow, PerDecision, StartSpec, Summary, num, paired_full_run, paired_rows,
     parse_start_specs, per_decision, record, run_grid, run_totals, splits, summarize,
 };
-use fplopt_backtest::simulator::Caches;
+use fplopt_backtest::policies::Policy;
+use fplopt_backtest::simulator::{Caches, EARLY_FIRST_SEASON};
 use fplopt_backtest::specs::{PolicySpec, make_policy_spec, parse_policy_spec};
 use fplopt_backtest::stats::{Diff, FULL_RUN_WINDOW, full_run_window_test, season_points};
 use fplopt_backtest::xp_cache;
@@ -35,7 +36,7 @@ const CI_LEVEL: f64 = 0.8;
 const EP_NEXT_FIRST_SEASON: i64 = 2021;
 const EP_NEXT_MODELS: [&str; 2] = ["ep_next", "ep_next_fade"];
 
-fn default_jobs() -> usize {
+pub(crate) fn default_jobs() -> usize {
     std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).max(1)
 }
 
@@ -52,7 +53,8 @@ pub struct Common {
     /// Start years: 2016-2024, 2021,2023, 2021-22 or a mix (the holdout is refused).
     #[arg(long)]
     pub seasons: String,
-    /// Start states.
+    /// Start states: template@G, random[:N]@G, squad:FILE@G; any kind takes `+bank<n>` before the
+    /// `@` (n tenths of £m added to the bank, e.g. template+bank10@1; Rust only).
     #[arg(long, default_value = DEFAULT_STARTS)]
     pub starts: String,
     /// Output directory (default results/<UTC time>-<command>).
@@ -85,11 +87,15 @@ pub struct XpCacheArgs {
 
 impl XpCacheArgs {
     pub fn caches(&self) -> Result<Caches> {
+        self.caches_for(&Settings::from_env().data_dir)
+    }
+
+    /// The caches for xP frames built from `data_dir` (the disk cache is keyed by it).
+    pub fn caches_for(&self, data_dir: &Path) -> Result<Caches> {
         if self.no_xp_cache {
             return Ok(Caches::default());
         }
-        let disk = xp_cache::DiskCache::open(&self.xp_cache, &Settings::from_env().data_dir)?;
-        Ok(Caches::with_disk(disk))
+        Ok(Caches::with_disk(xp_cache::DiskCache::open(&self.xp_cache, data_dir)?))
     }
 }
 
@@ -201,6 +207,30 @@ pub(crate) fn seasons_with_data(store: &DataStore) -> Result<BTreeSet<i64>> {
     Ok(gws.intersection(&matches).copied().collect())
 }
 
+/// The early policy (`early=1`) needs player snapshots, which start in
+/// `simulator::EARLY_FIRST_SEASON`: refuse earlier seasons up front (usage error, exit 2)
+/// rather than mid-run.
+fn refuse_early(seasons: &[i64], policies: &[&PolicySpec]) -> Result<()> {
+    let before: Vec<String> = seasons
+        .iter()
+        .filter(|s| **s < EARLY_FIRST_SEASON)
+        .map(|s| season_label(*s as i32))
+        .collect();
+    if before.is_empty() {
+        return Ok(());
+    }
+    for spec in policies {
+        if matches!(spec.build()?, Policy::Optimizer { early: true, .. }) {
+            return usage(format!(
+                "early=1 needs player snapshots (from {}); {} has none",
+                season_label(EARLY_FIRST_SEASON as i32),
+                before.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 struct Checked {
     seasons: Vec<i64>,
     specs: Vec<StartSpec>,
@@ -236,6 +266,7 @@ fn check_common(
             ));
         }
     }
+    refuse_early(&seasons, policies)?;
     let settings = Settings::from_env();
     let store = match DataStore::open(&settings.data_dir) {
         Ok(s) => s,
@@ -322,6 +353,9 @@ fn grid_table(results: &[GridRow]) -> Table {
         .with("bank", r(&|g| g.row.bank))
         .with("free_transfers", r(&|g| g.row.free_transfers))
         .with("squad_value", r(&|g| g.row.squad_value))
+        .with("market_value", r(&|g| g.row.market_value))
+        .with("decided_at", Column::Ts(results.iter().map(|g| g.row.decided_at).collect()))
+        .with("early_kept", oi(&|g| g.row.early_kept))
         .with("transfers", s(&|g| g.row.transfers.clone()))
         .with("autosubs", s(&|g| g.row.autosubs.clone()))
         .with("pred_gain", of(&|g| g.row.pred_gain))
@@ -506,7 +540,7 @@ fn season_totals_by_start(results: &[GridRow], specs: &[StartSpec]) -> Vec<BySta
             let totals = col(|r| r.total);
             let template: Vec<f64> = runs
                 .iter()
-                .filter(|r| r.start_id.starts_with("template"))
+                .filter(|r| r.start_id.starts_with("template") && !r.start_id.contains("+bank"))
                 .map(|r| r.total)
                 .collect();
             let xg = col(|r| r.xg_total);
@@ -1128,4 +1162,24 @@ fn backtest_compare(args: &CompareArgs) -> Result<()> {
         n_variants,
         &checked.family,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fplopt_backtest::specs::parse_policy_spec;
+
+    #[test]
+    fn early_policies_are_refused_before_the_first_season_with_snapshots() {
+        let early = parse_policy_spec("optimizer:v1:early=1").unwrap();
+        let late = parse_policy_spec("optimizer:v1").unwrap();
+        let err = refuse_early(&[2020, 2021], &[&late, &early]).unwrap_err();
+        assert!(err.downcast_ref::<crate::optimize_plan::Usage>().is_some());
+        assert_eq!(
+            err.to_string(),
+            "early=1 needs player snapshots (from 2021-22); 2020-21 has none"
+        );
+        assert!(refuse_early(&[2021, 2022], &[&early]).is_ok());
+        assert!(refuse_early(&[2016, 2020], &[&late]).is_ok());
+    }
 }

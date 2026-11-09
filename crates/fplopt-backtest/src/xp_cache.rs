@@ -3,7 +3,8 @@
 //! the same ones. The cache lives in `<root>/<key>/<model>/<deadline>.parquet`, where the key
 //! hashes every `data/` table's name, size and modification time and the running binary's
 //! bytes: a rebuilt `data/` or a rebuilt binary starts a fresh cache (a needless miss at
-//! worst, never a stale frame). A frame reads back as it was written: Parquet keeps the
+//! worst, never a stale frame). An early-move frame, seen at `cutoff` < deadline, is
+//! `<deadline>-at-<cutoff>.parquet`. A frame reads back as it was written: Parquet keeps the
 //! floats bit for bit and NaN apart from null, and each column's variant is restored (a
 //! nullable column without nulls reads back as the non-nullable one).
 
@@ -100,13 +101,18 @@ impl DiskCache {
         DiskCache { dir }
     }
 
-    fn path(&self, model: &str, deadline: Micros) -> PathBuf {
-        self.dir.join(model).join(format!("{deadline}.parquet"))
+    fn path(&self, model: &str, deadline: Micros, cutoff: Micros) -> PathBuf {
+        let name = if cutoff == deadline {
+            format!("{deadline}.parquet")
+        } else {
+            format!("{deadline}-at-{cutoff}.parquet")
+        };
+        self.dir.join(model).join(name)
     }
 
-    /// The frame stored for (model, deadline), if any.
-    pub fn load(&self, model: &str, deadline: Micros) -> Result<Option<Table>> {
-        let path = self.path(model, deadline);
+    /// The frame stored for (model, deadline, cutoff), if any.
+    pub fn load(&self, model: &str, deadline: Micros, cutoff: Micros) -> Result<Option<Table>> {
+        let path = self.path(model, deadline, cutoff);
         let kinds = path.with_extension("kinds");
         if !path.exists() || !kinds.exists() {
             return Ok(None);
@@ -132,11 +138,17 @@ impl DiskCache {
         Ok(Some(Table { columns }))
     }
 
-    /// Store the frame for (model, deadline): written under a name of this process's own and
-    /// renamed into place, the sidecar last (a frame without its sidecar is a miss), so
+    /// Store the frame for (model, deadline, cutoff): written under a name of this process's own
+    /// and renamed into place, the sidecar last (a frame without its sidecar is a miss), so
     /// processes sharing the cache never read a partial file.
-    pub fn store(&self, model: &str, deadline: Micros, table: &Table) -> Result<()> {
-        let path = self.path(model, deadline);
+    pub fn store(
+        &self,
+        model: &str,
+        deadline: Micros,
+        cutoff: Micros,
+        table: &Table,
+    ) -> Result<()> {
+        let path = self.path(model, deadline, cutoff);
         std::fs::create_dir_all(path.parent().unwrap())?;
         let tag = format!("{}.{:?}", std::process::id(), std::thread::current().id());
         let tag: String = tag.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.').collect();
@@ -190,27 +202,39 @@ mod tests {
     #[test]
     fn a_frame_reads_back_bit_for_bit() {
         let cache = DiskCache::at(scratch("roundtrip"));
-        assert!(cache.load("v1", 42).unwrap().is_none());
+        assert!(cache.load("v1", 42, 42).unwrap().is_none());
         let t = frame();
-        cache.store("v1", 42, &t).unwrap();
-        let back = cache.load("v1", 42).unwrap().unwrap();
+        cache.store("v1", 42, 42, &t).unwrap();
+        let back = cache.load("v1", 42, 42).unwrap().unwrap();
         assert_eq!(describe_difference(&t, &back), None);
         let variants = |t: &Table| t.columns.iter().map(|(_, c)| variant(c)).collect::<Vec<_>>();
         assert_eq!(variants(&t), variants(&back));
         // -0.0 keeps its sign, 0.1 + 0.2 its last bit
         let bits = |t: &Table| t.f64("xp").unwrap().iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         assert_eq!(bits(&t), bits(&back));
-        assert!(cache.load("v1", 43).unwrap().is_none());
-        assert!(cache.load("rolling", 42).unwrap().is_none());
+        assert!(cache.load("v1", 43, 43).unwrap().is_none());
+        assert!(cache.load("rolling", 42, 42).unwrap().is_none());
     }
 
     #[test]
     fn a_frame_without_its_sidecar_is_a_miss() {
         let dir = scratch("sidecar");
         let cache = DiskCache::at(dir.clone());
-        cache.store("v1", 7, &frame()).unwrap();
+        cache.store("v1", 7, 7, &frame()).unwrap();
         std::fs::remove_file(dir.join("v1").join("7.kinds")).unwrap();
-        assert!(cache.load("v1", 7).unwrap().is_none());
+        assert!(cache.load("v1", 7, 7).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_early_frame_has_its_own_file_and_a_deadline_frame_keeps_its_name() {
+        let dir = scratch("early");
+        let cache = DiskCache::at(dir.clone());
+        cache.store("v1", 42, 42, &frame()).unwrap();
+        assert!(dir.join("v1").join("42.parquet").exists());
+        assert!(cache.load("v1", 42, 40).unwrap().is_none());
+        cache.store("v1", 42, 40, &frame()).unwrap();
+        assert!(dir.join("v1").join("42-at-40.parquet").exists());
+        assert!(cache.load("v1", 42, 40).unwrap().is_some());
     }
 
     #[test]

@@ -20,6 +20,7 @@ mod models;
 mod models_eval;
 mod optimize;
 mod optimize_plan;
+mod research;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -112,6 +113,11 @@ enum Command {
         #[command(subcommand)]
         command: chips::ChipsJob,
     },
+    /// Research measurements (Rust only).
+    Research {
+        #[command(subcommand)]
+        command: research::ResearchJob,
+    },
     /// The holdout season's inputs (the Phase 6 run itself stays Python's).
     Holdout {
         #[arg(value_enum)]
@@ -189,6 +195,9 @@ enum Check {
         deadlines: usize,
         #[arg(long, default_value_t = 0)]
         seed: u64,
+        /// Check only the frames whose name starts with this (e.g. `probe:early`).
+        #[arg(long)]
+        only: Option<String>,
     },
     /// Compare Python and Rust outputs (the migration's parity gate).
     Parity {
@@ -280,9 +289,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 health::check_freshness(&ctx.store, Utc::now(), max_age).map(drop)
             }))
         }
-        Command::Check { check: Check::Leakage { deadlines, seed } } => {
+        Command::Check { check: Check::Leakage { deadlines, seed, only } } => {
             Ok(run_job("check leakage", |ctx| {
-                check_leakage(&ctx.settings.data_dir, deadlines, seed)
+                check_leakage(&ctx.settings.data_dir, deadlines, seed, only.as_deref())
             }))
         }
         Command::Features { command: FeaturesJob::Dump { deadlines, out } } => {
@@ -306,6 +315,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Chips { command } => {
             Ok(run_job("chips", |ctx| chips::run(&command, &ctx.settings.data_dir)))
         }
+        Command::Research { command } => research::run(&command),
         Command::Holdout { command: HoldoutJob::Check } => {
             Ok(run_job("holdout check", |ctx| holdout::check(&ctx.settings.data_dir)))
         }
@@ -375,7 +385,7 @@ fn features_dump(data_dir: &Path, deadlines: &Path, out: &Path) -> Result<()> {
 
 /// `check leakage`: every feature and the history frames at the edge deadlines plus
 /// `n_deadlines` sampled ones; fails listing the leaks.
-fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
+fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64, only: Option<&str>) -> Result<()> {
     use fplopt_features::leakcheck::{FEATURE_TABLES, check_leakage, sample_deadlines};
     let started = std::time::Instant::now();
     let names: Vec<&str> = FEATURE_TABLES
@@ -398,7 +408,11 @@ fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
         .chain(fplopt_models::LEAKAGE_BUILDERS)
         .chain(fplopt_backtest::probes::PROBE_BUILDERS)
         .copied()
+        .filter(|(name, _)| only.is_none_or(|p| name.starts_with(p)))
         .collect();
+    if builders.is_empty() {
+        anyhow::bail!("no frame matches --only: the leakage check was not performed");
+    }
     log::info!(
         "leakage check: {} deadline(s) from {} to {}, {} frame(s), seed {seed}",
         deadlines.len(),
@@ -406,6 +420,9 @@ fn check_leakage(data_dir: &Path, n_deadlines: usize, seed: u64) -> Result<()> {
         fmt_micros(last),
         builders.len()
     );
+    for (name, why) in fplopt_backtest::oracle::LEAKAGE_EXCLUDED {
+        log::info!("not checked (reads future prices by design): {name} ({why})");
+    }
     let leaks = check_leakage(tables, &deadlines, seed, &builders)?;
     if let Some(leak) = leaks.first() {
         for leak in &leaks {
