@@ -4,7 +4,10 @@
 //! money_value.parquet and summary.json to --out. `research price-eval` (price forecast
 //! Stage B): the walk-forward evaluation of the price forecast against no change and
 //! momentum (`fplopt_backtest::price_eval`); writes predictions.parquet and metrics.json to
-//! --out and appends the run to the experiment log. Usage errors exit 2.
+//! --out and appends the run to the experiment log. `research night-eval` (Gate N): the
+//! walk-forward evaluation of the night price model against a base rate and net transfers
+//! per owner, by log loss (`fplopt_backtest::night_eval`); writes predictions.parquet and
+//! metrics.json to --out and appends the run to the experiment log. Usage errors exit 2.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,6 +17,7 @@ use clap::{Args, Subcommand};
 use fplopt_backtest::money_value::{
     LIVE_SPEC, POOLED_FROM, measure, rows_table, specs_at, summary,
 };
+use fplopt_backtest::night_eval::{self, evaluate_nights};
 use fplopt_backtest::price_eval::{self, PriceEval, check_seasons, evaluate_prices};
 use fplopt_backtest::simulator::Caches;
 use fplopt_backtest::specs::parse_policy_spec;
@@ -23,6 +27,7 @@ use fplopt_core::experiments::{family_variants, log_experiment, read_experiments
 use fplopt_core::pyjson::{Ordered, dumps_indent};
 use fplopt_core::seasons::{HOLDOUT_SEASONS, season_label};
 use fplopt_core::settings::Settings;
+use fplopt_models::night::NightParams;
 use fplopt_models::price::PriceParams;
 use fplopt_store::DataStore;
 
@@ -38,6 +43,30 @@ pub enum ResearchJob {
     MoneyValue(MoneyValueArgs),
     /// Walk-forward evaluation of the price forecast against no change and momentum.
     PriceEval(PriceEvalArgs),
+    /// Gate N: walk-forward log loss of the night price model against two baselines.
+    NightEval(NightEvalArgs),
+}
+
+#[derive(Args)]
+pub struct NightEvalArgs {
+    /// Evaluated start years: 2022 or 2021-2022 (each after --first-fit, 2022/23 at the
+    /// latest; later seasons and the holdout are refused).
+    #[arg(long)]
+    pub seasons: String,
+    /// First season of every fit (season S is fitted on --first-fit..S-1; snapshots start in
+    /// 2020/21).
+    #[arg(long, default_value_t = 2020)]
+    pub first_fit: i64,
+    /// Experiment-log family.
+    #[arg(long, default_value = "night price model")]
+    pub family: String,
+    #[arg(long, default_value = "results/experiments.csv")]
+    pub experiments: PathBuf,
+    /// The data directory (default FPLOPT_DATA_DIR or data).
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub out: PathBuf,
 }
 
 #[derive(Args)]
@@ -200,6 +229,7 @@ pub fn run(job: &ResearchJob) -> Result<ExitCode> {
     Ok(exit_code(match job {
         ResearchJob::MoneyValue(args) => money_value(args),
         ResearchJob::PriceEval(args) => price_eval(args),
+        ResearchJob::NightEval(args) => night_eval(args),
     }))
 }
 
@@ -377,6 +407,142 @@ fn price_eval(args: &PriceEvalArgs) -> Result<()> {
     Ok(())
 }
 
+/// The log-loss table, the Diebold-Mariano table and the gate table of a night-eval run.
+fn night_tables(metrics: &Ordered) -> (String, String, String) {
+    let headers = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let loss: Vec<Vec<String>> = items(metrics, "log_loss")
+        .iter()
+        .map(|r| {
+            let n = |k: &str| num_text(number(get(r, k)), 5, false);
+            vec![text(get(r, "target")), n("model"), n("b0"), n("b1")]
+        })
+        .collect();
+    let dm: Vec<Vec<String>> = items(metrics, "dm")
+        .iter()
+        .map(|r| {
+            vec![
+                text(get(r, "target")),
+                text(get(r, "baseline")),
+                text(get(r, "n_clusters")),
+                num_text(number(get(r, "value_a")), 5, false),
+                num_text(number(get(r, "value_b")), 5, false),
+                num_text(number(get(r, "mean_diff")), 5, true),
+                num_text(number(get(r, "p_a_better")), 3, false),
+                num_text(number(get(r, "p_b_better")), 3, false),
+            ]
+        })
+        .collect();
+    let gate: Vec<Vec<String>> = night_eval::gate_of(metrics)
+        .iter()
+        .map(|g| {
+            vec![
+                g.target.to_owned(),
+                g.baseline.to_owned(),
+                num_text(g.p, 3, false),
+                (if g.pass { "pass" } else { "fail" }).to_owned(),
+            ]
+        })
+        .collect();
+    (
+        text_table(&headers(&["target", "model", "B0", "B1"]), &loss, 1),
+        text_table(
+            &headers(&[
+                "target",
+                "B",
+                "nights",
+                "model",
+                "B",
+                "model - B",
+                "p(model<B)",
+                "p(B<model)",
+            ]),
+            &dm,
+            2,
+        ),
+        text_table(&headers(&["target", "B", "p", "result"]), &gate, 2),
+    )
+}
+
+fn night_eval(args: &NightEvalArgs) -> Result<()> {
+    let seasons = parse_seasons(&args.seasons, "--seasons")?;
+    if let Err(e) = night_eval::check_seasons(&seasons, args.first_fit) {
+        return usage(format!("argument --seasons: {e}"));
+    }
+    let data_dir = args.data_dir.clone().unwrap_or_else(|| Settings::from_env().data_dir);
+    let store = match DataStore::open(&data_dir) {
+        Ok(s) => s,
+        Err(e) => return usage(format!("{e:#}")),
+    };
+    let available = seasons_with_data(&store)?;
+    let last = seasons.iter().max().copied().unwrap_or(args.first_fit);
+    let missing: Vec<String> = (args.first_fit..=last)
+        .filter(|s| !available.contains(s))
+        .map(|s| season_label(s as i32))
+        .collect();
+    if !missing.is_empty() {
+        return usage(format!(
+            "no gameweek/player_match data for {} (run fplopt build all?)",
+            missing.join(", ")
+        ));
+    }
+    let params = NightParams::default();
+    let began = std::time::Instant::now();
+    let (rows, metrics) = evaluate_nights(&store, &seasons, args.first_fit, &params)?;
+    let runtime = began.elapsed().as_secs_f64();
+    let int = |i: i64| Ordered::Int(i128::from(i));
+    let pair = |k: &str, v: Ordered| (k.to_owned(), v);
+    let family = args.family.clone();
+    let config = Ordered::Object(vec![
+        pair("seasons", Ordered::Array(seasons.iter().map(|s| int(*s)).collect())),
+        pair("first_fit", int(args.first_fit)),
+        pair("out", Ordered::Str(args.out.display().to_string())),
+        pair("family", Ordered::Str(family.clone())),
+    ]);
+    let n_variants = family_variants(&args.experiments, &family)? + 1;
+    std::fs::create_dir_all(&args.out)?;
+    write_parquet(&night_eval::rows_table(&rows), &args.out.join("predictions.parquet"))?;
+    let command = command_line();
+    let payload = Ordered::Object(vec![
+        pair("command", Ordered::Str(command.clone())),
+        pair("config", config.clone()),
+        pair("family", Ordered::Str(family.clone())),
+        pair("n_variants", int(n_variants as i64)),
+        pair("runtime_seconds", Ordered::Float((runtime * 10.0).round() / 10.0)),
+        pair("metrics", metrics.clone()),
+    ]);
+    write_json(&args.out.join("metrics.json"), &payload)?;
+    // Logged before any result reaches stdout, so a run can't be seen and then not logged.
+    log_experiment(
+        &args.experiments,
+        &command,
+        &config.to_value(),
+        &metrics.to_value(),
+        n_variants,
+        &family,
+    )?;
+    let (loss, dm, gate) = night_tables(&metrics);
+    let verdict = if matches!(get(&metrics, "gate_pass"), Some(Ordered::Bool(true))) {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    println!(
+        "night eval: {}, fitted from {}; {} night(s), {} scored player-night(s) ({runtime:.0}s)\n\n\
+         Log loss (B0 training base rate, B1 net transfers per owner)\n{loss}\n\n\
+         Diebold-Mariano, one-sided, per-night mean log loss, lag {}, clustered by night\n{dm}\n\n\
+         Gate N: {verdict} (the model beats both baselines on both targets, p < {})\n{gate}\n\n\
+         Written to {}",
+        format_seasons(&seasons),
+        season_label(args.first_fit as i32),
+        text(get(&metrics, "n_nights")),
+        text(get(&metrics, "n_rows")),
+        night_eval::DM_LAG,
+        night_eval::ALPHA,
+        args.out.display()
+    );
+    Ok(())
+}
+
 fn money_value(args: &MoneyValueArgs) -> Result<()> {
     let seasons = parse_seasons(&args.seasons, "--seasons")?;
     if args.jobs < 1 {
@@ -541,6 +707,78 @@ mod tests {
             Cli::try_parse_from(["x", "price-eval", "--seasons", "2022", "--out", "o"]).is_err()
         );
         assert!(d.data_dir.is_none());
+    }
+
+    #[test]
+    fn night_eval_args() {
+        let cli = Cli::try_parse_from([
+            "x",
+            "night-eval",
+            "--seasons",
+            "2022",
+            "--first-fit",
+            "2021",
+            "--family",
+            "f",
+            "--experiments",
+            "e.csv",
+            "--data-dir",
+            "d",
+            "--out",
+            "o",
+        ])
+        .unwrap();
+        let ResearchJob::NightEval(a) = cli.job else { panic!("not night-eval") };
+        assert_eq!((a.seasons.as_str(), a.first_fit, a.family.as_str()), ("2022", 2021, "f"));
+        assert_eq!(a.experiments, PathBuf::from("e.csv"));
+        assert_eq!(a.data_dir, Some(PathBuf::from("d")));
+        let defaults =
+            Cli::try_parse_from(["x", "night-eval", "--seasons", "2022", "--out", "o"]).unwrap();
+        let ResearchJob::NightEval(d) = defaults.job else { panic!("not night-eval") };
+        assert_eq!((d.first_fit, d.family.as_str()), (2020, "night price model"));
+        assert_eq!(d.experiments, PathBuf::from("results/experiments.csv"));
+        assert!(d.data_dir.is_none());
+        assert!(Cli::try_parse_from(["x", "night-eval", "--seasons", "2022"]).is_err());
+        // no --params, --jobs or xP cache
+        assert!(
+            Cli::try_parse_from([
+                "x",
+                "night-eval",
+                "--seasons",
+                "2022",
+                "--jobs",
+                "2",
+                "--out",
+                "o"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn night_eval_refuses_seasons_outside_develop_before_reading_data() {
+        // a data dir that doesn't exist: the refusal comes first
+        for (seasons, first_fit, needle) in
+            [("2023", "2020", "2023-24"), ("2025", "2020", "2025-26"), ("2022", "2019", "2020-21")]
+        {
+            let cli = Cli::try_parse_from([
+                "x",
+                "night-eval",
+                "--seasons",
+                seasons,
+                "--first-fit",
+                first_fit,
+                "--data-dir",
+                "no-such-dir",
+                "--out",
+                "o",
+            ])
+            .unwrap();
+            let ResearchJob::NightEval(a) = cli.job else { panic!("not night-eval") };
+            let err = night_eval(&a).unwrap_err();
+            let usage = err.downcast_ref::<crate::optimize_plan::Usage>().expect("a usage error");
+            assert!(usage.to_string().contains(needle), "{usage}");
+        }
     }
 
     fn log_row(family: &str) -> Vec<(String, String)> {
