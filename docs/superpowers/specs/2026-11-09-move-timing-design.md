@@ -1,6 +1,6 @@
 # Move timing: make a move early only when a price change is due tonight
 
-**Date:** 2026-11-09. **Status:** draft for review. Supersedes the fixed-time study (`2026-11-07-early-moves-design.md`, policy E), which is parked before any server run; its code (early views, prices at the decision moment, money kept, the leakage probe) is reused here.
+**Date:** 2026-11-09. **Status:** parked 2026-11-09 after Gate N failed (rises overconfident; `docs/research/2026-11-night-price-model.md`); T was not built or run. Supersedes the fixed-time study (`2026-11-07-early-moves-design.md`, policy E), which is parked before any server run; its code (early views, prices at the decision moment, money kept, the leakage probe) is reused here.
 
 ## Why
 

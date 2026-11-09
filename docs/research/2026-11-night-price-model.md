@@ -61,7 +61,9 @@ All four DM tests: p < 0.001. Against B0, the model's per-night loss is 47% lowe
 - **Pre-season transfers are carried into the cumulative net transfers.** A snapshot's net transfers are offset at the first deadline after it. 2020/21's series starts in April 2021, when the snapshots begin.
 - **The condition is a coarse test.** It pools p ≥ 0.3, and at n = 30 its SE would be about 0.09. Here n is over 1,000, so the rise failure is not noise: the rate's 90% interval at p ≥ 0.5 is 0.27–0.34 against a mean p of 0.63.
 
-## What next (not decided)
+## What next
+
+**Decided 2026-11-09 (user): move timing is parked.** The options weighed were:
 
 Gate N ran once and is spent. Any change is a new model with its own pre-registered gate, on seasons not yet used for evaluation. 2022/23 is now seen. 2023/24–2024/25 stay clean until a frozen version passes on develop. The options are for the user to choose:
 1. **A fall-only T:** make a planned sale tonight when a fall is likely. Falls passed here, but a fall-only design needs its own spec and a new develop season to test it.
