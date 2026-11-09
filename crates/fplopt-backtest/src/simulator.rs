@@ -64,15 +64,16 @@ impl<K: Eq + Hash, V> OnceMap<K, V> {
     }
 }
 
-/// xP frames per (model, deadline), v1 fits per cutoff, pools per deadline and outcomes per
+/// xP frames per (model, deadline, cutoff), v1 fits per (deadline, cutoff) of the fit view,
+/// pools per (deadline, cutoff) and outcomes per
 /// (season, gw, rules label), shared across policies, start states and threads; the xP
 /// frames also on disk when given one (`xp_cache`), shared across runs.
 #[derive(Default)]
 pub struct Caches {
     disk: Option<DiskCache>,
-    xp: OnceMap<(String, Micros), Xp>,
-    fits: OnceMap<(String, Micros), V1Fit>,
-    pools: OnceMap<Micros, Vec<PoolPlayer>>,
+    xp: OnceMap<(String, Micros, Micros), Xp>,
+    fits: OnceMap<(String, Micros, Micros), V1Fit>,
+    pools: OnceMap<(Micros, Micros), Vec<PoolPlayer>>,
     outcomes: OnceMap<(i64, i64, String), GwOutcomes>,
     future: OnceMap<i64, FuturePrices>,
     forecast: OnceMap<i64, ForecastPrices>,
@@ -101,31 +102,35 @@ impl Caches {
     }
 
     pub fn pool(&self, view: &AsOfView) -> Result<Arc<Vec<PoolPlayer>>> {
-        self.pools.get_or_compute(view.deadline(), || pool_players(&player_pool(view)?))
+        self.pools
+            .get_or_compute((view.deadline(), view.cutoff()), || pool_players(&player_pool(view)?))
     }
 
     /// The model's xP frame at the view (v1 family: predicted with the memoized fit at its refit
     /// cutoff, the same as calling the model).
     pub fn xp(&self, model: &str, view: &AsOfView) -> Result<Arc<Xp>> {
-        self.xp.get_or_compute((model.to_owned(), view.deadline()), || {
+        let key = (model.to_owned(), view.deadline(), view.cutoff());
+        self.xp.get_or_compute(key, || {
             let cached = match &self.disk {
-                Some(disk) => disk.load(model, view.deadline())?,
+                Some(disk) => disk.load(model, view.deadline(), view.cutoff())?,
                 None => None,
             };
             let hit = cached.is_some();
             let table = if let Some(t) = cached {
                 t
             } else if fplopt_models::is_v1_family(model) {
-                let cutoff = refit_deadline(view, REFIT_EVERY)?;
-                let fit = self.fits.get_or_compute((model.to_owned(), cutoff), || {
-                    fit_v1(&view.earlier(cutoff)?, &V1Params::for_model(model)?)
-                })?;
+                let refit = refit_deadline(view, REFIT_EVERY)?;
+                let fit_view = view.earlier(refit)?;
+                let fit_key = (model.to_owned(), fit_view.deadline(), fit_view.cutoff());
+                let fit = self
+                    .fits
+                    .get_or_compute(fit_key, || fit_v1(&fit_view, &V1Params::for_model(model)?))?;
                 predict_v1(view, &fit)?
             } else {
                 fplopt_models::predict(model, view)?
             };
             if let (Some(disk), false) = (&self.disk, hit) {
-                disk.store(model, view.deadline(), &table)?;
+                disk.store(model, view.deadline(), view.cutoff(), &table)?;
             }
             let frame = XpFrame::from_table(&table)?;
             Ok(Xp { table, frame })
