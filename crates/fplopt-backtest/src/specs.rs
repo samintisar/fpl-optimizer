@@ -113,6 +113,7 @@ fn params_of(name: &str) -> Option<Vec<(&'static str, Kind)>> {
                 ("prices", Kind::Prices),
                 ("xp_jitter", Kind::Float),
                 ("jitter_seed", Kind::Int),
+                ("early", Kind::Int),
             ]);
             keys
         }
@@ -340,6 +341,11 @@ impl PolicySpec {
                 if jitter.is_some() && tc_rule.is_some() {
                     bail!("xp_jitter can't be combined with tc_rule (the rule reads the true xP)");
                 }
+                let early = match params.remove("early").map_or(0, Value::i) {
+                    0 => false,
+                    1 => true,
+                    v => bail!("early must be 0 or 1, got {v}"),
+                };
                 let prices = match params.remove("prices") {
                     None | Some(Value::Text("fixed")) => PriceSource::Fixed,
                     Some(Value::Text("oracle")) => PriceSource::Oracle,
@@ -378,7 +384,7 @@ impl PolicySpec {
                     extra.tc_rule = Some(t);
                 }
                 opt.validate()?;
-                Policy::Optimizer { xp_model, params: opt, chips, extra, prices, jitter }
+                Policy::Optimizer { xp_model, params: opt, chips, extra, prices, jitter, early }
             }
             "chipgains" | "chiprules" => {
                 let mut rule = |k: &str, default: Value| params.remove(k).unwrap_or(default);
@@ -425,6 +431,7 @@ fn key_default(name: &str, key: &str) -> Option<Value> {
         ("optimizer", "fh_scale") => Some(Value::Float(1.0)),
         ("optimizer", "xp_jitter") => Some(Value::Float(0.0)),
         ("optimizer", "jitter_seed") => Some(Value::Int(0)),
+        ("optimizer", "early") => Some(Value::Int(0)),
         (_, "price_k") => Some(Value::Float(0.0)),
         (_, "prices") => Some(Value::Text("fixed")),
         _ => None,
@@ -631,5 +638,25 @@ mod tests {
         );
         let s0 = parse_policy_spec(&format!("{base},xp_jitter=0.05")).unwrap().build().unwrap();
         assert!(s0.name().ends_with("jit=0.05/0)"), "{}", s0.name());
+    }
+
+    #[test]
+    fn early_key_parses_labels_and_refuses_what_it_cannot_combine_with() {
+        let base = "optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2";
+        let policy = parse_policy_spec(&format!("{base},early=1")).unwrap().build().unwrap();
+        assert_eq!(policy.name(), "optimizer(v1,mh=1,m=2.0,d=0.75,early)");
+        let Policy::Optimizer { early, .. } = &policy else { panic!("not an optimizer") };
+        assert!(*early);
+        // the default (0) is dropped: the live planner's spec and name are unchanged
+        let plain = parse_policy_spec(&format!("{base},early=0")).unwrap();
+        assert_eq!(plain, parse_policy_spec(base).unwrap());
+        assert_eq!(plain.build().unwrap().name(), "optimizer(v1,mh=1,m=2.0,d=0.75)");
+        // only 0/1, and not with chips, moving prices or the rule Triple Captain
+        assert!(parse_policy_spec(&format!("{base},early=2")).is_err());
+        for extra in ["chips=1", "prices=forecast", "prices=oracle", "tc_rule=8"] {
+            let spec = parse_policy_spec(&format!("{base},early=1,{extra}"));
+            assert!(spec.and_then(|s| s.build()).is_err(), "{extra}");
+        }
+        assert!(parse_policy_spec("chipgains:v1:early=1").is_err());
     }
 }

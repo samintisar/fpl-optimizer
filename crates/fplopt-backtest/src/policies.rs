@@ -304,6 +304,9 @@ pub enum Policy {
         prices: PriceSource,
         /// The noise study's placebo wobble on xP (`crate::jitter`); None for every real policy.
         jitter: Option<crate::jitter::XpJitter>,
+        /// The early-move study's policy E (`docs/superpowers/specs/2026-11-07-early-moves-design.md`):
+        /// transfers at the previous lockdown, lineup at the deadline (`simulator::decide_step`).
+        early: bool,
     },
     ChipGains {
         xp_model: String,
@@ -348,7 +351,7 @@ impl Policy {
                 }
                 Ok(())
             }
-            Policy::Optimizer { xp_model, params, chips, extra, prices, .. } => {
+            Policy::Optimizer { xp_model, params, chips, extra, prices, early, .. } => {
                 check_model(xp_model)?;
                 if *prices == PriceSource::Forecast && xp_model != crate::price_eval::XP_MODEL {
                     bail!(
@@ -367,6 +370,9 @@ impl Policy {
                     && lead < 1
                 {
                     bail!("double_lead must be >= 1, got {lead}");
+                }
+                if *early && (*chips || *prices != PriceSource::Fixed || extra.tc_rule.is_some()) {
+                    bail!("early=1 runs without chips, with fixed prices and without tc_rule");
                 }
                 Ok(())
             }
@@ -422,7 +428,7 @@ impl Policy {
                 }
                 format!("greedy({xp_model},t={}{extra})", r(*threshold))
             }
-            Policy::Optimizer { xp_model, params, chips, extra, prices, jitter } => {
+            Policy::Optimizer { xp_model, params, chips, extra, prices, jitter, early } => {
                 let max_hits = params.max_hits.map_or("inf".to_owned(), |h| h.to_string());
                 let mut parts = vec![
                     xp_model.clone(),
@@ -435,6 +441,9 @@ impl Policy {
                 }
                 if let Some(j) = jitter {
                     parts.push(format!("jit={}/{}", r(j.sigma), j.seed));
+                }
+                if *early {
+                    parts.push("early".to_owned());
                 }
                 if let Some(tables) = &extra.season_tables {
                     parts.push(format!("loso#{}", season_tables_tag(tables)));
@@ -582,6 +591,50 @@ impl Policy {
         Ok((problem, params, plans))
     }
 
+    /// The early policy's deadline step: the lineup, captain and vice for `ctx.state`, the
+    /// squad after the GW's transfers (made at the lockdown), from the planner with this GW's
+    /// transfers fixed to none and no chip. Returns the lineup and the solve's status and gap.
+    pub fn deadline_lineup(&self, ctx: &DecisionContext) -> Result<(Lineup, String, f64)> {
+        let Policy::Optimizer { params, jitter, .. } = self else {
+            bail!("deadline_lineup: {} is not an optimizer policy", self.name());
+        };
+        let jittered;
+        let frame = match jitter {
+            Some(j) => {
+                jittered = j.apply(ctx.frame, ctx.state.season, ctx.state.gw_index);
+                &jittered
+            }
+            None => ctx.frame,
+        };
+        let problem = PlanInput::from_context(ctx.state, ctx.pool, frame, ctx.rules, params)?;
+        let none: fplopt_optimize::model::TransferSet = (BTreeSet::new(), BTreeSet::new());
+        let plan = match solve_plan(
+            &problem,
+            params,
+            Some(&none),
+            &[],
+            &fplopt_optimize::chips::ChipScenario::none(),
+        ) {
+            Ok(plan) => plan,
+            Err(SolveError::LimitReached { status, .. }) => {
+                bail!("deadline lineup: no plan before the solver stopped ({status})")
+            }
+            Err(SolveError::Infeasible(m)) => bail!("deadline lineup: {m}"),
+            Err(SolveError::Other(e)) => return Err(e),
+        };
+        let first = plan.first();
+        if !first.transfers.is_empty() {
+            bail!("deadline lineup: the planner changed the squad");
+        }
+        let lineup = Lineup {
+            starters: first.starters.clone(),
+            bench: first.bench.clone(),
+            captain: first.captain,
+            vice: first.vice,
+        };
+        Ok((lineup, plan.status.clone(), plan.mip_gap))
+    }
+
     fn decide_optimizer(&self, ctx: &DecisionContext, extra: &ChipPolicy2) -> Result<Decision> {
         let (problem, params, plans) = self.optimizer_plans(ctx)?;
         let status = plans.solver_status();
@@ -665,6 +718,7 @@ fn inner_name(xp_model: &str, params: &OptimizerParams) -> String {
         extra: ChipPolicy2::default(),
         prices: PriceSource::Fixed,
         jitter: None,
+        early: false,
     }
     .name();
     name.trim_start_matches("optimizer(").trim_end_matches(')').to_owned()
