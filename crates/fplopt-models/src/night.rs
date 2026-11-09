@@ -70,7 +70,10 @@ pub fn nights(view: &AsOfView, season: i64) -> Result<Vec<Night>> {
 
 /// The labelled rows of `seasons`' nights whose label window ends at or before `cutoff`:
 /// `season`, `night` (Ts), `player_key`, `FEATURES`, `dp` (the first snapshot price in the
-/// label window minus the newest before the night; NaN without one), `rise` (dp > 0), `fall`
+/// label window minus the newest before the night; NaN without one, and NaN when the newest
+/// before the night is before 04:00 UK that day, since its price may predate that day's
+/// change and the label could then include an earlier night's change; such a row keeps its
+/// features), `rise` (dp > 0), `fall`
 /// (dp < 0) (1/0, NaN with dp). Everything is read as of `cutoff` (available_at < cutoff),
 /// and a label's snapshot is before its window's end, so at or before `cutoff`. Features
 /// see only snapshots before each night (`features_at`, equal to `night_features` on that
@@ -93,11 +96,16 @@ pub fn training_rows(store: &DataStore, seasons: &[i64], cutoff: Micros) -> Resu
             for (j, c) in FEATURES.iter().enumerate() {
                 cols[j].extend_from_slice(f.f64(c)?);
             }
+            // the evening price must postdate this day's change (~02:30 UK)
+            let fresh_from = uk_wall_clock(uk_date(night.cutoff), MORNING_FROM_HOUR);
             for (i, &key) in keys.iter().enumerate() {
                 let morning = snaps.by_player.get(&key).and_then(|rows| {
-                    rows.iter()
-                        .find(|s| s.at >= night.label_from && s.at < night.label_to)
-                        .map(|s| s.cost)
+                    let evening = rows.partition_point(|s| s.at < night.cutoff);
+                    if evening == 0 || rows[evening - 1].at < fresh_from {
+                        return None;
+                    }
+                    let k = rows.partition_point(|s| s.at < night.label_from);
+                    rows.get(k).filter(|s| s.at < night.label_to).map(|s| s.cost)
                 });
                 ss.push(season);
                 ns.push(night.cutoff);
@@ -200,11 +208,17 @@ mod tests {
     /// snapshot at 06:30 UK on Aug 16 shows 76; player 2 stays 50. Snapshots at 19:00 and
     /// 06:30 UK each day Aug 13–22.
     fn store() -> DataStore {
+        store_with(16, None)
+    }
+
+    /// `store()` with player 1's rise first seen at 06:30 UK on Aug `rise_day`, and no
+    /// snapshots at all on Aug `skip_day`.
+    fn store_with(rise_day: u32, skip_day: Option<u32>) -> DataStore {
         let mut rows: Vec<(Micros, i64, i64)> = Vec::new();
-        for d in 13..=22 {
+        for d in (13..=22).filter(|&d| Some(d) != skip_day) {
             for (h, m) in [(6, 30), (19, 0)] {
                 let at = uk_wall_clock(date(8, d), h) + m * 60_000_000;
-                let up = at >= uk_wall_clock(date(8, 16), 6);
+                let up = at >= uk_wall_clock(date(8, rise_day), 6);
                 rows.push((at, 1, if up { 76 } else { 75 }));
                 rows.push((at, 2, 50));
             }
@@ -272,6 +286,31 @@ mod tests {
         }
         // 8 nights × 2 players
         assert_eq!(rows.height(), 16);
+    }
+
+    #[test]
+    fn a_stale_evening_price_has_no_label() {
+        // no snapshot on Aug 17: on its night the newest price is Aug 16 19:00's, before Aug
+        // 17's change at ~02:30, so Aug 18's 76 may be that earlier change; the row keeps its
+        // features but its label is NaN
+        let s = store_with(18, Some(17));
+        let rows = training_rows(&s, &[2021], uk_wall_clock(date(8, 25), 0)).unwrap();
+        let nights = rows.opt_i64("night").unwrap();
+        let keys = rows.i64("player_key").unwrap();
+        let price = rows.f64("price").unwrap();
+        let (dp, rise, fall) =
+            (rows.f64("dp").unwrap(), rows.f64("rise").unwrap(), rows.f64("fall").unwrap());
+        let aug17 = uk_wall_clock(date(8, 17), 22);
+        let stale: Vec<usize> = (0..rows.height()).filter(|&i| nights[i] == Some(aug17)).collect();
+        assert_eq!(stale.len(), 2);
+        for &i in &stale {
+            assert!(dp[i].is_nan() && rise[i].is_nan() && fall[i].is_nan(), "row {i}");
+            assert_eq!(price[i], if keys[i] == 1 { 75.0 } else { 50.0 });
+        }
+        // Aug 18's night is fresh again: 76 then, 76 the next morning
+        let aug18 = uk_wall_clock(date(8, 18), 22);
+        let i = (0..rows.height()).find(|&i| nights[i] == Some(aug18) && keys[i] == 1).unwrap();
+        assert_eq!(dp[i], 0.0);
     }
 
     #[test]
