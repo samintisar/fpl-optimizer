@@ -217,8 +217,9 @@ impl Platt {
 
 /// The two-parameter logistic regression of y on logit(p) over (y, p) pairs (y 0/1, p
 /// finite), by Newton's method (IRLS) from (a, b) = (0, 1), the identity map, with a 1e-9
-/// ridge on the Hessian; it stops when the step's largest component is below 1e-10, after at
-/// most 100 iterations. Refuses pairs without both classes (no finite fit).
+/// ridge on the Hessian and step-halving (a step is halved until the log-likelihood does not
+/// fall); it stops when the step's largest component is below 1e-10, after at most 100
+/// iterations. Refuses pairs without both classes (no finite fit).
 pub fn fit_platt(pairs: &[(f64, f64)]) -> Result<Platt> {
     if let Some(&(y, p)) = pairs.iter().find(|&&(y, p)| !(y == 0.0 || y == 1.0) || !p.is_finite()) {
         bail!("Platt: a pair (y {y}, p {p}) is not a 0/1 label with a finite probability");
@@ -247,8 +248,15 @@ pub fn fit_platt(pairs: &[(f64, f64)]) -> Result<Platt> {
         if !(det.is_finite() && det > 0.0) {
             bail!("Platt: singular Hessian (det {det})");
         }
-        let da = (hbb * ga - hab * gb) / det;
-        let db = (haa * gb - hab * ga) / det;
+        let (mut da, mut db) = ((hbb * ga - hab * gb) / det, (haa * gb - hab * ga) / det);
+        // step-halving: a full Newton step can overshoot far from the optimum (e.g. from
+        // the identity on overconfident p, where the weights are tiny), so halve it until
+        // the negative log-likelihood does not increase
+        let before = nll(&xs, a, b);
+        while nll(&xs, a + da, b + db) > before && da.abs().max(db.abs()) >= PLATT_TOL {
+            da /= 2.0;
+            db /= 2.0;
+        }
         a += da;
         b += db;
         if !(a.is_finite() && b.is_finite()) {
@@ -259,6 +267,12 @@ pub fn fit_platt(pairs: &[(f64, f64)]) -> Result<Platt> {
         }
     }
     Ok(Platt { a, b })
+}
+
+/// The negative log-likelihood of y given σ(a + b·x), summed (softplus kept stable).
+fn nll(xs: &[(f64, f64)], a: f64, b: f64) -> f64 {
+    let softplus = |z: f64| if z > 0.0 { z + (-z).exp().ln_1p() } else { z.exp().ln_1p() };
+    xs.iter().map(|&(y, x)| softplus(a + b * x) - y * (a + b * x)).sum()
 }
 
 /// The fold of each of `n` nights in time order: `folds` contiguous blocks covering all of
@@ -599,6 +613,21 @@ mod tests {
             .collect();
         let id = fit_platt(&calibrated).unwrap();
         assert!(id.a.abs() < 0.1 && (id.b - 1.0).abs() < 0.1, "{id:?}");
+    }
+
+    #[test]
+    fn platt_converges_from_very_overconfident_probabilities() {
+        // p 1e-5 or 1 − 1e-5, realized 20% and 40%: from the identity the weights are ~1e-5
+        // and a full Newton step overshoots into saturation. The MLE maps the two logits to
+        // exactly 0.2 and 0.4.
+        let mut pairs = Vec::new();
+        for i in 0..1000 {
+            pairs.push((f64::from(u8::from(i % 5 == 0)), 1e-5));
+            pairs.push((f64::from(u8::from(i % 5 < 2)), 1.0 - 1e-5));
+        }
+        let fit = fit_platt(&pairs).unwrap();
+        assert!((fit.apply(1e-5) - 0.2).abs() < 1e-6, "{fit:?}");
+        assert!((fit.apply(1.0 - 1e-5) - 0.4).abs() < 1e-6, "{fit:?}");
     }
 
     #[test]
