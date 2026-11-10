@@ -150,6 +150,11 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      can't show a gain. On live, the faster decay is harmless, so it's a judgment call for
      the new BPS rules (**for the user**, no more loop variants). The idea is closed for the
      loop.
+   - **GW10 (2026-11-10), concentration**: live e_bonus is calibrated over all rows (FWD
+     0.168 vs 0.171, DEF 0.084 vs 0.081) but under for predicted starters (p_start > 0.8:
+     FWD 0.524 vs 0.697 n 99, GK 0.192 vs 0.280, MID 0.284 vs 0.313, DEF 0.188 vs 0.206).
+     Bonus looks too evenly spread. Before any variant: the same cut on a develop head walk.
+     If develop starters are calibrated, it's the new BPS (yours); if not, a mechanism to test.
 5. **Free-transfer value** (decision; `ft_scale` key on `research`, c6eb489). **Blocked on
    `research`** since `back_split` is on: calibrated v1 raises (fingerprint), so every
    `optimizer:v1` backtest at the head fails until the table is regenerated (*Needs the
@@ -177,7 +182,9 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      (GW9 0.367). GW9's top-10 misses: 9 of 10 clean sheets. GK h0 bias −0.081 → −0.100.
      Part level shift (keepers), part subbing (MID / FWD > GK). Develop team model is
      calibrated, so the level part isn't testable there.
-   - Team-level live P(CS) stays a watch item (GW to GW 0.13–0.43). Recheck at GW10.
+   - **GW10 (2026-11-10)**: team P(CS) 0.245–0.255 vs 60+ realized GK 0.285 (n 200), DEF
+     0.301, MID 0.346, FWD 0.369; GW10 0.299, above 0.25 in 8 of 10 GWs. Fourth week.
+   - Team-level live P(CS) stays a watch item (GW to GW 0.13–0.43).
      GW8: team P(CS) 0.247 predicted vs keepers 60+ 0.288 (n 160, ~1.1 SE), GW8 alone
      0.433; DEF 0.297, MID 0.349, FWD 0.351 (the subbing pattern again).
    - Head walk 2021–22 (`diag-components.txt`), starters (p_start > 0.8): P(CS)·P(60+) vs
@@ -312,7 +319,8 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
     - Scoreable proxy, `price_change` (price − first price of the season; prices follow
       net transfers): DISCARD (MSE h0 −0.00028, 2020 +0.0031; Brier −0.01 %): too coarse.
     - 2026-11-04: rebased onto the head as b3a642b (`try/net-transfers-head`, history tests
-      pass) and re-scored after the hash change to adeb6c64: same KeyError. Score b3a642b
+      pass) and re-scored after the hash change to adeb6c64: same KeyError. 2026-11-10: again
+      after 2c77d376 (a develop data refresh, baseline identical): same KeyError. Score b3a642b
       directly once the walk reads the columns; `ownership` needs the same rebase.
     - Next, once the harness reads them: score `net_transfers`, then `ownership` (snapshot
       `selected_by_percent` for 2021+, `player_gw_ownership` before), one at a time.
@@ -428,6 +436,16 @@ finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 `diag-finish-price-over.txt`).
 
 ## Needs the user (not the loop's to do)
+
+- **2026-11-10 (GW10 report)**: `last_checked_gw` 10, monitor done (`reports/2026-11-10-gw10.md`).
+  The eval hash changed (adeb6c64 → 2c77d376) after `weekly.sh` refreshed the develop data;
+  baseline `c04be445fd-2c77d376` identical (MSE h0 4.223654). Re-scored `net_transfers`
+  (b3a642b): same KeyError, so it was the data, not the harness (ledger `crowd-recheck3`,
+  ERROR). No variants spent. Ledger: 54 scored (14 KEEP, 40 DISCARD), 5 ERROR. Live GW10:
+  regulars' P(start) gap widest since GW3 (0.797 vs 0.872), team P(CS) under in 8 of 10 GWs,
+  DEF defcon under, starters' bonus under (FWD 0.524 vs 0.697) while all-rows bonus is
+  calibrated. After the Rust switch (main checkout 14f1fc8), check which model `weekly.sh`
+  evaluates and whether the loop's harness should move to `fplopt-rs`.
 
 - **2026-11-09: no experiments tonight.** `last_checked_gw` is still 9 (bootstrap
   2026-11-09T023113Z; status still reports next GW 10 with the 2026-11-06 deadline, so
