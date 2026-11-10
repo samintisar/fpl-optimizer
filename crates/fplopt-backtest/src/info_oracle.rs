@@ -250,7 +250,8 @@ impl Truth {
             .collect();
 
         // the club arms' club
-        let td = view.table("team_dim", Some(&["team_key", "short_name"]))?;
+        let clubs: Vec<i64> = teams.iter().copied().collect::<HashSet<i64>>().into_iter().collect();
+        let td = view.lookup("team_dim", &clubs)?;
         let (tk, short) = (td.i64("team_key")?, td.opt_str("short_name")?);
         truth.club =
             (0..td.height()).find(|&i| short[i].as_deref() == Some(CLUB_SHORT_NAME)).map(|i| tk[i]);
