@@ -4,7 +4,7 @@
 
 ## Why
 
-- With chips played the system sits at about 2,325–2,345 against a target of 2,400. The planner, chip-timing and price items in the review sum to 15–35 points. None is the right size.
+- With chips played the system sits at about 2,325–2,345 against a target of 2,400. The planner, chip-timing and price items in the review sum to 15–35 points. None is the right size. *(Wrong baseline, noted 2026-11-10: that figure is the October model's holdout 2,240 plus chips. The current v1 is plausibly at 2,400–2,500 before chips; see the review's correction. The study's results do not depend on it.)*
 - xP accuracy is. A 5% random error on xP cost the planner about 25 points a season (the noise study's placebo arms), and the November v1 upgrade was worth about +173 a season on validate.
 - The research loop improves the model on the data it has, judged on component error. Nobody has measured what each component is worth **in season points**, or what a new source of information (team news, lineups, player odds) could be worth at most. Without that, the next data source is a guess.
 

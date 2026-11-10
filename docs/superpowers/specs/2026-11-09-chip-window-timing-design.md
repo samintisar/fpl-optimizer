@@ -1,6 +1,6 @@
 # Chip timing inside a closing window, and what the alert says
 
-**Date:** 2026-11-09. **Status:** proposed, not approved. Nothing is built. Review: `docs/research/2026-11-system-review.md` §3.
+**Date:** 2026-11-09. **Status:** closed unbuilt by the owner, 2026-11-10 (the review was closed; `docs/research/2026-11-system-review.md`, *Closed*). Nothing is built. Review: `docs/research/2026-11-system-review.md` §3.
 
 ## Why
 

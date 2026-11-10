@@ -4,6 +4,15 @@ A fresh read of the price work, the planner, chips, the xP model and rank play. 
 
 Local inputs: `data/` (built to 2026-10-29), `results/experiments.csv`, Gate N's `predictions.parquet` and the Gate A runs (`results/night-gate-n`, `results/price-a-l` in the `feat/price-sizing` worktree), the chip-study runs in the main checkout. Stage C's and the noise study's per-GW outputs are on the server only and were not read.
 
+## Closed (2026-11-10)
+
+The owner closed this review on 2026-11-10. Outcome:
+
+- **Nothing from it is built.** The three proposed specs (`2026-11-09-night-model-v2-design.md`, `2026-11-09-chip-window-timing-design.md`, `2026-11-09-planner-delayed-effects-design.md`) are closed unbuilt: their sizes sum to 15–35 points a season.
+- **The value-of-information study ran** (`docs/research/2026-11-value-of-information.md`): no data source is worth buying. The one large input is who starts over the next three gameweeks among unflagged players, league-wide, and that is the minutes model's ground (the research loop).
+- **The system is plausibly already at the target** (correction below: 2,400–2,500 before chips with the current v1). The "gap to 2,400" in the summary, in §5 and in the value-of-information spec's *Why* was measured from the October model and does not describe the live system.
+- **Still true and not acted on:** the standard comparison's bias against hits (summary item 3) and the one-snapshot-a-night archive (item 4). Both matter only if price timing or hit settings are reopened.
+
 ## Correction (2026-11-10): the baseline of 2,240 is the October model's
 
 The review measured every gap from the holdout's 2,240. That run used the October v1 (`v1-2026-10`). The model live since 2026-11-03 scores well above it on every season where both have been run, so the sizes below are right but the "gap to 2,400" they are compared with is not.
