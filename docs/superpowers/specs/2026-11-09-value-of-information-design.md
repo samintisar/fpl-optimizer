@@ -79,6 +79,18 @@ Approved by the owner in chat, 2026-11-10, after the first results (`docs/resear
 - MAf and MAu need not sum to MA (the planner's choices interact).
 - **Cost:** four runs of about 7 minutes and one of about 20, locally. Family `value of information`.
 
+### Club arms (2026-11-10, the owner's question)
+
+After the flag arms (MAf +12, MAu +183 of MA's +203 on the same 16 units), the owner asked whether MA's gain is mostly Manchester City's rotation. Written before either arm ran; what was known then: City has the lowest XI retention to the next league match over the seven seasons (0.71 against a league mean of about 0.80), and with MA the planner captains City players in 26% of gameweeks against 14% without.
+
+| Arm | What is replaced | Seasons |
+|---|---|---|
+| **MAc** | As MA, only in Manchester City's fixtures (`team_dim.short_name` `MCI`) | 2016/17–2022/23 |
+| **MAnc** | As MA, in every other club's fixtures | 2016/17–2022/23 |
+
+- Measured as the first six arms (same starts, same base run, same interval). Descriptive: they locate MA's gain, they are not a source.
+- **Reading, fixed now:** MAnc's lower bound ≥ 60 means the pattern is league-wide and City is not a special case. MAc at half of MA or more means a City-specific treatment (a rotation model or a planner discount for that club) is worth its own spec.
+
 ## What could follow (not in this spec)
 
 - **If M0 or A0 is large:** a team-news source. The first candidates are ones we may use: press-conference dates and FPL's own news text (already archived, parsed for return dates only), the player odds archived since 2026-10-30, and the user's own `/override`. Predicted-lineup sites are subject to the no-scraping rule and their terms.

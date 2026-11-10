@@ -34,6 +34,8 @@ pub const R_FIRST_SEASON: i64 = 2019;
 pub const FLAG_FIRST_SEASON: i64 = 2021;
 /// M2 knows horizons 0..=this (the coming GW and the two after).
 pub const M2_MAX_HORIZON: i64 = 2;
+/// The club of the club arms (`team_dim.short_name`): Manchester City.
+pub const CLUB_SHORT_NAME: &str = "MCI";
 
 /// What an oracle model knows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -50,6 +52,10 @@ pub enum Arm {
     MAu,
     /// MA for the coming GW and the two after only.
     M2,
+    /// MA for the players of `CLUB_SHORT_NAME`'s fixtures only.
+    MAc,
+    /// MA for every club's fixtures but `CLUB_SHORT_NAME`'s.
+    MAnc,
     /// Who plays in the coming GW (not who starts).
     A0,
     /// The closing odds' team λ in the coming GW.
@@ -60,8 +66,19 @@ pub enum Arm {
     R,
 }
 
-pub const ARMS: [Arm; 9] =
-    [Arm::M0, Arm::M0h, Arm::MA, Arm::MAf, Arm::MAu, Arm::M2, Arm::A0, Arm::T0, Arm::R];
+pub const ARMS: [Arm; 11] = [
+    Arm::M0,
+    Arm::M0h,
+    Arm::MA,
+    Arm::MAf,
+    Arm::MAu,
+    Arm::M2,
+    Arm::MAc,
+    Arm::MAnc,
+    Arm::A0,
+    Arm::T0,
+    Arm::R,
+];
 
 impl Arm {
     pub fn code(self) -> &'static str {
@@ -72,6 +89,8 @@ impl Arm {
             Arm::MAf => "MAf",
             Arm::MAu => "MAu",
             Arm::M2 => "M2",
+            Arm::MAc => "MAc",
+            Arm::MAnc => "MAnc",
             Arm::A0 => "A0",
             Arm::T0 => "T0",
             Arm::R => "R",
@@ -140,6 +159,8 @@ pub struct Truth {
     closing: HashMap<i64, (i64, f64, f64, f64, f64)>,
     /// player_key → season rates (players with at least `R_MIN_MINUTES` with xG).
     rates: HashMap<i64, Rates>,
+    /// `CLUB_SHORT_NAME`'s team_key.
+    club: Option<i64>,
 }
 
 /// What an edit did, for the run's log.
@@ -228,6 +249,12 @@ impl Truth {
             .map(|(k, (g, a, m))| (k, Rates { npxg90: g / m * 90.0, xa90: a / m * 90.0 }))
             .collect();
 
+        // the club arms' club
+        let td = view.table("team_dim", Some(&["team_key", "short_name"]))?;
+        let (tk, short) = (td.i64("team_key")?, td.opt_str("short_name")?);
+        truth.club =
+            (0..td.height()).find(|&i| short[i].as_deref() == Some(CLUB_SHORT_NAME)).map(|i| tk[i]);
+
         // closing odds
         let fx = view.table("fixture", Some(&["season", "fixture_key", "home_team_key"]))?;
         let (fs, fk, fh) =
@@ -260,6 +287,9 @@ impl Truth {
                 arm.model(),
                 self.season
             ),
+            Arm::MAc | Arm::MAnc if self.club.is_none() => {
+                bail!("{}: no club {CLUB_SHORT_NAME} in team_dim", arm.model())
+            }
             Arm::T0 if self.closing.is_empty() => {
                 bail!("{}: season {} has no closing odds", arm.model(), self.season)
             }
@@ -296,13 +326,23 @@ impl Truth {
                 Arm::MAf => flagged.contains(&f.key.player_key),
                 Arm::MAu => !flagged.contains(&f.key.player_key),
                 Arm::M2 => f.key.horizon <= M2_MAX_HORIZON,
+                Arm::MAc => Some(f.key.team_key) == self.club,
+                Arm::MAnc => Some(f.key.team_key) != self.club,
             };
             if !in_scope {
                 continue;
             }
             count.rows += 1;
             match arm {
-                Arm::M0 | Arm::M0h | Arm::MA | Arm::MAf | Arm::MAu | Arm::M2 | Arm::A0 => {
+                Arm::M0
+                | Arm::M0h
+                | Arm::MA
+                | Arm::MAf
+                | Arm::MAu
+                | Arm::M2
+                | Arm::MAc
+                | Arm::MAnc
+                | Arm::A0 => {
                     let Some((played, started)) = self.played(f) else {
                         count.unknown += 1;
                         continue;
@@ -515,6 +555,18 @@ mod tests {
         assert_eq!(count.rows, 3);
         assert!(close(m2[1].e_minutes, ma[1].e_minutes) && close(m2[2].e_minutes, 52.0));
         assert!(close(ma[2].e_minutes, 80.0));
+
+        // the club arms split MA by the fixture's club
+        let frame2 = || vec![fixture(1, 100, 7, 0), fixture(3, 100, 8, 0)];
+        assert!(t.check(Arm::MAc).is_err() && t.check(Arm::MAnc).is_err());
+        t.club = Some(7);
+        t.sides.insert((100, 8));
+        let (mut c, mut nc) = (frame2(), frame2());
+        assert_eq!(t.apply(Arm::MAc, &none(), &mut c).rows, 1);
+        assert_eq!(t.apply(Arm::MAnc, &none(), &mut nc).rows, 1);
+        assert!(close(c[0].p_play, 1.0) && close(c[1].p_play, 0.8));
+        assert!(close(nc[0].p_play, 0.8) && nc[1].p_play == 0.0);
+        assert!(t.check(Arm::MAc).is_ok());
 
         let early = Truth::for_test(2020);
         assert!(early.check(Arm::MAf).is_err() && early.check(Arm::MAu).is_err());
