@@ -16,7 +16,7 @@ use anyhow::{Result, anyhow, bail};
 use fplopt_build::scoring::Rules;
 use fplopt_core::seasons::{HOLDOUT_SEASONS, season_label};
 use fplopt_features::baseline::player_pool;
-use fplopt_models::assemble::{V1Fit, V1Params, fit_v1, predict_v1};
+use fplopt_models::assemble::{V1Fit, V1Params, fit_v1, predict_v1, predict_v1_with};
 use fplopt_models::fitted::{REFIT_EVERY, refit_deadline};
 use fplopt_optimize::XpFrame;
 use fplopt_optimize::start::{FAR_FUTURE, pool_players};
@@ -24,6 +24,7 @@ use fplopt_store::{AsOfView, DataStore, Micros, Table};
 
 use crate::forecast_prices::{ForecastConfig, ForecastPrices};
 use crate::gw_score::score_gameweek;
+use crate::info_oracle::{Arm, BASE_MODEL, EditCount, Truth};
 use crate::oracle::FuturePrices;
 use crate::outcomes::{GwOutcomes, read_outcomes};
 use crate::policies::{
@@ -78,6 +79,7 @@ pub struct Caches {
     future: OnceMap<i64, FuturePrices>,
     forecast: OnceMap<i64, ForecastPrices>,
     forecast_config: OnceLock<std::result::Result<ForecastConfig, String>>,
+    truth: OnceMap<i64, Truth>,
 }
 
 /// A season's price paths' source, as `Caches::prices_for` hands it out.
@@ -109,6 +111,9 @@ impl Caches {
     /// The model's xP frame at the view (v1 family: predicted with the memoized fit at its refit
     /// cutoff, the same as calling the model).
     pub fn xp(&self, model: &str, view: &AsOfView) -> Result<Arc<Xp>> {
+        if Arm::parse(model).is_some() {
+            bail!("{model} reads the future: only Caches::xp_for (the backtester) builds it");
+        }
         let key = (model.to_owned(), view.deadline(), view.cutoff());
         self.xp.get_or_compute(key, || {
             let cached = match &self.disk {
@@ -128,6 +133,54 @@ impl Caches {
                 predict_v1(view, &fit)?
             } else {
                 fplopt_models::predict(model, view)?
+            };
+            if let (Some(disk), false) = (&self.disk, hit) {
+                disk.store(model, view.deadline(), view.cutoff(), &table)?;
+            }
+            let frame = XpFrame::from_table(&table)?;
+            Ok(Xp { table, frame })
+        })
+    }
+
+    /// `xp`, and for a value-of-information oracle (`v1+oracle-<ARM>`, `info_oracle`) v1's
+    /// frame with the arm's input replaced by the season's truth, read once per season from
+    /// `store` (**reads the future: backtest only**). v1's own fit is shared; the oracle's
+    /// frames are cached (memory and disk) under its own name.
+    pub fn xp_for(&self, store: &DataStore, model: &str, view: &AsOfView) -> Result<Arc<Xp>> {
+        let Some(arm) = Arm::parse(model) else { return self.xp(model, view) };
+        let key = (model.to_owned(), view.deadline(), view.cutoff());
+        self.xp.get_or_compute(key, || {
+            let cached = match &self.disk {
+                Some(disk) => disk.load(model, view.deadline(), view.cutoff())?,
+                None => None,
+            };
+            let hit = cached.is_some();
+            let table = if let Some(t) = cached {
+                t
+            } else {
+                let (season, _) = view.gameweek_for_deadline()?;
+                let truth = self.truth.get_or_compute(season, || Truth::load(store, season))?;
+                truth.check(arm)?;
+                let refit = refit_deadline(view, REFIT_EVERY)?;
+                let fit_view = view.earlier(refit)?;
+                let fit_key = (BASE_MODEL.to_owned(), fit_view.deadline(), fit_view.cutoff());
+                let fit = self.fits.get_or_compute(fit_key, || {
+                    fit_v1(&fit_view, &V1Params::for_model(BASE_MODEL)?)
+                })?;
+                let count = std::cell::Cell::new(EditCount::default());
+                let table = predict_v1_with(view, &fit, &|frame| {
+                    count.set(truth.apply(arm, frame));
+                })?;
+                let c = count.get();
+                log::info!(
+                    "{model} at {}: {} of {} rows changed, {} unknown, {} without a rate",
+                    view.deadline(),
+                    c.changed,
+                    c.rows,
+                    c.unknown,
+                    c.no_rate
+                );
+                table
             };
             if let (Some(disk), false) = (&self.disk, hit) {
                 disk.store(model, view.deadline(), view.cutoff(), &table)?;
@@ -428,7 +481,7 @@ pub fn decide_step(
     };
     let Some(at) = early_at else {
         let state = refresh(state, &deadline_pool);
-        let xp = caches.xp(policy.xp_model(), &view)?;
+        let xp = caches.xp_for(store, policy.xp_model(), &view)?;
         let prices = caches.prices_for(policy, store, state.season)?;
         let ctx = DecisionContext {
             view: &view,
@@ -452,7 +505,7 @@ pub fn decide_step(
     let early_view = store.as_of_early(deadline, at)?;
     let pool = caches.pool(&early_view)?;
     let state_a = refresh(state, &pool);
-    let xp_a = caches.xp(policy.xp_model(), &early_view)?;
+    let xp_a = caches.xp_for(store, policy.xp_model(), &early_view)?;
     let ctx_a = DecisionContext {
         view: &early_view,
         state: &state_a,
@@ -469,7 +522,7 @@ pub fn decide_step(
     let (squad, applied) = apply_decision(&state_a, &at_a, &pool, rules)?;
     let mut squad = refresh(&squad, &deadline_pool);
     squad.free_transfers = (squad.free_transfers - applied.n_transfers).max(0);
-    let xp_d = caches.xp(policy.xp_model(), &view)?;
+    let xp_d = caches.xp_for(store, policy.xp_model(), &view)?;
     let ctx_d = DecisionContext {
         view: &view,
         state: &squad,
@@ -635,7 +688,7 @@ pub fn transfer_gains(
             Some(at) => store.as_of_early(gws[0].deadline, at)?,
             None => store.as_of(gws[0].deadline),
         };
-        let xp = caches.xp(xp_model, &view)?;
+        let xp = caches.xp_for(store, xp_model, &view)?;
         let offsets: Vec<i64> = gws.iter().map(|g| g.gw_index - gws[0].gw_index).collect();
         let f = &xp.frame;
         let by_key = |key: i64| -> f64 {

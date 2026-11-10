@@ -161,3 +161,11 @@ impl Truth {
 1. **Model names** are `v1+oracle-<ARM>`, not `v1+oracle:<ARM>`: the spec grammar splits on `:` and `:` is not valid in the cache's directory names on Windows.
 2. **No `models eval` rows.** The spec asked for each arm's xP error removed. `models eval` takes its names from `fplopt_models::MODELS`, and extending that list would let an oracle name reach non-backtest commands. The report gives XI and captain regret from the backtest runs instead.
 3. **R is an approximation** (Task 6) and **T0 may be dropped** (Task 7).
+
+## Changes during the build (2026-11-09, before any run)
+
+1. **R is a within-team re-split, not Task 6's formula.** Task 6's rate × minutes × fixture-strength formula failed its own sanity check: on 2022/23 gameweek 10 it gave 28.5 expected non-penalty goals at horizon 0 against v1's 24.7 (+15%), because players without season rates keep v1's shrunk rates while the others get full ones. R now re-splits, per team and fixture, the expected non-penalty goals and assists that v1 gives the players with known rates, in proportion to true rate × expected minutes. Team totals are v1's exactly (24.661 against 24.661 on the same check), so R measures only knowing how a team's output divides between its players. The team-goals mean and the assists-per-xA factor are gone.
+2. **T0 is built.** `fplopt_models::team::closing_lambdas` solves the closing odds as the pre-match ones are solved and reads nothing but odds; the oracle calls it on the season-end view.
+3. **The headline is the full-season starts** (start gameweek 1 or 2), averaged per season, with the 80% t interval over season means. A gameweek-20 start covers half a season, so pooling it would understate a season's gain; those starts are reported in their own column.
+4. **Wiring.** `Caches::xp_for(store, model, view)` builds the oracle frames; `Caches::xp` refuses the names. `policies::check_model` accepts them, and the spec layer limits them to the plain optimizer (no chips, prices, early moves).
+5. **Task 4's real-data test covers every arm** (`info_oracle::tests::oracle_arms_real`, `--ignored`): M0 and M0h leave every later gameweek bit-identical, MA reaches them, T0 moves only the coming gameweek, R keeps the league's expected goals.

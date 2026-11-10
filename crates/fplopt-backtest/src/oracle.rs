@@ -14,7 +14,10 @@ use fplopt_optimize::{HorizonGw, Player};
 use fplopt_store::DataStore;
 
 /// What `check leakage` does not check, and why: (name, reason).
-pub const LEAKAGE_EXCLUDED: &[(&str, &str)] = &[("prices=oracle", "backtest-only foresight bound")];
+pub const LEAKAGE_EXCLUDED: &[(&str, &str)] = &[
+    ("prices=oracle", "backtest-only foresight bound"),
+    ("xp=v1+oracle-*", "backtest-only value-of-information bound"),
+];
 
 /// One season's deadline prices: (season, gw, player_key) -> `player_gw.value` (tenths).
 #[derive(Clone, Debug, Default)]

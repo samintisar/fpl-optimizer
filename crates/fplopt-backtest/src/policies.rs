@@ -322,8 +322,12 @@ pub enum Policy {
     },
 }
 
+/// A registered model, or a backtest-only value-of-information oracle (`info_oracle`; the
+/// spec layer allows those for the plain optimizer only).
 fn check_model(xp_model: &str) -> Result<()> {
-    if !fplopt_models::MODELS.contains(&xp_model) {
+    if !fplopt_models::MODELS.contains(&xp_model)
+        && crate::info_oracle::Arm::parse(xp_model).is_none()
+    {
         let mut known = fplopt_models::MODELS.to_vec();
         known.sort_unstable();
         bail!("unknown xp_model '{xp_model}' (MODELS: {known:?})");

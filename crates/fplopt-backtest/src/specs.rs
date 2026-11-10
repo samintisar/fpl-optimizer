@@ -452,8 +452,18 @@ pub fn make_policy_spec(name: &str, xp: &str, given: &[(String, String)]) -> Res
     let Some(allowed) = params_of(name) else {
         bail!("unknown policy '{name}' (policies: {})", POLICIES.join(", "));
     };
-    if !XP_MODELS.contains(&xp) {
-        bail!("unknown xP model '{xp}' (models: {})", XP_MODELS.join(", "));
+    // A value-of-information oracle (`info_oracle`: v1 with one input's truth) is a backtest
+    // model only, for the plain no-chip, fixed-price, deadline planner.
+    let oracle = crate::info_oracle::Arm::parse(xp).is_some();
+    if !XP_MODELS.contains(&xp) && !oracle {
+        bail!(
+            "unknown xP model '{xp}' (models: {}; backtest oracles: {})",
+            XP_MODELS.join(", "),
+            crate::info_oracle::model_names().join(", ")
+        );
+    }
+    if oracle && name != "optimizer" {
+        bail!("xP model '{xp}' is a backtest oracle for the optimizer policy only");
     }
     let mut values: Vec<(String, Value)> = Vec::new();
     for (key, raw) in given {
@@ -484,7 +494,16 @@ pub fn make_policy_spec(name: &str, xp: &str, given: &[(String, String)]) -> Res
         bail!("bad policy {spec}: need max_transfers >= 0");
     }
     let planner = matches!(name, "optimizer" | "chipgains" | "chiprules");
-    if planner && !MINUTES_XP_MODELS.contains(&xp) {
+    if oracle {
+        let refused: Vec<&str> = ["chips", "prices", "early", "price_k", "tc_rule"]
+            .into_iter()
+            .filter(|k| get(k).is_some())
+            .collect();
+        if !refused.is_empty() {
+            bail!("bad policy {spec}: an oracle xP model takes no {}", refused.join(", "));
+        }
+    }
+    if planner && !MINUTES_XP_MODELS.contains(&xp) && !oracle {
         let ignored: Vec<&str> =
             MINUTES_KEYS.iter().copied().filter(|k| get(k).is_some()).collect();
         if !ignored.is_empty() {
@@ -638,6 +657,23 @@ mod tests {
         );
         let s0 = parse_policy_spec(&format!("{base},xp_jitter=0.05")).unwrap().build().unwrap();
         assert!(s0.name().ends_with("jit=0.05/0)"), "{}", s0.name());
+    }
+
+    #[test]
+    fn oracle_xp_models_are_optimizer_only_without_chips_prices_or_early() {
+        let live = "horizon=6,decay=0.75,max_hits=1,hit_margin=2";
+        let spec = parse_policy_spec(&format!("optimizer:v1+oracle-M0:{live}")).unwrap();
+        assert_eq!(spec.xp, "v1+oracle-M0");
+        assert!(spec.build().unwrap().name().contains("v1+oracle-M0"));
+        // the minutes keys apply, as for v1
+        assert!(parse_policy_spec("optimizer:v1+oracle-MA:min_minutes=90").is_ok());
+        let err = |s: &str| parse_policy_spec(s).unwrap_err().to_string();
+        assert!(err("optimizer:v1+oracle-ZZ").contains("unknown xP model"));
+        assert!(err("optimizer:v1+oracle-ZZ").contains("v1+oracle-M0"));
+        assert!(err("greedy:v1+oracle-M0").contains("optimizer policy only"));
+        assert!(err("optimizer:v1+oracle-M0:chips=1").contains("takes no chips"));
+        assert!(err("optimizer:v1+oracle-M0:prices=oracle,price_k=1").contains("takes no"));
+        assert!(err("optimizer:v1+oracle-M0:early=1").contains("takes no early"));
     }
 
     #[test]
