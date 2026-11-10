@@ -62,7 +62,39 @@ So the result says where to look, not what is attainable. The next question is h
 | Closing odds (T0) | Closed | +4 |
 | Player rates (R) | Closed by the rule; revisit with the props archive | Interval covers zero on four seasons; PLAN §3 already plans to test player odds once a season is archived |
 
-## Proposed next step (the owner's call)
+## Follow-up, same day: where MA's gain sits
+
+The splits proposed below were approved and run (spec addendum of 2026-11-10, written before the runs; arms `MAf`, `MAu`, `M2`), and two more after the owner asked whether the gain is Manchester City's rotation (`MAc`, `MAnc`). Seven more log rows, family `value of information`.
+
+**By horizon and by club** (seven seasons, same starts, base and interval as above):
+
+| Arm | What it knows | Gain | 80% interval | Share of MA |
+|---|---|---|---|---|
+| M0 | Coming gameweek | +86 | +31 to +141 | 32% |
+| **M2** | Coming gameweek and the two after | **+224** | +178 to +269 | 85% |
+| MA | All six | +264 | +203 to +326 | 100% |
+| MAc | All six, Manchester City's fixtures only | +45 | −8 to +97 | 17% |
+| **MAnc** | All six, every club but City | **+194** | +129 to +259 | 73% |
+
+**By flag at the deadline** (2021/22–2022/23, eight full-season starts, base and MA re-run on them; 16 units; descriptive, no interval over two seasons):
+
+| Arm | Players | 2021/22 | 2022/23 | Mean of 16 units (SE over units) | Units that gained | Share of MA |
+|---|---|---|---|---|---|---|
+| MA | All | +315 | +90 | +203 (36) | 16 | 100% |
+| MAf | Flagged at the deadline (29% of rows) | +22 | +1 | +12 (26) | 7 | 6% |
+| MAu | Not flagged | +295 | +72 | +183 (35) | 16 | 90% |
+
+Reading, by the rules fixed in the addendum:
+
+1. **News on known absences is closed as a source.** Perfect knowledge of every flagged player's next six gameweeks is worth +12, under a fifth of MA. Return dates, doubts and `chance_of_playing` text have nothing more to give the planner; v1's handling of flags is already enough.
+2. **The value is in players who look available**: who is rotated, who loses his place, who gets hurt next. 90% of MA. None of it is published before a deadline.
+3. **Three gameweeks is far enough.** M2 has 85% of MA and clears the bar on its own (lower bound 178). Long-range knowledge (season-ending injuries, months out) is a small part.
+4. **It is league-wide, not Manchester City.** Without any City knowledge the gain is still +194 (lower bound 129 ≥ 60). City alone is +45 with an interval that covers zero, negative in three of seven seasons. City is the most rotated club (71% of its XI starts the next league match, against a league mean of about 80%; Chelsea and Manchester United 74%, Liverpool 77%), and with MA the planner captains City players in 26% of gameweeks against 14% without, so the instinct is right about the club; it is one sixth of the total, about what one club of the big six would be.
+5. **So the +264 mostly measures how unpredictable short-range selection is, not a missing data source.** The route to any of it is the minutes model: P(start) over the next three gameweeks for available players at rotating clubs. That is the research loop's ground. What this study adds is the size of the prize in planner points and where it is (unflagged, three gameweeks, all clubs). The minutes model already has the obvious inputs (rest days, days to the next match, European weeks), so no untried feature is named here.
+
+Checks: every arm changed every row in its scope (0 unknown). The log's commit for these rows is the checkout's HEAD when the binary was built, one commit behind the arm's own commit in each case (the arms were committed after the build and before the run: 196db05, 3b705e6, 8708e79). 2022/23 has been Gate N's and Stage C's season; the flag split uses it for diagnosis only. In 2022/23 four of the eight MA units show the same +8: starts converge after the World Cup's unlimited transfers, so that season has fewer independent units than eight.
+
+## Proposed next step as written before the follow-up
 
 Split MA by what is knowable at the deadline, with the same code and three more runs of about 20 minutes each:
 
