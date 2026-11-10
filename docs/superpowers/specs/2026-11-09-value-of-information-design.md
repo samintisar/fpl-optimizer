@@ -59,6 +59,26 @@ v1 assembles xP per fixture from a `Fixture` record (`crates/fplopt-models/src/a
 - **M0 against MA** says whether the value is in the coming gameweek or in the weeks after.
 - If every arm is below 20, the gap to 2,400 is not an information problem that we can buy, and the note says so.
 
+## Addendum (2026-11-10): splitting MA by what is knowable
+
+Approved by the owner in chat, 2026-11-10, after the first results (`docs/research/2026-11-value-of-information.md`: MA +264, everything else under the bar). MA knows things no source can supply. Three more arms split it. Written before any of them ran.
+
+| Arm | What is replaced | Seasons | The question |
+|---|---|---|---|
+| **MAf** | As MA, only for players **flagged at the deadline**: status not `a` in the newest `player_snapshot` of the season visible in the deadline's view | 2021/22–2022/23 | The ceiling for news on known absences (return dates, doubts) |
+| **MAu** | As MA, only for players **not** flagged at the deadline (the complement of MAf, including players without a snapshot row) | 2021/22–2022/23 | Rotation, role changes and injuries still to come |
+| **M2** | As MA, only for the coming gameweek and the two after (horizon ≤ 2) | 2016/17–2022/23 | How far ahead the knowledge has to reach |
+
+- The flag set is read from the deadline's as-of view, like every v1 input. A deadline with no snapshot of its season yet has an empty flag set (MAf changes nothing there, MAu is MA); the run logs each deadline's row counts.
+- **Flag arms, measurement:** flags exist from 2021/22, so two develop seasons only. To cut the noise within a season they run on eight full-season starts (`template@1,random:7@1`), with the base and MA re-run on the same starts. Reported: mean gain per season and over the 16 units, and MAf and MAu as shares of MA on the same units. Two seasons give no usable interval over season means (t with one degree of freedom), so **these two arms are descriptive: no decision threshold**. 2022/23 has been Gate N's test season and Stage C's develop season; it is used here for diagnosis only.
+- **M2, measurement:** as the first six arms (same starts, same base run, same interval and thresholds).
+- **Reading, fixed now:**
+  - MAf ≥ half of MA on these units: the first source to try is FPL's own news text and `chance_of_playing` beyond return dates, with its own spec and test. MAf under a fifth of MA: known absences are closed as a source.
+  - MAu carrying most of MA: the value is in rotation and future injuries, largely out of reach; it goes back to the minutes model.
+  - M2 against M0 (+86) and MA (+264) places the value along the horizon. If M2's lower bound is ≥ 60, a source that only sees two to three weeks ahead is still worth a spec.
+- MAf and MAu need not sum to MA (the planner's choices interact).
+- **Cost:** four runs of about 7 minutes and one of about 20, locally. Family `value of information`.
+
 ## What could follow (not in this spec)
 
 - **If M0 or A0 is large:** a team-news source. The first candidates are ones we may use: press-conference dates and FPL's own news text (already archived, parsed for return dates only), the player odds archived since 2026-10-30, and the user's own `/override`. Predicted-lineup sites are subject to the no-scraping rule and their terms.

@@ -24,7 +24,7 @@ use fplopt_store::{AsOfView, DataStore, Micros, Table};
 
 use crate::forecast_prices::{ForecastConfig, ForecastPrices};
 use crate::gw_score::score_gameweek;
-use crate::info_oracle::{Arm, BASE_MODEL, EditCount, Truth};
+use crate::info_oracle::{Arm, BASE_MODEL, EditCount, Truth, flagged_at};
 use crate::oracle::FuturePrices;
 use crate::outcomes::{GwOutcomes, read_outcomes};
 use crate::policies::{
@@ -167,9 +167,11 @@ impl Caches {
                 let fit = self.fits.get_or_compute(fit_key, || {
                     fit_v1(&fit_view, &V1Params::for_model(BASE_MODEL)?)
                 })?;
+                let flagged =
+                    if arm.needs_flags() { flagged_at(view)? } else { Default::default() };
                 let count = std::cell::Cell::new(EditCount::default());
                 let table = predict_v1_with(view, &fit, &|frame| {
-                    count.set(truth.apply(arm, frame));
+                    count.set(truth.apply(arm, &flagged, frame));
                 })?;
                 let c = count.get();
                 log::info!(

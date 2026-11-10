@@ -19,7 +19,8 @@ use fplopt_core::seasons::HOLDOUT_SEASONS;
 use fplopt_features::history::infer_starts;
 use fplopt_models::assemble::{Fixture, V1Params, set_play};
 use fplopt_models::team::closing_lambdas;
-use fplopt_store::DataStore;
+use fplopt_models::util::opt_ts;
+use fplopt_store::{AsOfView, DataStore};
 
 /// The model-name prefix: `v1+oracle-M0` etc.
 pub const PREFIX: &str = "v1+oracle-";
@@ -29,6 +30,10 @@ pub const BASE_MODEL: &str = "v1";
 pub const R_MIN_MINUTES: f64 = 450.0;
 /// Arm R's first season (Understat player xG covers 91%+ of minutes from 2019/20).
 pub const R_FIRST_SEASON: i64 = 2019;
+/// The flag arms' first season (status flags are archived from 2021/22).
+pub const FLAG_FIRST_SEASON: i64 = 2021;
+/// M2 knows horizons 0..=this (the coming GW and the two after).
+pub const M2_MAX_HORIZON: i64 = 2;
 
 /// What an oracle model knows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -39,6 +44,12 @@ pub enum Arm {
     M0h,
     /// Who plays and starts in every horizon GW.
     MA,
+    /// MA for the players flagged at the deadline only (`flagged_at`).
+    MAf,
+    /// MA for the players not flagged at the deadline only.
+    MAu,
+    /// MA for the coming GW and the two after only.
+    M2,
     /// Who plays in the coming GW (not who starts).
     A0,
     /// The closing odds' team λ in the coming GW.
@@ -49,7 +60,8 @@ pub enum Arm {
     R,
 }
 
-pub const ARMS: [Arm; 6] = [Arm::M0, Arm::M0h, Arm::MA, Arm::A0, Arm::T0, Arm::R];
+pub const ARMS: [Arm; 9] =
+    [Arm::M0, Arm::M0h, Arm::MA, Arm::MAf, Arm::MAu, Arm::M2, Arm::A0, Arm::T0, Arm::R];
 
 impl Arm {
     pub fn code(self) -> &'static str {
@@ -57,6 +69,9 @@ impl Arm {
             Arm::M0 => "M0",
             Arm::M0h => "M0h",
             Arm::MA => "MA",
+            Arm::MAf => "MAf",
+            Arm::MAu => "MAu",
+            Arm::M2 => "M2",
             Arm::A0 => "A0",
             Arm::T0 => "T0",
             Arm::R => "R",
@@ -72,6 +87,33 @@ impl Arm {
     pub fn model(self) -> String {
         format!("{PREFIX}{}", self.code())
     }
+
+    /// Whether the arm needs the deadline's flag set (`flagged_at`).
+    pub fn needs_flags(self) -> bool {
+        matches!(self, Arm::MAf | Arm::MAu)
+    }
+}
+
+/// The players flagged at the view's deadline: status not `a` in the newest snapshot of the
+/// view's season (read through the as-of view, like v1's own flags). Empty before the
+/// season's first snapshot.
+pub fn flagged_at(view: &AsOfView) -> Result<HashSet<i64>> {
+    let (season, _) = view.gameweek_for_deadline()?;
+    let columns = ["snapshot_at", "season", "status"];
+    let snaps = view.latest("player_snapshot", &["player_key"], Some(&columns))?;
+    let keys = snaps.i64("player_key")?;
+    let seasons = snaps.i64("season")?;
+    let at = opt_ts(&snaps, "snapshot_at")?;
+    let status = snaps.opt_str("status")?;
+    let in_season: Vec<usize> = (0..snaps.height()).filter(|&i| seasons[i] == season).collect();
+    let Some(newest) = in_season.iter().filter_map(|&i| at[i]).max() else {
+        return Ok(HashSet::new());
+    };
+    Ok(in_season
+        .into_iter()
+        .filter(|&i| at[i] == Some(newest) && status[i].as_deref().is_some_and(|s| s != "a"))
+        .map(|i| keys[i])
+        .collect())
 }
 
 /// The oracle model names, for error messages.
@@ -213,6 +255,11 @@ impl Truth {
             Arm::R if self.rates.is_empty() => {
                 bail!("{}: season {} has no player xG", arm.model(), self.season)
             }
+            Arm::MAf | Arm::MAu if self.season < FLAG_FIRST_SEASON => bail!(
+                "{}: season {} is before {FLAG_FIRST_SEASON} (status flags)",
+                arm.model(),
+                self.season
+            ),
             Arm::T0 if self.closing.is_empty() => {
                 bail!("{}: season {} has no closing odds", arm.model(), self.season)
             }
@@ -233,8 +280,9 @@ impl Truth {
         }
     }
 
-    /// Applies `arm` to v1's calibrated per-fixture inputs.
-    pub fn apply(&self, arm: Arm, frame: &mut [Fixture]) -> EditCount {
+    /// Applies `arm` to v1's calibrated per-fixture inputs. `flagged`: the players flagged
+    /// at the deadline (`flagged_at`), read by the flag arms only.
+    pub fn apply(&self, arm: Arm, flagged: &HashSet<i64>, frame: &mut [Fixture]) -> EditCount {
         let mut count = EditCount::default();
         for f in frame.iter_mut() {
             if f.key.season != self.season {
@@ -245,13 +293,16 @@ impl Truth {
                 Arm::M0 | Arm::A0 | Arm::T0 => h0,
                 Arm::M0h => h0 && in_half(f.key.player_key, f.key.gw_index),
                 Arm::MA | Arm::R => true,
+                Arm::MAf => flagged.contains(&f.key.player_key),
+                Arm::MAu => !flagged.contains(&f.key.player_key),
+                Arm::M2 => f.key.horizon <= M2_MAX_HORIZON,
             };
             if !in_scope {
                 continue;
             }
             count.rows += 1;
             match arm {
-                Arm::M0 | Arm::M0h | Arm::MA | Arm::A0 => {
+                Arm::M0 | Arm::M0h | Arm::MA | Arm::MAf | Arm::MAu | Arm::M2 | Arm::A0 => {
                     let Some((played, started)) = self.played(f) else {
                         count.unknown += 1;
                         continue;
@@ -384,6 +435,10 @@ mod tests {
         t
     }
 
+    fn none() -> HashSet<i64> {
+        HashSet::new()
+    }
+
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-12
     }
@@ -403,7 +458,7 @@ mod tests {
     fn m0_sets_the_coming_gw_only_and_ma_every_gw() {
         let frame = || vec![fixture(1, 100, 7, 0), fixture(1, 101, 7, 1), fixture(2, 100, 7, 0)];
         let mut m0 = frame();
-        let count = truth().apply(Arm::M0, &mut m0);
+        let count = truth().apply(Arm::M0, &none(), &mut m0);
         assert_eq!(count, EditCount { rows: 2, changed: 2, unknown: 0, no_rate: 0 });
         // player 1 started: 80 minutes, expectations × 80 / 52
         assert!(close(m0[0].p_start, 1.0) && close(m0[0].p_play, 1.0));
@@ -414,7 +469,7 @@ mod tests {
         assert!(m0[2].p_play == 0.0 && m0[2].e_minutes == 0.0 && m0[2].e_assists == 0.0);
 
         let mut ma = frame();
-        let count = truth().apply(Arm::MA, &mut ma);
+        let count = truth().apply(Arm::MA, &none(), &mut ma);
         assert_eq!(count.rows, 3);
         // horizon 1: he came on
         assert!(close(ma[1].p_start, 0.0) && close(ma[1].p_play, 1.0));
@@ -422,9 +477,54 @@ mod tests {
     }
 
     #[test]
+    fn the_flag_arms_split_ma_by_player_and_m2_by_horizon() {
+        // player 1 (flagged) at horizons 0, 1 and 3; player 2 (not flagged) at horizon 0
+        let mut t = truth();
+        t.play.insert((1, 104), (true, true));
+        t.sides.insert((104, 7));
+        let frame = || {
+            vec![
+                fixture(1, 100, 7, 0),
+                fixture(1, 101, 7, 1),
+                fixture(1, 104, 7, 3),
+                fixture(2, 100, 7, 0),
+            ]
+        };
+        let flagged: HashSet<i64> = [1].into_iter().collect();
+        let mut ma = frame();
+        t.apply(Arm::MA, &flagged, &mut ma);
+
+        let mut maf = frame();
+        let count = t.apply(Arm::MAf, &flagged, &mut maf);
+        assert_eq!(count, EditCount { rows: 3, changed: 3, unknown: 0, no_rate: 0 });
+        let mut mau = frame();
+        let count = t.apply(Arm::MAu, &flagged, &mut mau);
+        assert_eq!(count, EditCount { rows: 1, changed: 1, unknown: 0, no_rate: 0 });
+        let v1 = frame();
+        for i in 0..4 {
+            let (in_f, in_u) = if i < 3 { (&ma[i], &v1[i]) } else { (&v1[i], &ma[i]) };
+            assert!(close(maf[i].p_play, in_f.p_play) && close(maf[i].e_minutes, in_f.e_minutes));
+            assert!(close(mau[i].p_play, in_u.p_play) && close(mau[i].e_minutes, in_u.e_minutes));
+        }
+        // with nobody flagged MAf changes nothing and MAu is MA
+        assert_eq!(t.apply(Arm::MAf, &none(), &mut frame()), EditCount::default());
+        assert_eq!(t.apply(Arm::MAu, &none(), &mut frame()).rows, 4);
+
+        let mut m2 = frame();
+        let count = t.apply(Arm::M2, &none(), &mut m2);
+        assert_eq!(count.rows, 3);
+        assert!(close(m2[1].e_minutes, ma[1].e_minutes) && close(m2[2].e_minutes, 52.0));
+        assert!(close(ma[2].e_minutes, 80.0));
+
+        let early = Truth::for_test(2020);
+        assert!(early.check(Arm::MAf).is_err() && early.check(Arm::MAu).is_err());
+        assert!(early.check(Arm::M2).is_ok() && truth().check(Arm::MAf).is_ok());
+    }
+
+    #[test]
     fn a0_knows_who_plays_but_keeps_v1s_share_of_starts() {
         let mut frame = vec![fixture(1, 100, 7, 0), fixture(2, 100, 7, 0)];
-        truth().apply(Arm::A0, &mut frame);
+        truth().apply(Arm::A0, &none(), &mut frame);
         assert!(close(frame[0].p_play, 1.0) && close(frame[0].p_start, 0.75));
         assert!(close(frame[0].e_minutes, 0.75 * 80.0 + 0.25 * 20.0));
         assert_eq!(frame[1].p_play, 0.0);
@@ -433,7 +533,7 @@ mod tests {
     #[test]
     fn a_fixture_with_no_rows_for_the_club_is_left_alone() {
         let mut frame = vec![fixture(1, 102, 7, 0)];
-        let count = truth().apply(Arm::M0, &mut frame);
+        let count = truth().apply(Arm::M0, &none(), &mut frame);
         assert_eq!(count, EditCount { rows: 1, changed: 0, unknown: 1, no_rate: 0 });
         assert!(close(frame[0].p_start, 0.6) && close(frame[0].e_minutes, 52.0));
     }
@@ -442,7 +542,7 @@ mod tests {
     fn another_seasons_fixtures_are_untouched() {
         let mut frame = vec![fixture(1, 100, 7, 0)];
         frame[0].key.season = SEASON + 1;
-        assert_eq!(truth().apply(Arm::M0, &mut frame), EditCount::default());
+        assert_eq!(truth().apply(Arm::M0, &none(), &mut frame), EditCount::default());
         assert!(close(frame[0].p_start, 0.6));
     }
 
@@ -458,7 +558,7 @@ mod tests {
             t.play.insert((p, 100), (true, true));
         }
         let mut frame: Vec<Fixture> = (0..1000).map(|p| fixture(p, 100, 7, 0)).collect();
-        let count = t.apply(Arm::M0h, &mut frame);
+        let count = t.apply(Arm::M0h, &none(), &mut frame);
         assert_eq!(count.changed, known);
         for f in &frame {
             let want = if in_half(f.key.player_key, 10) { 1.0 } else { 0.6 };
@@ -472,7 +572,7 @@ mod tests {
         t.closing.insert(100, (7, 2.0, 0.8, 0.45, 0.14));
         let mut frame = vec![fixture(1, 100, 7, 0), fixture(3, 100, 8, 0), fixture(1, 101, 7, 1)];
         frame.push(fixture(1, 103, 7, 0)); // no closing odds
-        let count = t.apply(Arm::T0, &mut frame);
+        let count = t.apply(Arm::T0, &none(), &mut frame);
         assert_eq!(count, EditCount { rows: 3, changed: 2, unknown: 1, no_rate: 0 });
         // home side
         assert!(close(frame[0].lambda_for, 2.0) && close(frame[0].lambda_against, 0.8));
@@ -499,7 +599,7 @@ mod tests {
         ];
         frame[1].e_minutes = 26.0; // half of player 1's 52
         frame[0].e_pen_goals = 0.05;
-        let count = t.apply(Arm::R, &mut frame);
+        let count = t.apply(Arm::R, &none(), &mut frame);
         assert_eq!(count, EditCount { rows: 4, changed: 3, unknown: 1, no_rate: 0 });
         // goals: 0.52 in all, weights 0.6·52 : 0.2·26 = 6 : 1
         assert!(close(frame[0].e_np_goals, 0.52 * 6.0 / 7.0));
@@ -550,12 +650,16 @@ mod tests {
         let fit = fit_v1(&fit_view, &V1Params::for_model(BASE_MODEL).unwrap()).unwrap();
         let base = predict_fixtures(&view, &fit).unwrap();
         let truth = Truth::load(&store, SEASON).unwrap();
+        let flagged = flagged_at(&view).unwrap();
+        eprintln!("{} players flagged", flagged.len());
+        assert!((10..400).contains(&flagged.len()), "{}", flagged.len());
         let run = |arm: Arm| {
             truth.check(arm).unwrap();
             let count = std::cell::Cell::new(EditCount::default());
-            let out =
-                predict_fixtures_with(&view, &fit, &|frame| count.set(truth.apply(arm, frame)))
-                    .unwrap();
+            let out = predict_fixtures_with(&view, &fit, &|frame| {
+                count.set(truth.apply(arm, &flagged, frame))
+            })
+            .unwrap();
             assert_eq!(out.len(), base.len());
             (out, count.get())
         };
@@ -584,6 +688,20 @@ mod tests {
 
         let (ma, _) = run(Arm::MA);
         assert!(base.iter().zip(&ma).any(|(a, b)| a.key.horizon > 0 && !same(a, b)));
+
+        // the flag arms partition MA's rows; M2 stops after horizon 2
+        let (maf, cf) = run(Arm::MAf);
+        let (mau, cu) = run(Arm::MAu);
+        let (m2, c2) = run(Arm::M2);
+        eprintln!("MAf: {cf:?}; MAu: {cu:?}; M2: {c2:?}");
+        assert_eq!(cf.rows + cu.rows, base.len());
+        assert!(cf.rows > 0 && cu.rows > cf.rows);
+        for (i, a) in base.iter().enumerate() {
+            let f = flagged.contains(&a.key.player_key);
+            assert!(same(if f { &mau[i] } else { &maf[i] }, a));
+            assert!(same(if f { &maf[i] } else { &mau[i] }, &ma[i]));
+            assert!(same(&m2[i], if a.key.horizon <= M2_MAX_HORIZON { &ma[i] } else { a }));
+        }
 
         let (m0h, half) = run(Arm::M0h);
         assert!(half.rows * 10 >= h0 * 4 && half.rows * 10 <= h0 * 6, "{half:?} of {h0}");
