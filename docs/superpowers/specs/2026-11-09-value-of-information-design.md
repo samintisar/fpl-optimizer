@@ -1,6 +1,6 @@
 # Value of information: which xP input is worth points to the planner
 
-**Date:** 2026-11-09. **Status:** proposed, not approved. Nothing is built. Review: `docs/research/2026-11-system-review.md` §4–5.
+**Date:** 2026-11-09. **Status:** approved by the owner in chat, 2026-11-09. Plan: `docs/superpowers/plans/2026-11-09-value-of-information.md` (its last section lists three deviations from this spec, recorded before any code). Review: `docs/research/2026-11-system-review.md` §4–5.
 
 ## Why
 
@@ -32,7 +32,7 @@ v1 assembles xP per fixture from a `Fixture` record (`crates/fplopt-models/src/a
 
 ## Where it lives
 
-- `fplopt-backtest` only, next to `oracle.rs`: an xP source `v1+oracle:<arm>` built from v1's fixtures and the realized tables read at the season's end. Spec form `optimizer:v1+oracle:M0:horizon=6,...`.
+- `fplopt-backtest` only, next to `oracle.rs`: an xP source `v1+oracle-<ARM>` built from v1's fixtures and the realized tables read at the season's end. Spec form `optimizer:v1+oracle-M0:horizon=6,...`.
 - It reads the future by design. `optimize plan`, the bot, `live` and `models eval`'s gates refuse it, and `check leakage` lists it as a deliberate exception, exactly as `prices=oracle`.
 - Cached in the xP disk cache under its own model name, so v1's cache is untouched.
 - The holdout is refused as everywhere.
@@ -42,7 +42,7 @@ v1 assembles xP per fixture from a `Fixture` record (`crates/fplopt-models/src/a
 - **Seasons:** develop 2016/17–2022/23 (R: 2019/20–2022/23). No validate, no holdout: this is a ceiling, not a claim about a policy.
 - **Starts:** `template@1,random:3@1,template@20,random:3@20`, as Gate A.
 - **Arms vs L** (`optimizer:v1:horizon=6,decay=0.75,max_hits=1,hit_margin=2`, no chips), whole-season paired difference per (season, start) unit, mean with an 80% t interval over season means. Family `value of information`.
-- **Also reported per arm:** the xP error it removes (`models eval` MSE at horizon 0 and 1–5 against v1's), transfers and hits a season, XI and captain regret, and the split of the gain between gameweek-1 and gameweek-20 starts.
+- **Also reported per arm:** transfers and hits a season, XI and captain regret, and the split of the gain between gameweek-1 and gameweek-20 starts.
 - **Why whole seasons and not the standard comparison:** the effects are expected to be tens of points, far above the whole-season SE (about 8), and better information pays partly through later gameweeks, which the one-gameweek comparison does not count.
 - **Cost:** six backtest runs of about 20–25 minutes each at `--jobs 14` on the server, plus the base run from the cache. About 2.5 hours.
 
