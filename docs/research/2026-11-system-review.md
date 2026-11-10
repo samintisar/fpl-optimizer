@@ -4,9 +4,29 @@ A fresh read of the price work, the planner, chips, the xP model and rank play. 
 
 Local inputs: `data/` (built to 2026-10-29), `results/experiments.csv`, Gate N's `predictions.parquet` and the Gate A runs (`results/night-gate-n`, `results/price-a-l` in the `feat/price-sizing` worktree), the chip-study runs in the main checkout. Stage C's and the noise study's per-GW outputs are on the server only and were not read.
 
+## Correction (2026-11-10): the baseline of 2,240 is the October model's
+
+The review measured every gap from the holdout's 2,240. That run used the October v1 (`v1-2026-10`). The model live since 2026-11-03 scores well above it on every season where both have been run, so the sizes below are right but the "gap to 2,400" they are compared with is not.
+
+Season points, live planner, no chips, gameweek-1 starts (develop scoring: current rules, no defensive-contribution points):
+
+| Seasons | October v1 | Current v1 | Source |
+|---|---|---|---|
+| 2023/24, 2024/25 (validate; 6 starts each) | 2,350 and 2,093 | 2,510 and 2,387 | the v1 promotion's stage-2 run (`results/v1r-stage2`, local) |
+| 2021/22, 2022/23 (develop, flags all season; 4 starts) | 2,482 and 2,407 | 2,513 and 2,449 | `results/v1r-stage2-develop`, `results/voi/base` |
+| 2016/17–2019/20 (develop, no status flags) | 1,998–2,160 | 2,040–2,150 | the same |
+| 2025/26 (holdout, native rules) | 2,240 | not run, and it cannot be: the holdout ran once | PLAN §7 |
+
+- On validate the October model averages 2,220, in line with its 2,240 on the holdout. The current model averages 2,450 there, about 230 more.
+- So the system as it runs today is plausibly at **2,400–2,500 before chips**, and about 85 more with all chips played. The target of 2,350–2,400 is likely already met on expected points; what is left is variance and execution.
+- **Why this is an estimate and not a result:** two validate seasons, 120 points apart; before 2026 the backtest sees the final fixture list, which flatters seasons with many doubles and postponements (2021/22 above all); develop scoring is not the real game's scoring, so these totals do not line up with what managers scored in those years; the current model has no holdout number.
+- Scoring level is not the cause of the jump after 2020: the 50 highest-scoring players total 7,830–8,380 re-scored points in every season from 2016/17 to 2024/25. The planner is better where status flags and snapshots exist.
+
+Every "gap", "remaining" and "puts the system at" figure in the summary and in §5 below was written against 2,240 and should be read with this in mind. The per-item sizes do not depend on the baseline.
+
 ## Summary
 
-1. **More than half the gap to ~2,400 is chips, not prices.** The holdout's 2,240 has no chips. From gameweek-1 starts over nine seasons, playing all eight chips by either the rules H or the planner P is worth **+85 points a season (SE 13)** over playing none (§3). That puts the system at about 2,325–2,345. Chip timing beyond the rules is not established (P − H = +3 ± 24). The remaining 55–75 points to 2,400 have no single source: the items in §5 sum to roughly 15–35.
+1. **More than half the gap to ~2,400 is chips, not prices.** *(Superseded in part by the correction above: the gap was measured from the October model's 2,240.)* The holdout's 2,240 has no chips. From gameweek-1 starts over nine seasons, playing all eight chips by either the rules H or the planner P is worth **+85 points a season (SE 13)** over playing none (§3). That puts the system at about 2,325–2,345. Chip timing beyond the rules is not established (P − H = +3 ± 24). The remaining 55–75 points to 2,400 have no single source: the items in §5 sum to roughly 15–35.
 2. **Prices are worth about 5–15 points a season, and 20 at the very most.** The earlier work is mostly right about that. Three of its conclusions are wrong in the detail, though, and all three make prices look more dead than they are:
    - Gate N's test season contains a 44-night price freeze (the 2022 World Cup). It accounts for 17% of the rows where the rise model was judged, with no rises possible. Before the freeze the rise model was calibrated at T's threshold (0.63 predicted, 0.56 realized).
    - The night model's transfer counter drops about 15% of every gameweek's transfers and is not scaled for the number of managers, which grew 24% between the training and test seasons.
@@ -177,7 +197,7 @@ Points a season against the no-chip 2,240, with the range I would bet on. "Test"
 | 9 | Free-transfer values, squad value after the horizon | −3 to +10 | Never tested with v1 | After #2 |
 | — | Gain shrink, money in the bank, captain risk, injury dates, policy E | ≈ 0 or negative | §1.7, §2, §4 | Not worth a run |
 
-Items 2–9 sum to roughly +15 to +35 if each lands at the middle of its range, which is optimistic for a list picked after looking. With chips that is about 2,340–2,380. The template start alone scored 2,317 without chips on the holdout; one unit is not evidence, but a real manager starts from a sensible squad, not a random one.
+Items 2–9 sum to roughly +15 to +35 if each lands at the middle of its range, which is optimistic for a list picked after looking. With chips that is about 2,340–2,380 from the October model's 2,240 (see the correction at the top: the current model starts about 230 higher). The template start alone scored 2,317 without chips on the holdout; one unit is not evidence, but a real manager starts from a sensible squad, not a random one.
 
 ## 6. Rank and mini-league play
 
