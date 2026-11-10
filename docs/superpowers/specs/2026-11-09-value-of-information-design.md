@@ -23,7 +23,7 @@ v1 assembles xP per fixture from a `Fixture` record (`crates/fplopt-models/src/a
 | **MA** | As M0 | all six gameweeks | Perfect knowledge of injuries, bans and rotation ahead |
 | **A0** | `p_play` ← played or not; `p_start` kept as v1's share of it | next gameweek only | Availability only (injury news), without the lineup |
 | **T0** | `lambda_for`, `lambda_against`, `p_cs` ← from closing odds | next gameweek only | The market at kick-off instead of at the deadline |
-| **R** | The player's per-90 npxG and xA rates ← his realized season rates | all six | Knowing each player's level and role (what player odds would add) |
+| **R** | A team's expected non-penalty goals and assists, re-split among its players by their realized season npxG and xA per 90 × expected minutes (players with ≥ 450 minutes with xG; team totals stay v1's). As built; see the plan's *Changes during the build* | all six | Knowing how a team's output divides between its players (what player odds would add) |
 
 - In M0, MA and A0, expected minutes and the per-fixture goal and assist expectations are rescaled with the new probabilities, as v1's own calibration step does (`assemble.rs:315-345`), so per-90 rates are unchanged.
 - "Started" is FPL's `starts` from 2022/23 gameweek 16 and the inferred starts before (the 11 with the most minutes, 98.65% accurate; PLAN §6).
