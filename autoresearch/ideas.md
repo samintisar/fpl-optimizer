@@ -155,6 +155,16 @@ finished ideas to *Done*. New ideas from the weekly monitor go in with their liv
      FWD 0.524 vs 0.697 n 99, GK 0.192 vs 0.280, MID 0.284 vs 0.313, DEF 0.188 vs 0.206).
      Bonus looks too evenly spread. Before any variant: the same cut on a develop head walk.
      If develop starters are calibrated, it's the new BPS (yours); if not, a mechanism to test.
+   - **Develop check 2026-11-11** (`~/fpl-research/results/research/diag-bonus-conc.txt`,
+     walk `diag-we-walk`, h0, 2017–22; head settings before gbm-400, bonus model unchanged):
+     predicted starters (p_start > 0.8) are **calibrated outfield**: DEF 0.223 vs 0.228
+     (n 12381), MID 0.243 vs 0.251, FWD 0.519 vs 0.511 (n 2700; seasons 0.40–0.56 realized,
+     no season near live's 0.697). Keepers are under on develop too, 0.248 vs 0.288 (5 of 6
+     seasons), the gap idea 10 already tried. By predicted-bonus band the top MID bands are
+     over (0.5–0.7 0.586 vs 0.466, 0.7+ 0.830 vs 0.673: premium MIDs, `diag-bonus-price`).
+     So live's FWD / outfield starter gap is the 2026/27 BPS, not a develop-testable model
+     error: **closed for the loop; for the user** (e.g. a faster bonus season decay or a
+     live-season bonus refit once enough 2026/27 starts exist). No variant was run.
 5. **Free-transfer value** (decision; `ft_scale` key on `research`, c6eb489). **Blocked on
    `research`** since `back_split` is on: calibrated v1 raises (fingerprint), so every
    `optimizer:v1` backtest at the head fails until the table is regenerated (*Needs the
