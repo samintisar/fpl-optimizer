@@ -404,6 +404,15 @@ pub(crate) struct OddsRow {
 /// football-data `avg` (newest snapshot) where its h2h is complete, else the newest Odds API
 /// snapshot (every bookmaker in it).
 pub(crate) fn visible_odds(view: &AsOfView, fixture_keys: &HashSet<i64>) -> Result<Vec<OddsRow>> {
+    odds_rows(view, fixture_keys, false)
+}
+
+/// `visible_odds` on the pre-match rows (`closing` false) or the closing ones.
+fn odds_rows(
+    view: &AsOfView,
+    fixture_keys: &HashSet<i64>,
+    want_closing: bool,
+) -> Result<Vec<OddsRow>> {
     let columns = [
         "fixture_key",
         "source",
@@ -426,7 +435,7 @@ pub(crate) fn visible_odds(view: &AsOfView, fixture_keys: &HashSet<i64>) -> Resu
     let closing = odds.opt_bool("is_closing")?;
     let snapshot = opt_ts(&odds, "snapshot_at")?;
     let rows: Vec<usize> = (0..odds.height())
-        .filter(|&i| fixture_keys.contains(&fixture[i]) && closing[i] == Some(false))
+        .filter(|&i| fixture_keys.contains(&fixture[i]) && closing[i] == Some(want_closing))
         .collect();
     // Newest snapshot per fixture, per source group (NaT never equals the max).
     let newest = |keep: &dyn Fn(usize) -> bool| -> Vec<usize> {
@@ -619,6 +628,32 @@ fn visible_market_lambdas(
         );
     }
     Ok(solved.into_iter().filter(|s| s.3).map(|s| (s.0, (s.1, s.2))).collect())
+}
+
+/// fixture_key → (λ_home, λ_away, P(home CS), P(away CS)) from the **closing** odds of
+/// `fixture_keys` visible in `view`, solved as the pre-match market λ are. Closing odds are
+/// available from kickoff, so at a deadline view this is empty for the coming fixtures: the
+/// only caller is the backtest-only oracle (`fplopt_backtest::info_oracle`, arm T0), on a
+/// view that sees the season's end.
+pub fn closing_lambdas(
+    view: &AsOfView,
+    fixture_keys: &HashSet<i64>,
+    params: &TeamParams,
+) -> Result<BTreeMap<i64, (f64, f64, f64, f64)>> {
+    let odds = odds_rows(view, fixture_keys, true)?;
+    if odds.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let solved = market_lambdas(&market_probabilities(&odds, params.devig), params.rho)?;
+    Ok(solved
+        .into_iter()
+        .filter(|s| s.3)
+        .map(|(key, lh, la, _)| {
+            let m = dc_matrix(lh, la, params.rho);
+            let cs_home = np_sum(&(0..=MAX_GOALS).map(|i| m[i][0]).collect::<Vec<_>>());
+            (key, (lh, la, cs_home, np_sum(&m[0])))
+        })
+        .collect())
 }
 
 // --- ratings ------------------------------------------------------------------------------

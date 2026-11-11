@@ -446,6 +446,38 @@ fn calibrate_xp(frame: &mut [Fixture], calibration: Option<&Calibration>) {
 /// Per player-fixture components and points at the view's deadline (calibrated with the
 /// season's table entry unless `calibrate` is off).
 pub fn predict_fixtures(view: &AsOfView, fit: &V1Fit) -> Result<Vec<Fixture>> {
+    predict_fixtures_with(view, fit, &|_| {})
+}
+
+/// Sets a fixture's P(start) and P(plays) (`p_start` ≤ `p_play`), with the rest of the minutes
+/// fields and the goal and assist expectations following as `calibrate_inputs` moves them:
+/// expected minutes from the per-class means, expectations scaled by new / old expected
+/// minutes (per-90 rates unchanged). False when he now has minutes but had none before, so
+/// his expectations stay 0 (no rate to scale).
+pub fn set_play(f: &mut Fixture, p_start: f64, p_play: f64) -> bool {
+    let p_sub = np_maximum(p_play - p_start, 0.0);
+    let e_minutes = p_start * f.m_start + p_sub * f.m_sub;
+    let old = f.e_minutes;
+    let ratio = if old > 0.0 { e_minutes / old } else { 0.0 };
+    f.p_start = p_start;
+    f.p_sub = p_sub;
+    f.p_play = p_start + p_sub;
+    f.p_60 = p_start * f.c60;
+    f.e_minutes = e_minutes;
+    f.e_np_goals *= ratio;
+    f.e_pen_goals *= ratio;
+    f.e_assists *= ratio;
+    old > 0.0 || e_minutes == 0.0
+}
+
+/// `predict_fixtures` with `edit` applied to the calibrated inputs before the points are
+/// assembled. `edit` gets no view and must not read data: a caller that passes the truth is
+/// a backtest-only oracle (`fplopt_backtest::info_oracle`).
+pub fn predict_fixtures_with(
+    view: &AsOfView,
+    fit: &V1Fit,
+    edit: &dyn Fn(&mut [Fixture]),
+) -> Result<Vec<Fixture>> {
     let (season, _) = view.gameweek_for_deadline()?;
     let params = &fit.params;
     let calibration = if params.calibrate { calibration_for(params.model, season)? } else { None };
@@ -457,6 +489,7 @@ pub fn predict_fixtures(view: &AsOfView, fit: &V1Fit) -> Result<Vec<Fixture>> {
     }
     let mut frame = fixture_components(view, fit)?;
     calibrate_inputs(&mut frame, calibration.as_ref());
+    edit(&mut frame);
     fixture_points(&mut frame, &backtest_rules(season, &default_config_dir())?);
     calibrate_xp(&mut frame, calibration.as_ref());
     Ok(frame)
@@ -627,6 +660,15 @@ pub fn predict_v1(view: &AsOfView, fit: &V1Fit) -> Result<Table> {
     gw_frame(view, &predict_fixtures(view, fit)?)
 }
 
+/// `predict_v1` with `edit` on the calibrated inputs (`predict_fixtures_with`).
+pub fn predict_v1_with(
+    view: &AsOfView,
+    fit: &V1Fit,
+    edit: &dyn Fn(&mut [Fixture]),
+) -> Result<Table> {
+    gw_frame(view, &predict_fixtures_with(view, fit, edit)?)
+}
+
 /// `MODELS[name](view)` for the v1 family: fit at the refit cutoff, predict at the view.
 pub fn xp_v1_family(name: &str, view: &AsOfView) -> Result<Table> {
     let cutoff = refit_deadline(view, REFIT_EVERY)?;
@@ -677,6 +719,52 @@ pub fn xp_v1_2026_10_with_fit(view: &AsOfView) -> Result<(Table, serde_json::Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn playing_fixture() -> Fixture {
+        Fixture {
+            p_start: 0.6,
+            p_sub: 0.2,
+            p_play: 0.8,
+            p_60: 0.54,
+            e_minutes: 0.6 * 80.0 + 0.2 * 20.0,
+            c60: 0.9,
+            csub: 0.5,
+            m_start: 80.0,
+            m_sub: 20.0,
+            e_np_goals: 0.26,
+            e_pen_goals: 0.052,
+            e_assists: 0.13,
+            ..Fixture::default()
+        }
+    }
+
+    #[test]
+    fn set_play_moves_minutes_and_scales_the_expectations() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        // He starts: 80 expected minutes against 52, so the expectations scale by 80 / 52.
+        let mut f = playing_fixture();
+        assert!(set_play(&mut f, 1.0, 1.0));
+        assert!(close(f.p_start, 1.0) && close(f.p_sub, 0.0) && close(f.p_play, 1.0));
+        assert!(close(f.p_60, 0.9) && close(f.e_minutes, 80.0));
+        assert!(close(f.e_np_goals, 0.26 * 80.0 / 52.0) && close(f.e_assists, 0.13 * 80.0 / 52.0));
+        assert!(close(f.e_pen_goals, 0.052 * 80.0 / 52.0));
+        // He comes on: 20 minutes.
+        let mut f = playing_fixture();
+        assert!(set_play(&mut f, 0.0, 1.0));
+        assert!(close(f.p_sub, 1.0) && close(f.p_60, 0.0) && close(f.e_minutes, 20.0));
+        assert!(close(f.e_np_goals, 0.26 * 20.0 / 52.0));
+        // He doesn't play: everything is 0.
+        let mut f = playing_fixture();
+        assert!(set_play(&mut f, 0.0, 0.0));
+        assert!(f.p_play == 0.0 && f.e_minutes == 0.0 && f.e_np_goals == 0.0 && f.e_assists == 0.0);
+        // No minutes before, minutes now: no rate to scale, reported.
+        let mut f = Fixture { m_start: 80.0, m_sub: 20.0, c60: 0.9, ..Fixture::default() };
+        assert!(!set_play(&mut f, 1.0, 1.0));
+        assert!(close(f.e_minutes, 80.0) && f.e_np_goals == 0.0);
+        // No minutes before or now: nothing to report.
+        let mut f = Fixture { m_start: 80.0, m_sub: 20.0, ..Fixture::default() };
+        assert!(set_play(&mut f, 0.0, 0.0));
+    }
 
     #[test]
     fn v1_is_the_adopted_model_and_the_old_one_is_kept() {

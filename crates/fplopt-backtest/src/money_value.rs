@@ -150,7 +150,7 @@ fn solve_at(
     let view = store.as_of(deadline);
     let pool = caches.pool(&view)?;
     let state = refresh(state, &pool);
-    let xp = caches.xp(policy.xp_model(), &view)?;
+    let xp = caches.xp_for(store, policy.xp_model(), &view)?;
     let prices = caches.prices_for(policy, store, state.season)?;
     let ctx = DecisionContext {
         view: &view,
