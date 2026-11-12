@@ -2,9 +2,17 @@
 //! docs/superpowers/specs/2026-11-11-bot-messaging-ux-design.md): plain data, no text.
 //! `messages` words them.
 
-use fplopt_optimize::{Plan, XpFrame};
+use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
+use fplopt_optimize::state::selling_price;
+use fplopt_optimize::{GwPlan, Plan, XpFrame};
 
 use crate::context::Fixture;
+use crate::planner::{UserPlan, ranked};
+
+/// A club's games per GW: (gw, [(opponent, home)]), empty for a blank.
+pub type GwGames = Vec<(i64, Vec<(String, bool)>)>;
 
 /// A player's expected points summed over `gws` (every row of a player-GW counts, so a
 /// double adds both games; NaN or missing counts 0); None if the frame has no row for him in
@@ -22,11 +30,7 @@ pub fn horizon_points(xp: &XpFrame, player_key: i64, gws: &[i64]) -> Option<f64>
 
 /// A club's games per GW in `gws` (in that order): (gw, [(opponent, home)]), empty for a
 /// blank.
-pub fn gw_fixtures(
-    fixtures: &[Fixture],
-    team_key: i64,
-    gws: &[i64],
-) -> Vec<(i64, Vec<(String, bool)>)> {
+pub fn gw_fixtures(fixtures: &[Fixture], team_key: i64, gws: &[i64]) -> GwGames {
     gws.iter()
         .map(|&gw| {
             let games = fixtures
@@ -44,6 +48,195 @@ pub fn gw_fixtures(
 pub fn tied(a: &Plan, b: &Plan) -> bool {
     let gap = a.mip_gap.max(b.mip_gap) * a.total_objective().abs();
     (a.total_objective() - b.total_objective()).abs() <= gap
+}
+
+/// Positions in lineup order.
+pub const POSITIONS: [(i64, &str); 4] = [(1, "GK"), (2, "DEF"), (3, "MID"), (4, "FWD")];
+
+/// One of this GW's transfers in plan 1.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Move {
+    pub out_name: String,
+    pub in_name: String,
+    /// What the sale earns and the buy costs (tenths of £m).
+    pub sell_price: i64,
+    pub buy_price: i64,
+    /// Expected points over the plan's horizon GWs (undecayed).
+    pub out_points: f64,
+    pub in_points: f64,
+    /// The incoming player's games in his next 3 GWs, or None without a fixtures frame.
+    pub in_fixtures: Option<GwGames>,
+}
+
+/// A player and his expected points this GW.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pick {
+    pub name: String,
+    pub points: f64,
+}
+
+/// Another plan: its first-GW moves (out, in names), hit points, gain over rolling and
+/// whether the solver can't tell it from plan 1.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Alternative {
+    pub moves: Vec<(String, String)>,
+    pub hit_points: i64,
+    pub gain: Option<f64>,
+    pub tied: bool,
+}
+
+/// The facts of a user's plan (spec, *Summary step*).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanSummary {
+    pub gw: i64,
+    pub deadline: DateTime<Utc>,
+    /// GWs in plan 1's horizon.
+    pub horizon: usize,
+    pub moves: Vec<Move>,
+    pub hit_points: i64,
+    pub captain: Pick,
+    pub vice: Pick,
+    pub gain_vs_roll: Option<f64>,
+    pub bank_after: i64,
+    pub free_transfers_next: i64,
+    /// Starters by position ("GK", names with " (C)"/" (V)"), positions without starters left
+    /// out.
+    pub team: Vec<(&'static str, Vec<String>)>,
+    pub bench: Vec<String>,
+    pub alternatives: Vec<Alternative>,
+    /// Rolling the transfer: free transfers next GW, and whether it ties plan 1. None when the
+    /// planner gave no roll plan or plan 1 makes no transfers.
+    pub roll: Option<(i64, bool)>,
+    /// Plan 1's later moves: (gw, out, in).
+    pub later: Vec<(i64, String, String)>,
+    pub stopped_early: bool,
+    /// When FPL's live prices couldn't be fetched: the time of the prices used.
+    pub prices_fallback: Option<DateTime<Utc>>,
+    /// The plan starts from transfers the user recorded with /transfer.
+    pub told_transfers: bool,
+}
+
+fn name(names: &HashMap<i64, String>, key: i64) -> String {
+    names.get(&key).cloned().unwrap_or_else(|| format!("player {key}"))
+}
+
+fn moves_of(g: &GwPlan, names: &HashMap<i64, String>) -> Vec<(String, String)> {
+    g.transfers.iter().map(|t| (name(names, t.out_key), name(names, t.in_key))).collect()
+}
+
+/// Free transfers at the next GW after making `n` transfers with `ft` available (FPL's
+/// roll-over, capped; top-ups ignored).
+fn next_free_transfers(ft: i64, n: i64, cap: i64) -> i64 {
+    ((ft - n).max(0) + 1).min(cap)
+}
+
+/// The summary of `plan`, or None when the planner found no plan.
+pub fn plan_summary(plan: &UserPlan) -> Option<PlanSummary> {
+    let context = &plan.context;
+    if plan.plans.plans.is_empty() {
+        return None;
+    }
+    let names = context.names();
+    let order = ranked(&plan.plans);
+    let best = order[0];
+    let first = best.first();
+    let gws: Vec<i64> = best.gws.iter().map(|g| g.gw).collect();
+    let points = |key: i64, gws: &[i64]| horizon_points(&context.xp, key, gws).unwrap_or(0.0);
+    let pool: HashMap<i64, (i64, i64, i64)> = context
+        .pool
+        .iter()
+        .map(|p| (p.player_key, (p.price, p.team_key, p.element_type)))
+        .collect();
+    let next3: Vec<i64> =
+        context.gameweeks.iter().map(|g| g.0).filter(|&g| g >= first.gw).take(3).collect();
+    let moves = first
+        .transfers
+        .iter()
+        .map(|t| {
+            let sell_price = plan
+                .state
+                .holdings
+                .iter()
+                .find(|h| h.player_key == t.out_key)
+                .map_or(0, |h| selling_price(h, plan.rules.sell_on_fee));
+            let (buy_price, team_key, _) = pool.get(&t.in_key).copied().unwrap_or((0, 0, 0));
+            Move {
+                out_name: name(&names, t.out_key),
+                in_name: name(&names, t.in_key),
+                sell_price,
+                buy_price,
+                out_points: points(t.out_key, &gws),
+                in_points: points(t.in_key, &gws),
+                in_fixtures: context.fixtures.as_ref().map(|f| gw_fixtures(f, team_key, &next3)),
+            }
+        })
+        .collect();
+    let mark = |k: i64| {
+        if k == first.vice {
+            " (V)"
+        } else if k == first.captain {
+            " (C)"
+        } else {
+            ""
+        }
+    };
+    let team = POSITIONS
+        .iter()
+        .filter_map(|&(pos, label)| {
+            let players: Vec<String> = first
+                .starters
+                .iter()
+                .filter(|k| pool.get(k).map_or(0, |p| p.2) == pos)
+                .map(|&k| format!("{}{}", name(&names, k), mark(k)))
+                .collect();
+            (!players.is_empty()).then_some((label, players))
+        })
+        .collect();
+    let cap = plan.rules.max_free_transfers;
+    let ft = plan.state.free_transfers;
+    let roll = match &plan.plans.roll {
+        Some(r) if !first.transfers.is_empty() => {
+            Some((next_free_transfers(ft, 0, cap), tied(best, r)))
+        }
+        _ => None,
+    };
+    Some(PlanSummary {
+        gw: context.gw,
+        deadline: context.deadline,
+        horizon: best.gws.len(),
+        moves,
+        hit_points: plan.rules.hit_cost * first.hits,
+        captain: Pick {
+            name: name(&names, first.captain),
+            points: points(first.captain, &[first.gw]),
+        },
+        vice: Pick { name: name(&names, first.vice), points: points(first.vice, &[first.gw]) },
+        gain_vs_roll: best.gain_vs_roll,
+        bank_after: first.bank,
+        free_transfers_next: next_free_transfers(ft, first.transfers.len() as i64, cap),
+        team,
+        bench: first.bench.iter().map(|&k| name(&names, k)).collect(),
+        alternatives: order[1..]
+            .iter()
+            .map(|p| Alternative {
+                moves: moves_of(p.first(), &names),
+                hit_points: plan.rules.hit_cost * p.first().hits,
+                gain: p.gain_vs_roll,
+                tied: tied(best, p),
+            })
+            .collect(),
+        roll,
+        later: best.gws[1..]
+            .iter()
+            .flat_map(|g| moves_of(g, &names).into_iter().map(move |(o, i)| (g.gw, o, i)))
+            .collect(),
+        stopped_early: !best.optimal(),
+        prices_fallback: match context.prices_at {
+            Some(_) => None,
+            None => Some(context.bootstrap_at.unwrap_or(context.created_at)),
+        },
+        told_transfers: plan.spec.notes.iter().any(|n| n.starts_with("transfers you told the bot")),
+    })
 }
 
 #[cfg(test)]
