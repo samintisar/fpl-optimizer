@@ -8,11 +8,10 @@ use std::collections::{BTreeSet, HashMap};
 use fplopt_optimize::GwPlan;
 use fplopt_optimize::chips::chip_value;
 use fplopt_optimize::entry::{SquadSpec, season_label};
-use serde_json::Value;
 
 use crate::chip_calls::ChipCalls;
 use crate::context::PlanContext;
-use crate::planner::{CHIP_LABELS, ChipOptions, Decision, UserPlan, chip_label};
+use crate::planner::{CHIP_LABELS, ChipOptions, UserPlan, chip_label};
 use crate::summary::{PlanChange, PlanSummary, plan_summary};
 use crate::util::{escape as e, py_g, uk_time};
 
@@ -257,11 +256,14 @@ pub fn update_text(c: &PlanChange) -> String {
         } else {
             format!("pts over the next {} GWs", c.horizon)
         };
-        let mut why = format!("Why ({what}): now {}", list(&c.now_points));
-        if !c.was_points.is_empty() {
-            why += &format!("; before {}", list(&c.was_points));
+        let mut parts = Vec::new();
+        if !c.now_points.is_empty() {
+            parts.push(format!("now {}", list(&c.now_points)));
         }
-        lines.push(why);
+        if !c.was_points.is_empty() {
+            parts.push(format!("before {}", list(&c.was_points)));
+        }
+        lines.push(format!("Why ({what}): {}", parts.join("; ")));
     }
     lines.push("Full plan and team: /plan".into());
     lines.join("\n")
