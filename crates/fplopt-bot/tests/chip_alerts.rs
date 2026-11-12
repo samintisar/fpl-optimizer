@@ -20,7 +20,7 @@ use fplopt_optimize::io::params_with;
 use serde_json::{Value, json};
 
 const HEADER: &str = "<b>Chip:</b>";
-const CHIPS_LEFT: &str = "Chips left:";
+const CHIPS_LEFT: &str = "Your chips:";
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()

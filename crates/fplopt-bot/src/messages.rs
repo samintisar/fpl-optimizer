@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashMap};
 use fplopt_optimize::GwPlan;
 use fplopt_optimize::entry::SquadSpec;
 
-use crate::chip_calls::ChipCalls;
+use crate::chip_calls::{ChipCalls, scenario_gw};
 use crate::context::PlanContext;
 use crate::planner::{CHIP_LABELS, ChipOptions, UserPlan, chip_label};
 use crate::summary::{PlanChange, PlanSummary, plan_summary};
@@ -266,16 +266,11 @@ pub fn update_text(c: &PlanChange) -> String {
             let parts: Vec<String> = p.iter().map(|(n, x)| format!("{} {x:.1}", e(n))).collect();
             parts.join(", ")
         };
-        let what = if c.horizon == 1 {
-            "pts this GW".to_string()
-        } else {
-            format!("pts over the next {} GWs", c.horizon)
-        };
-        let mut parts = vec![format!("now {}", list(&c.now_points))];
+        let mut why = format!("Why: expected pts {}: {}", over(c.horizon), list(&c.now_points));
         if !c.was_points.is_empty() {
-            parts.push(format!("before {}", list(&c.was_points)));
+            why += &format!(" (vs {} in the old plan)", list(&c.was_points));
         }
-        lines.push(format!("Why ({what}): {}", parts.join("; ")));
+        lines.push(why);
     }
     lines.push("Full plan and team: /plan".into());
     lines.join("\n")
@@ -324,21 +319,6 @@ pub fn squad_text(context: &PlanContext, spec: &SquadSpec) -> String {
     lines.join("\n")
 }
 
-/// `bboost@gw9+freehit@gw11` -> 'Bench Boost GW9 + Free Hit GW11'; `none` -> 'no chip'.
-pub fn scenario_label(label: &str) -> String {
-    if label == "none" {
-        return "no chip".into();
-    }
-    label
-        .split('+')
-        .map(|part| {
-            let (name, gw) = part.split_once("@gw").unwrap_or((part, ""));
-            format!("{} GW{gw}", chip_label(name))
-        })
-        .collect::<Vec<_>>()
-        .join(" + ")
-}
-
 /// `/chips` (information only, spec *`/chips`*).
 pub fn chips_text(options: &ChipOptions) -> String {
     let (context, rules, params) = (&options.context, &options.rules, &options.params);
@@ -351,20 +331,22 @@ pub fn chips_text(options: &ChipOptions) -> String {
     let base = objectives.iter().rev().find(|(l, _)| l == "none").map_or(0.0, |(_, v)| *v);
     let best = options.plans.best();
     let names = context.names();
-    let mut lines = vec![
-        format!("<b>GW{} chips</b> · for information: your /plan doesn't use them", context.gw),
-        if best.scenario == "none" {
-            format!("Best {}: keep your chips", over(best.gws.len()))
-        } else {
-            format!(
-                "Best {}: {} ({} pts vs keeping your chips)",
-                over(best.gws.len()),
-                e(&scenario_label(&best.scenario)),
-                signed(best.total_objective() - base)
-            )
-        },
-    ];
     let first = best.first();
+    let horizon = over(best.gws.len());
+    let advice = match first.chip.as_deref() {
+        Some(chip) if best.scenario != "none" => format!(
+            "My advice: play {} this week (about {} pts).",
+            chip_label(chip),
+            signed(best.total_objective() - base)
+        ),
+        _ if best.scenario != "none" => format!(
+            "My advice: keep your chips this week. Best plan {horizon}: {} (about {} pts).",
+            e(&chip_plan(&best.scenario, context.gw)),
+            signed(best.total_objective() - base)
+        ),
+        _ => "My advice: keep your chips this week.".to_string(),
+    };
+    let mut lines = vec![format!("<b>GW{} chips</b>", context.gw), advice];
     match first.chip.as_deref() {
         Some(chip @ ("freehit" | "wildcard")) if best.scenario != "none" => {
             let positions: HashMap<i64, i64> =
@@ -395,45 +377,73 @@ pub fn chips_text(options: &ChipOptions) -> String {
         }
         _ => {}
     }
-    if !options.singles.is_empty() {
-        let mut singles: Vec<(&str, f64)> = CHIP_LABELS
-            .iter()
-            .filter_map(|(chip, _)| options.single(chip))
-            .map(|(label, value)| (label.as_str(), value - base))
-            .collect();
-        singles.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        lines.push(String::new());
-        lines.push("<b>Each chip in its best week</b>".into());
-        for (label, gain) in singles {
-            lines.push(format!("· {}: {}", e(&scenario_label(label)), signed(gain)));
-        }
-    }
-    // Chips left, grouped by the GW their window ends.
-    let mut groups: Vec<(i64, Vec<&str>)> = Vec::new();
-    for w in windows.iter().filter(|w| !used.contains(&w.chip_id) && w.stop >= context.gw_index) {
-        let last = gw_of.get(&w.stop).copied().unwrap_or(w.stop);
-        match groups.last_mut() {
-            Some((g, chips)) if *g == last => chips.push(w.name.as_str()),
-            _ => groups.push((last, vec![w.name.as_str()])),
-        }
-    }
-    // Within a group, chips in the usual order (Wildcard, Free Hit, Bench Boost, Triple
-    // Captain).
+    // Your chips: the ones usable now, each with when it's worth playing; then the sets that
+    // unlock later.
     let rank = |name: &str| CHIP_LABELS.iter().position(|(n, _)| *n == name).unwrap_or(usize::MAX);
-    for (_, chips) in &mut groups {
-        chips.sort_by_key(|n| rank(n));
-    }
-    let left: Vec<String> = groups
+    let mut now: Vec<_> = windows
         .iter()
-        .map(|(last, chips)| {
-            let labels: Vec<&str> = chips.iter().map(|n| chip_label(n)).collect();
-            format!("{} (until GW{last})", labels.join(", "))
+        .filter(|w| {
+            !used.contains(&w.chip_id) && w.start <= context.gw_index && w.stop >= context.gw_index
         })
         .collect();
+    now.sort_by_key(|w| rank(&w.name));
+    let gw_label = |index: i64| gw_of.get(&index).copied().unwrap_or(index);
     lines.push(String::new());
-    let left = if left.is_empty() { "none".to_string() } else { left.join("; ") };
-    lines.push(format!("Chips left: {}", e(&left)));
-    lines.push("A chip only shows a gain if it beats saving it for later.".into());
+    lines.push("<b>Your chips</b>".into());
+    if now.is_empty() {
+        lines.push("· None to play right now.".into());
+    }
+    for w in &now {
+        let mut line = format!("· {}: use by GW{}.", chip_label(&w.name), gw_label(w.stop));
+        if let Some((label, value)) = options.single(&w.name) {
+            let gain = value - base;
+            let when = match scenario_gw(label) {
+                Some(g) if g == context.gw => "this week".to_string(),
+                Some(g) => format!("in GW{g}"),
+                None => "soon".to_string(),
+            };
+            line += &if gain >= 0.05 {
+                format!(" Best {when}, about {} pts vs saving it.", signed(gain))
+            } else {
+                let cost = (-gain).round().max(1.0) as i64;
+                let cost = if cost == 1 { "1 pt".to_string() } else { format!("{cost} pts") };
+                let horizon = if horizon == "this GW" { "this week" } else { horizon.as_str() };
+                match when.as_str() {
+                    "this week" if horizon == "this week" => format!(
+                        " Not worth playing this week: it would cost you about {cost} compared \
+                         with saving it."
+                    ),
+                    "this week" => format!(
+                        " Not worth playing {horizon}: this week it would cost you about {cost} \
+                         compared with saving it."
+                    ),
+                    _ => format!(
+                        " Not worth playing {horizon}: even {when}, its best week, it would cost \
+                         you about {cost} compared with saving it."
+                    ),
+                }
+            };
+        }
+        lines.push(line);
+    }
+    // Sets that unlock later, grouped by the GW they start.
+    let mut later: Vec<(i64, Vec<&str>)> = Vec::new();
+    for w in windows.iter().filter(|w| !used.contains(&w.chip_id) && w.start > context.gw_index) {
+        match later.iter_mut().find(|(s, _)| *s == w.start) {
+            Some((_, chips)) => chips.push(w.name.as_str()),
+            None => later.push((w.start, vec![w.name.as_str()])),
+        }
+    }
+    later.sort_by_key(|(s, _)| *s);
+    for (start, mut chips) in later {
+        chips.sort_by_key(|n| rank(n));
+        let labels: Vec<&str> = chips.iter().map(|n| chip_label(n)).collect();
+        lines.push(format!(
+            "· A new set ({}) unlocks in GW{}.",
+            labels.join(", "),
+            gw_label(start)
+        ));
+    }
     let solved: BTreeSet<&str> = objectives
         .iter()
         .map(|(l, _)| l.as_str())
@@ -447,14 +457,32 @@ pub fn chips_text(options: &ChipOptions) -> String {
         .filter(|(l, _)| !solved.contains(l.as_str()))
         .count();
     if stopped > 0 {
-        lines.push("Some options ran out of time, so this may be incomplete.".into());
+        lines.push(String::new());
+        lines.push("I ran out of time checking some options, so this may be incomplete.".into());
     }
-    lines.push(if params.chip_value_left.is_some() {
-        "Tested on 2023–25: beat playing no chips, not clearly better than simple rules.".into()
-    } else {
-        "The chip planner isn't tested yet: weigh it against your own judgement.".into()
-    });
+    if params.chip_value_left.is_none() {
+        lines.push(String::new());
+        lines.push("This chip advice is rough: trust your own judgement.".into());
+    }
     lines.join("\n")
+}
+
+/// A chip scenario in words: `bboost@gw15+3xc@gw17` -> 'Bench Boost in GW15, then Triple
+/// Captain in GW17' ("this week" for the planned GW).
+fn chip_plan(label: &str, gw: i64) -> String {
+    let parts: Vec<String> = label
+        .split('+')
+        .map(|part| {
+            let (name, g) = part.split_once("@gw").unwrap_or((part, ""));
+            let when = if g.parse::<i64>().ok() == Some(gw) {
+                "this week".to_string()
+            } else {
+                format!("in GW{g}")
+            };
+            format!("{} {when}", chip_label(name))
+        })
+        .collect();
+    parts.join(", then ")
 }
 
 /// `text` in pieces of at most `limit` characters, cut at line breaks (a single longer line
@@ -503,17 +531,19 @@ pub fn chip_section(calls: &ChipCalls) -> String {
     let mut lines = Vec::new();
     lines.push(match (calls.planner.as_deref(), forced, window) {
         (Some(c), _, _) => format!(
-            "<b>Chip:</b> play {} this week ({} pts vs keeping it)",
+            "<b>Chip:</b> play {} this week (about {} pts vs saving it)",
             e(chip_label(c)),
             signed(calls.planner_gain)
         ),
         (None, Some(c), Some((left, gws, last))) => format!(
-            "<b>Chip:</b> play {} now ({} left and {} before they expire after GW{last})",
+            "<b>Chip:</b> play {} now, or you'll lose it: {} and {} left until GW{last}",
             e(chip_label(c)),
             count(left, "chip"),
             count(gws as usize, "GW")
         ),
-        (None, Some(c), None) => format!("<b>Chip:</b> play {} now, or lose it", e(chip_label(c))),
+        (None, Some(c), None) => {
+            format!("<b>Chip:</b> play {} now, or you'll lose it", e(chip_label(c)))
+        }
         (None, None, _) => "<b>Chip:</b> keep your chips this week".to_string(),
     });
     if let Some(c @ ("freehit" | "wildcard")) = headline {
@@ -523,7 +553,7 @@ pub fn chip_section(calls: &ChipCalls) -> String {
         && let Some((left, gws, last)) = window
     {
         lines.push(format!(
-            "  {} left and {} before they expire after GW{last}: play one each GW",
+            "  You have {} and {} left until GW{last}: play one each GW",
             count(left, "chip"),
             count(gws as usize, "GW")
         ));
@@ -535,73 +565,59 @@ pub fn chip_section(calls: &ChipCalls) -> String {
     let rules = calls.rules.as_deref();
     // (what the rule saw, its threshold) — joined with " (… )" when agreeing, "; " inside
     // the brackets when not.
-    let (seen, threshold): (String, Option<&str>) = match rules {
-        Some(c) if calls.forced.as_deref() == Some(c) => {
-            ("last chance before they expire".to_string(), None)
-        }
-        Some("3xc") => {
-            (format!("your captain is expected to score {}", gain("captain_xp")), Some("8.3+"))
-        }
-        Some("bboost") => {
-            (format!("your bench is expected to score {}", gain("bench_xp")), Some("10.9+"))
-        }
-        Some("freehit") => (
-            format!("{} of your players have no game", gain("blanks").trim_end_matches(".0")),
-            Some("4+"),
+    // The rule of thumb's reason: what it looked at and the level where it plays the chip.
+    let reason: String = match rules {
+        Some(c) if calls.forced.as_deref() == Some(c) => "it's your last chance".to_string(),
+        Some("3xc") => format!(
+            "your captain is expected to score {} pts (it plays at 8.3+)",
+            gain("captain_xp")
         ),
-        Some("wildcard") => (format!("a Wildcard gains {} pts", gain("gain_wc")), Some("12.9+")),
-        Some(_) => (String::new(), None),
-        None => (
-            format!("captain expected {}, bench expected {}", gain("captain_xp"), gain("bench_xp")),
-            None,
+        Some("bboost") => {
+            format!("your bench is expected to score {} pts (it plays at 10.9+)", gain("bench_xp"))
+        }
+        Some("freehit") => format!(
+            "{} of your players have no game (it plays at 4+)",
+            gain("blanks").trim_end_matches(".0")
+        ),
+        Some("wildcard") => {
+            format!("a Wildcard would gain {} pts (it plays at 12.9+)", gain("gain_wc"))
+        }
+        Some(_) => String::new(),
+        None => format!(
+            "your captain is expected to score {} pts and your bench {}",
+            gain("captain_xp"),
+            gain("bench_xp")
         ),
     };
-    if rules == headline {
-        lines.push(match (rules, threshold) {
-            (None, _) => "  The simple rule agrees: keep them".to_string(),
-            (Some(_), Some(t)) => {
-                format!("  The simple rule agrees: {} (it plays at {t})", e(&seen))
-            }
-            (Some(_), None) => format!("  The simple rule agrees: {}", e(&seen)),
-        });
-    } else {
-        let play = match rules {
-            Some(c) => format!("play {}", e(chip_label(c))),
-            None => "keep them".to_string(),
-        };
-        let why = match threshold {
-            Some(t) => format!("{}; it plays at {t}", e(&seen)),
-            None => e(&seen),
-        };
-        lines.push(if why.is_empty() {
-            format!("  A simpler rule would {play}")
-        } else {
-            format!("  A simpler rule would {play} ({why})")
-        });
-    }
+    let reason = e(&reason);
+    lines.push(match (rules == headline, rules) {
+        (true, None) => "  Rule of thumb: keep them too".to_string(),
+        (true, Some(_)) => format!("  Rule of thumb agrees: {reason}"),
+        (false, Some(c)) if reason.is_empty() => {
+            format!("  Rule of thumb would play {}", e(chip_label(c)))
+        }
+        (false, Some(c)) => format!("  Rule of thumb would play {}: {reason}", e(chip_label(c))),
+        (false, None) => format!("  Rule of thumb would keep them: {reason}"),
+    });
     if calls.open.is_empty() {
-        lines.push("Chips left: none".to_string());
+        lines.push("Your chips: none to play right now".to_string());
     } else {
         let parts: Vec<String> = calls
             .open
             .iter()
             .map(|o| {
-                let mut note = if o.expiring {
-                    format!("expires after GW{}", o.last_gw)
-                } else {
-                    format!("until GW{}", o.last_gw)
-                };
+                let mut note = format!("use by GW{}", o.last_gw);
                 if headline == Some(o.name.as_str()) {
                     note.push_str(", playing now");
                 } else if let Some(best) = o.best_gw
                     && !(calls.planner.is_none() && best == calls.gw)
                 {
-                    note.push_str(&format!(", best week GW{best}"));
+                    note.push_str(&format!(", best in GW{best}"));
                 }
                 format!("{} ({note})", e(chip_label(&o.name)))
             })
             .collect();
-        lines.push(format!("Chips left: {}", parts.join(", ")));
+        lines.push(format!("Your chips: {}", parts.join(", ")));
     }
     lines.join("\n")
 }
@@ -823,9 +839,9 @@ mod tests {
     fn chip_section_play_and_agree() {
         assert_eq!(
             chip_section(&chip_calls(Some("bboost"), Some("bboost"), None)),
-            "<b>Chip:</b> play Bench Boost this week (+7.4 pts vs keeping it)\n\
-             \x20 The simple rule agrees: your bench is expected to score 11.6 (it plays at 10.9+)\n\
-             Chips left: Free Hit (until GW19, best week GW16), Bench Boost (until GW19, playing now)"
+            "<b>Chip:</b> play Bench Boost this week (about +7.4 pts vs saving it)\n\
+             \x20 Rule of thumb agrees: your bench is expected to score 11.6 pts (it plays at 10.9+)\n\
+             Your chips: Free Hit (use by GW19, best in GW16), Bench Boost (use by GW19, playing now)"
         );
     }
 
@@ -833,14 +849,16 @@ mod tests {
     fn chip_section_hold_and_differ() {
         let text = chip_section(&chip_calls(None, Some("bboost"), None));
         assert!(text.starts_with(
-            "<b>Chip:</b> keep your chips this week\n  A simpler rule would play Bench Boost (your bench is expected to score 11.6; it plays at 10.9+)\n"
+            "<b>Chip:</b> keep your chips this week\n  Rule of thumb would play Bench Boost: your bench is expected to score 11.6 pts (it plays at 10.9+)\n"
         ), "{text}");
         assert!(
             text.ends_with(
-                "Chips left: Free Hit (until GW19, best week GW16), Bench Boost (until GW19)"
+                "Your chips: Free Hit (use by GW19, best in GW16), Bench Boost (use by GW19)"
             ),
             "{text}"
         );
+        let text = chip_section(&chip_calls(None, None, None));
+        assert!(text.contains("\n  Rule of thumb: keep them too\n"), "{text}");
     }
 
     #[test]
@@ -850,9 +868,9 @@ mod tests {
         calls.open[0].expiring = true;
         let text = chip_section(&calls);
         assert!(text.starts_with(
-            "<b>Chip:</b> play Free Hit now (2 chips left and 2 GWs before they expire after GW19) · your Free Hit team: /chips\n  The simple rule agrees: last chance before they expire\n"
+            "<b>Chip:</b> play Free Hit now, or you'll lose it: 2 chips and 2 GWs left until GW19 · your Free Hit team: /chips\n  Rule of thumb agrees: it's your last chance\n"
         ), "{text}");
-        assert!(text.contains("Free Hit (expires after GW19, playing now)"));
+        assert!(text.contains("Free Hit (use by GW19, playing now)"));
     }
 
     #[test]
@@ -865,20 +883,20 @@ mod tests {
         calls.open[0].best_gw = Some(19);
         assert_eq!(
             chip_section(&calls),
-            "<b>Chip:</b> play Bench Boost this week (+7.4 pts vs keeping it)\n\
-             \x20 2 chips left and 2 GWs before they expire after GW19: play one each GW\n\
-             \x20 A simpler rule would play Free Hit (last chance before they expire)\n\
-             Chips left: Free Hit (expires after GW19, best week GW19), Bench Boost (expires after GW19, playing now)"
+            "<b>Chip:</b> play Bench Boost this week (about +7.4 pts vs saving it)\n\
+             \x20 You have 2 chips and 2 GWs left until GW19: play one each GW\n\
+             \x20 Rule of thumb would play Free Hit: it's your last chance\n\
+             Your chips: Free Hit (use by GW19, best in GW19), Bench Boost (use by GW19, playing now)"
         );
     }
 
     #[test]
     fn chip_section_free_hit_points_to_chips() {
         let text = chip_section(&chip_calls(Some("freehit"), None, None));
-        assert!(text.starts_with("<b>Chip:</b> play Free Hit this week (+7.4 pts vs keeping it) · your Free Hit team: /chips\n"), "{text}");
+        assert!(text.starts_with("<b>Chip:</b> play Free Hit this week (about +7.4 pts vs saving it) · your Free Hit team: /chips\n"), "{text}");
         assert!(
             text.contains(
-                "\n  A simpler rule would keep them (captain expected 7.0, bench expected 11.6)\n"
+                "\n  Rule of thumb would keep them: your captain is expected to score 7.0 pts and your bench 11.6\n"
             ),
             "{text}"
         );
@@ -926,7 +944,7 @@ mod tests {
         let text = chip_section(&calls);
         assert!(
             text.starts_with(
-                "<b>Chip:</b> play Free Hit now (1 chip left and 1 GW before they expire after GW19)"
+                "<b>Chip:</b> play Free Hit now, or you'll lose it: 1 chip and 1 GW left until GW19"
             ),
             "{text}"
         );
@@ -935,9 +953,7 @@ mod tests {
         calls.open.remove(1);
         let text = chip_section(&calls);
         assert!(
-            text.contains(
-                "\n  1 chip left and 1 GW before they expire after GW19: play one each GW\n"
-            ),
+            text.contains("\n  You have 1 chip and 1 GW left until GW19: play one each GW\n"),
             "{text}"
         );
     }
@@ -997,12 +1013,13 @@ b",
         ); // characters, not bytes
     }
 
-    // Python test_scenario_label.
     #[test]
-    fn labels() {
-        assert_eq!(scenario_label("none"), "no chip");
-        assert_eq!(scenario_label("bboost@gw9"), "Bench Boost GW9");
-        assert_eq!(scenario_label("wildcard@gw5+3xc@gw9"), "Wildcard GW5 + Triple Captain GW9");
+    fn chip_plans_in_words() {
+        assert_eq!(chip_plan("bboost@gw9", 9), "Bench Boost this week");
+        assert_eq!(
+            chip_plan("wildcard@gw5+3xc@gw9", 4),
+            "Wildcard in GW5, then Triple Captain in GW9"
+        );
     }
 
     #[test]
@@ -1026,7 +1043,7 @@ b",
              Now: sell Wissa, buy Gonzalo (was: sell Wissa, buy Strand Larsen)\n\
              Captain: Haaland (unchanged)\n\
              Vice: Salah (was Saka)\n\
-             Why (pts over the next 6 GWs): now Gonzalo 31.4; before Strand Larsen 30.6\n\
+             Why: expected pts over the next 6 GWs: Gonzalo 31.4 (vs Strand Larsen 30.6 in the old plan)\n\
              Full plan and team: /plan"
         );
         // A hit shows between the new moves and what they replace.
