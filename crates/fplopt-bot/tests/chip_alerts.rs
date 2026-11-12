@@ -1,9 +1,9 @@
 //! The alerts' chip section and `chip_calls` log (spec docs/superpowers/specs/
 //! 2026-11-05-chip-alerts-design.md), Rust only: the synthetic bot golden
-//! (`tests/fixtures/rust_golden/bot/`) replayed with `chip_alerts: true` must give Python's
-//! alert texts with the chip section in front of `alert24` (and of an `alert2` whose chip
-//! call changed), and log one `chip_calls` row per alert run. Without the key the replay is
-//! Python's golden byte for byte (`tests/golden.rs`).
+//! (`tests/fixtures/rust_golden/bot/`) replayed with `chip_alerts: true` must give the recorded
+//! golden's alert texts with the chip section in front of `alert24` (and of an `alert2` whose
+//! chip call changed), and log one `chip_calls` row per alert run. Without the key the replay
+//! is the golden itself (`tests/golden.rs`).
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -19,8 +19,8 @@ use fplopt_bot::util::parse_isoformat;
 use fplopt_optimize::io::params_with;
 use serde_json::{Value, json};
 
-const HEADER: &str = "<b>Chip this week:</b>";
-const EVIDENCE: &str = "Evidence: on 2023/24 and 2024/25";
+const HEADER: &str = "<b>Chip:</b>";
+const CHIPS_LEFT: &str = "Chips left:";
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
@@ -189,8 +189,8 @@ fn replay_with_chip_alerts_prepends_the_section_and_logs_the_calls() {
         let shows_section = kind == "alert24" || shown(row) != shown(alert24);
         if shows_section {
             let (section, rest) = split_section(text);
-            assert!(section.contains(EVIDENCE), "{section}");
-            assert_eq!(rest, message, "{kind}: the rest is Python's text");
+            assert!(section.contains(CHIPS_LEFT), "{section}");
+            assert_eq!(rest, message, "{kind}: the rest is the golden's text");
         } else {
             assert_eq!(text, message, "{kind}: an unchanged chip call adds no section");
         }
@@ -279,7 +279,7 @@ fn alert2_shows_the_section_only_when_the_chip_call_changed() {
     eprintln!("one alert24 with the chip search: {:.1} s", started.elapsed().as_secs_f64());
     assert_eq!(outcome, AlertOutcome::Sent);
     let (section, rest) = split_section(&text);
-    assert!(section.contains(EVIDENCE));
+    assert!(section.contains(CHIPS_LEFT));
     assert!(rest.starts_with("<b>GW6 plan</b>"), "{rest}");
 
     // Same plan, same chip call: silent, and still logged.
@@ -301,8 +301,7 @@ fn alert2_shows_the_section_only_when_the_chip_call_changed() {
     let (outcome, text) = alert(&service, "alert2", false);
     assert_eq!(outcome, AlertOutcome::Sent);
     let (_, rest) = split_section(&text);
-    assert!(rest.starts_with("<b>GW6 update</b>"), "{rest}");
-    assert!(!rest.contains("Transfers changed"), "{rest}");
+    assert_eq!(rest, fplopt_bot::messages::UNCHANGED, "{rest}");
     // the two runs, the inserted alert24 row and this run's
     let kinds: Vec<String> =
         service.users.chip_calls(uid).unwrap().into_iter().map(|c| c.kind).collect();
@@ -376,7 +375,7 @@ fn a_first_alert2_carries_the_section_like_alert24() {
     let (outcome, text) = alert(&service, "alert2", false);
     assert_eq!(outcome, AlertOutcome::Sent);
     let (section, rest) = split_section(&text);
-    assert!(section.contains(EVIDENCE), "{section}");
+    assert!(section.contains(CHIPS_LEFT), "{section}");
     assert!(rest.starts_with("<b>GW6 plan</b>"), "{rest}");
     let _ = std::fs::remove_dir_all(&state);
 
@@ -399,8 +398,7 @@ fn alert2_without_a_logged_alert24_call_shows_the_section() {
     let (outcome, text) = alert(&service, "alert2", false);
     assert_eq!(outcome, AlertOutcome::Sent);
     let (_, rest) = split_section(&text);
-    assert!(rest.starts_with("<b>GW6 update</b>"), "{rest}");
-    assert!(!rest.contains("Transfers changed"), "{rest}");
+    assert_eq!(rest, fplopt_bot::messages::UNCHANGED, "{rest}");
     let _ = std::fs::remove_dir_all(&state);
 }
 
@@ -415,8 +413,8 @@ fn alert2_after_a_failed_alert24_calculation_shows_the_section() {
     assert_eq!(outcome, AlertOutcome::Sent);
     let (section, rest) = split_section(&text);
     assert_ne!(section, fplopt_bot::messages::chip_failure_section());
-    assert!(section.contains(EVIDENCE), "{section}");
-    assert!(rest.starts_with("<b>GW6 update</b>"), "{rest}");
+    assert!(section.contains(CHIPS_LEFT), "{section}");
+    assert_eq!(rest, fplopt_bot::messages::UNCHANGED, "{rest}");
     let calls = service.users.chip_calls(uid(&service)).unwrap();
     assert!(calls[1].error.is_none(), "{:?}", calls[1]);
     let _ = std::fs::remove_dir_all(&state);
@@ -449,7 +447,7 @@ fn an_entry_error_is_told_without_a_chip_search() {
     service.chip_planner = Box::new(|_, _, _, _, _| panic!("no chip search on the Told path"));
     let (outcome, text) = alert(&service, "alert24", false);
     assert_eq!(outcome, AlertOutcome::Told);
-    assert!(text.starts_with("Couldn't plan GW6"), "{text}");
+    assert!(text.starts_with("I couldn't plan your team for GW6"), "{text}");
     assert!(service.users.chip_calls(uid(&service)).unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&state);
 }

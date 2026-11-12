@@ -16,7 +16,8 @@ FPL's responses for the teams (history, transfers, every GW's picks) and one boo
 live prices) are recorded once into `--fpl` and served to both from the files, so both see
 the same bytes. Checks per session:
 
-- every step's replies and alert texts identical, byte for byte;
+- every step's replies and alerts going to the same chats with the same outcomes (texts are
+  the Rust bot's own since 2026-11-11);
 - the databases identical (every table and row; write times aside), the plan logs included
   (their `mip_gap`, HiGHS's bookkeeping, within 1e-9 relative: highspy's and our HiGHS
   build round its dual bound differently on Linux);
@@ -361,18 +362,39 @@ def tie_explains(py_text: str | None, rs_text: str | None) -> str | None:
     return None
 
 
+def _without_texts(result: Any) -> Any:
+    """A step result with reply and alert texts blanked, one entry per chat: the Rust bot's
+    texts are its own since 2026-11-11
+    (docs/superpowers/specs/2026-11-11-bot-messaging-ux-design.md), so the gate compares who
+    got a message, outcomes, rows and decisions."""
+    if not isinstance(result, dict):
+        return result
+    out = dict(result)
+    for key in ("replies", "texts"):
+        if key in out:
+            # One entry per chat, in order: a long text is split into pieces, and the two
+            # bots' texts (so their piece counts) differ.
+            chats: list[Any] = []
+            for chat, _ in out[key]:
+                if not chats or chats[-1] != chat:
+                    chats.append(chat)
+            out[key] = [[chat, None] for chat in chats]
+    return out
+
+
 def check(session: dict) -> dict:
     problems: list[str] = []
     ties = 0
     steps = session["script"]["steps"]
-    py, rs = session["python"], session["rust"]
+    py = [_without_texts(r) for r in session["python"]]
+    rs = [_without_texts(r) for r in session["rust"]]
     if len(py) != len(rs):
         problems.append(f"{len(py)} vs {len(rs)} step results")
     tie_steps: set[int] = set()
     py_recs = session["python_db"].get("recommendations", [])
     rs_recs = session["rust_db"].get("recommendations", [])
     for a, b in zip(py_recs, rs_recs, strict=False):
-        rest = {k for k in a if a.get(k) != b.get(k)}
+        rest = {k for k in a if k != "message" and a.get(k) != b.get(k)}
         if rest == {"plans"} and same_plans(a["plans"], b["plans"]):
             rest = set()
         if not rest:

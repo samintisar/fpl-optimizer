@@ -13,5 +13,6 @@ pub mod planner;
 pub mod replay;
 pub mod service;
 pub mod store;
+pub mod summary;
 pub mod telegram;
 pub mod util;

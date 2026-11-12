@@ -23,7 +23,7 @@ use crate::util::py_isoformat;
 pub const LIVE_XP: &str = "v1";
 /// The raw sources whose files identify the archive's content.
 pub const FINGERPRINT_SOURCES: &[&str] = &["fpl", "odds", "football-data"];
-const FRAMES: [&str; 5] = ["xp", "pool", "players", "prices", "gameweeks"];
+const FRAMES: [&str; 6] = ["xp", "pool", "players", "prices", "gameweeks", "fixtures"];
 
 /// A context to write: its meta and its frames.
 pub struct NewContext {
@@ -42,6 +42,7 @@ pub struct NewContext {
     pub players: Table,
     pub prices: Table,
     pub gameweeks: Table,
+    pub fixtures: Table,
 }
 
 impl NewContext {
@@ -73,6 +74,7 @@ impl NewContext {
             "pool" => &self.pool,
             "players" => &self.players,
             "prices" => &self.prices,
+            "fixtures" => &self.fixtures,
             _ => &self.gameweeks,
         }
     }
@@ -94,6 +96,37 @@ pub fn next_gameweek(store: &DataStore, now: DateTime<Utc>) -> Result<Option<(i6
         .filter(|&i| deadline[i].is_some_and(|d| d > now))
         .min_by_key(|&i| (deadline[i], season[i], index[i]));
     Ok(best.and_then(|i| Some((season[i]?, index[i]?))))
+}
+
+/// The `fixtures` frame (context docs): both sides of every scheduled game of `season` in
+/// GWs >= `gw`, sorted by (gw, team_key, fixture_key), from the as-of fixture list (`View::schedule`) and
+/// `team_dim`'s short names.
+pub fn fixture_rows(schedule: &Table, teams: &Table, season: i64, gw: i64) -> Result<Table> {
+    let short: std::collections::HashMap<i64, String> = teams
+        .i64("team_key")?
+        .iter()
+        .copied()
+        .zip(teams.opt_str("short_name")?.into_iter().map(Option::unwrap_or_default))
+        .collect();
+    let (seasons, gws) = (schedule.i64("season")?, schedule.opt_i64("gw")?);
+    let fixture_keys = schedule.i64("fixture_key")?;
+    let (home, away) = (schedule.i64("home_team_key")?, schedule.i64("away_team_key")?);
+    let mut rows: Vec<(i64, i64, i64, String, bool)> = Vec::new();
+    for i in 0..schedule.height() {
+        let Some(g) = gws[i] else { continue };
+        if seasons[i] != season || g < gw {
+            continue;
+        }
+        let name = |k: i64| short.get(&k).cloned().unwrap_or_default();
+        rows.push((g, home[i], fixture_keys[i], name(away[i]), true));
+        rows.push((g, away[i], fixture_keys[i], name(home[i]), false));
+    }
+    rows.sort_by_key(|r| (r.0, r.1, r.2));
+    Ok(Table::new()
+        .with("gw", Column::I64(rows.iter().map(|r| r.0).collect()))
+        .with("team_key", Column::I64(rows.iter().map(|r| r.1).collect()))
+        .with("opponent", Column::Str(rows.iter().map(|r| r.3.clone()).collect()))
+        .with("home", Column::Bool(rows.iter().map(|r| r.4).collect())))
 }
 
 /// The context for the next deadline after `now` (None if the data has none).
@@ -155,6 +188,11 @@ pub fn build_context(
     let gameweeks = Table::new()
         .with("gw", Column::I64(gameweeks.iter().map(|g| g.0).collect()))
         .with("gw_index", Column::I64(gameweeks.iter().map(|g| g.1).collect()));
+    // The as-of fixture list (newest snapshot before the deadline, else the final schedule),
+    // the one the models see: not the final table, which would show later reschedules.
+    let schedule = view.schedule(season)?;
+    let teams = view.table("team_dim", Some(&["team_key", "short_name"]))?;
+    let fixtures = fixture_rows(&schedule, &teams, season, gw)?;
     let xp = fplopt_models::predict(xp_model, &view)?;
     let created = Utc::now();
     Ok(Some(NewContext {
@@ -173,6 +211,7 @@ pub fn build_context(
         players,
         prices,
         gameweeks,
+        fixtures,
     }))
 }
 
@@ -258,6 +297,26 @@ pub fn git_sha(root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_rows_are_both_sides_of_each_game_from_the_planned_gw() {
+        let schedule = Table::new()
+            .with("season", Column::I64(vec![2026, 2026, 2026, 2025]))
+            .with("gw", Column::OptI64(vec![Some(11), Some(12), None, Some(12)]))
+            .with("fixture_key", Column::I64(vec![1, 2, 3, 4]))
+            .with("home_team_key", Column::I64(vec![10, 20, 10, 10]))
+            .with("away_team_key", Column::I64(vec![20, 30, 30, 20]));
+        let teams = Table::new()
+            .with("team_key", Column::I64(vec![10, 20, 30]))
+            .with("short_name", Column::Str(vec!["ARS".into(), "BRE".into(), "LEE".into()]));
+        let rows = fixture_rows(&schedule, &teams, 2026, 12).unwrap();
+        // Only GW12 of 2026 (GW11 is past, the unscheduled game has no GW, 2025 is another
+        // season): BRE (20) at home to LEE (30), both sides.
+        assert_eq!(rows.i64("gw").unwrap(), &[12, 12]);
+        assert_eq!(rows.i64("team_key").unwrap(), &[20, 30]);
+        assert_eq!(rows.str("opponent").unwrap(), &["LEE".to_string(), "BRE".to_string()]);
+        assert_eq!(rows.bool("home").unwrap(), &[true, false]);
+    }
 
     // Python test_raw_fingerprint_changes_with_new_files.
     #[test]

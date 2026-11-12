@@ -4,7 +4,8 @@
 //!
 //! A context lives in `<root>/<context_id>/`: `meta.json` and the frames `xp`, `pool`,
 //! `players` (element_id, player_key, web_name of the season), `prices` (gw, element_id,
-//! price: each GW's deadline price up to the planned one) and `gameweeks` (gw, gw_index). The
+//! price: each GW's deadline price up to the planned one), `gameweeks` (gw, gw_index) and,
+//! since 2026-11-11, `fixtures` (gw, team_key, opponent, home; optional). The
 //! newest `context_id` (a sortable UTC stamp) is the current one. Python's `live prepare`
 //! writes them until the models move (batch 6); the bot only reads them.
 
@@ -36,6 +37,17 @@ pub struct ContextPlayer {
     pub web_name: String,
 }
 
+/// A row of the context's optional `fixtures` frame: one of club `team_key`'s games in GW
+/// `gw` against `opponent` (FPL short name), at home or away. A double GW has two rows, a
+/// blank none. Contexts written before 2026-11-11 have no frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fixture {
+    pub gw: i64,
+    pub team_key: i64,
+    pub opponent: String,
+    pub home: bool,
+}
+
 /// Inputs for every plan at one deadline (module docs). `prices_at`: when the pool's prices
 /// were replaced by FPL's live ones (`with_live_prices`); None = the snapshot's prices.
 #[derive(Clone, Debug)]
@@ -58,6 +70,8 @@ pub struct PlanContext {
     /// (gw, gw_index)
     pub gameweeks: Vec<(i64, i64)>,
     pub prices_at: Option<DateTime<Utc>>,
+    /// The fixtures frame, sorted by (gw, team_key) as written; None in older contexts.
+    pub fixtures: Option<Arc<Vec<Fixture>>>,
 }
 
 impl PlanContext {
@@ -226,6 +240,27 @@ pub fn read_context(directory: &Path) -> Result<PlanContext> {
         .into_iter()
         .zip(int_column(&gameweeks, "gw_index", "gameweeks")?)
         .collect();
+    let fixtures_path = directory.join("fixtures.parquet");
+    let fixtures = if fixtures_path.is_file() {
+        let table = read_parquet(&fixtures_path, None)?;
+        let opponents = table.opt_str("opponent")?;
+        let home = table.opt_bool("home")?;
+        let rows: Vec<Fixture> = int_column(&table, "gw", "fixtures")?
+            .into_iter()
+            .zip(int_column(&table, "team_key", "fixtures")?)
+            .zip(opponents)
+            .zip(home)
+            .map(|(((gw, team_key), opponent), home)| Fixture {
+                gw,
+                team_key,
+                opponent: opponent.unwrap_or_default(),
+                home: home.unwrap_or(false),
+            })
+            .collect();
+        Some(Arc::new(rows))
+    } else {
+        None
+    };
     Ok(PlanContext {
         context_id: text(&meta, "context_id")?.context("meta.json: null context_id")?,
         season: int(&meta, "season")?,
@@ -243,5 +278,54 @@ pub fn read_context(directory: &Path) -> Result<PlanContext> {
         prices: Arc::new(prices),
         gameweeks,
         prices_at: None,
+        fixtures,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fplopt_build::table::{Column, Table, write_parquet};
+
+    fn golden_context_dir() -> PathBuf {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rust_golden/bot/state/context");
+        let id = std::fs::read_dir(&root).unwrap().next().unwrap().unwrap().file_name();
+        root.join(id)
+    }
+
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_context_without_fixtures_loads_with_none() {
+        let context = read_context(&golden_context_dir()).unwrap();
+        assert!(context.fixtures.is_none());
+    }
+
+    #[test]
+    fn fixtures_are_read_when_present() {
+        let dir = std::env::temp_dir().join(format!("fplopt-ctx-fixtures-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        copy(&golden_context_dir(), &dir);
+        let table = Table::new()
+            .with("gw", Column::I64(vec![6, 6, 7]))
+            .with("team_key", Column::I64(vec![1, 1, 1]))
+            .with("opponent", Column::Str(vec!["BRE".into(), "LEE".into(), "WOL".into()]))
+            .with("home", Column::Bool(vec![true, false, true]));
+        write_parquet(&table, &dir.join("fixtures.parquet")).unwrap();
+        let context = read_context(&dir).unwrap();
+        let fixtures = context.fixtures.unwrap();
+        assert_eq!(fixtures.len(), 3);
+        assert_eq!(
+            fixtures[1],
+            Fixture { gw: 6, team_key: 1, opponent: "LEE".into(), home: false }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
