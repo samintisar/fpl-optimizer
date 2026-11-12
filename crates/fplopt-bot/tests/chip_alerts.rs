@@ -19,8 +19,8 @@ use fplopt_bot::util::parse_isoformat;
 use fplopt_optimize::io::params_with;
 use serde_json::{Value, json};
 
-const HEADER: &str = "<b>Chip this week:</b>";
-const EVIDENCE: &str = "Evidence: on 2023/24 and 2024/25";
+const HEADER: &str = "<b>Chip:</b>";
+const CHIPS_LEFT: &str = "Chips left:";
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
@@ -189,7 +189,7 @@ fn replay_with_chip_alerts_prepends_the_section_and_logs_the_calls() {
         let shows_section = kind == "alert24" || shown(row) != shown(alert24);
         if shows_section {
             let (section, rest) = split_section(text);
-            assert!(section.contains(EVIDENCE), "{section}");
+            assert!(section.contains(CHIPS_LEFT), "{section}");
             assert_eq!(rest, message, "{kind}: the rest is the golden's text");
         } else {
             assert_eq!(text, message, "{kind}: an unchanged chip call adds no section");
@@ -279,7 +279,7 @@ fn alert2_shows_the_section_only_when_the_chip_call_changed() {
     eprintln!("one alert24 with the chip search: {:.1} s", started.elapsed().as_secs_f64());
     assert_eq!(outcome, AlertOutcome::Sent);
     let (section, rest) = split_section(&text);
-    assert!(section.contains(EVIDENCE));
+    assert!(section.contains(CHIPS_LEFT));
     assert!(rest.starts_with("<b>GW6 plan</b>"), "{rest}");
 
     // Same plan, same chip call: silent, and still logged.
@@ -375,7 +375,7 @@ fn a_first_alert2_carries_the_section_like_alert24() {
     let (outcome, text) = alert(&service, "alert2", false);
     assert_eq!(outcome, AlertOutcome::Sent);
     let (section, rest) = split_section(&text);
-    assert!(section.contains(EVIDENCE), "{section}");
+    assert!(section.contains(CHIPS_LEFT), "{section}");
     assert!(rest.starts_with("<b>GW6 plan</b>"), "{rest}");
     let _ = std::fs::remove_dir_all(&state);
 
@@ -413,7 +413,7 @@ fn alert2_after_a_failed_alert24_calculation_shows_the_section() {
     assert_eq!(outcome, AlertOutcome::Sent);
     let (section, rest) = split_section(&text);
     assert_ne!(section, fplopt_bot::messages::chip_failure_section());
-    assert!(section.contains(EVIDENCE), "{section}");
+    assert!(section.contains(CHIPS_LEFT), "{section}");
     assert_eq!(rest, fplopt_bot::messages::UNCHANGED, "{rest}");
     let calls = service.users.chip_calls(uid(&service)).unwrap();
     assert!(calls[1].error.is_none(), "{:?}", calls[1]);
