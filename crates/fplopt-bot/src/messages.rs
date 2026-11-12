@@ -1,6 +1,6 @@
 //! Telegram message texts (Python `fplopt.bot.messages`; Phase 7 plan §5): Telegram HTML
-//! (`<b>` and escaped text only), short lines for a phone. `recommendation_text` is the full
-//! recommendation (alerts and `/plan`); `split_message` cuts a text to Telegram's 4,096
+//! (`<b>` and escaped text only), short lines for a phone. `plan_text` is the plan message
+//! (alerts and `/plan`); `split_message` cuts a text to Telegram's 4,096
 //! character limit at line breaks. The texts are Python's, byte for byte.
 
 use std::collections::{BTreeSet, HashMap};
@@ -12,14 +12,11 @@ use serde_json::Value;
 
 use crate::chip_calls::ChipCalls;
 use crate::context::PlanContext;
-use crate::planner::{
-    CHIP_LABELS, ChipOptions, Decision, UserPlan, chip_label, chips_left, ranked,
-};
-use crate::summary::tied;
+use crate::planner::{CHIP_LABELS, ChipOptions, Decision, UserPlan, chip_label};
+use crate::summary::{PlanSummary, plan_summary};
 use crate::util::{escape as e, py_g, uk_time};
 
 pub const MAX_MESSAGE: usize = 4096;
-const POSITIONS: [(i64, &str); 4] = [(1, "GK"), (2, "DEF"), (3, "MID"), (4, "FWD")];
 const ARROW: &str = "→";
 
 /// `names[key]` (Python raises KeyError on a missing player; here the update fails the same
@@ -39,142 +36,175 @@ fn moves(g: &GwPlan, names: &HashMap<i64, String>, hit_cost: i64) -> String {
     e(if moves.is_empty() { "no transfers" } else { &moves }) + &hit
 }
 
-fn lineup(g: &GwPlan, plan: &UserPlan, names: &HashMap<i64, String>) -> Vec<String> {
-    let positions: HashMap<i64, i64> =
-        plan.context.pool.iter().map(|p| (p.player_key, p.element_type)).collect();
-    let mark = |k: i64| {
-        if k == g.vice {
-            " (V)"
-        } else if k == g.captain {
-            " (C)"
-        } else {
-            ""
-        }
-    };
-    let mut lines = Vec::new();
-    for (pos, label) in POSITIONS {
-        let players: Vec<String> = g
-            .starters
-            .iter()
-            .filter(|k| positions.get(k).copied().unwrap_or(0) == pos)
-            .map(|&k| format!("{}{}", name(names, k), mark(k)))
-            .collect();
-        if !players.is_empty() {
-            lines.push(format!("{label} {}", e(&players.join(", "))));
-        }
-    }
-    let bench: Vec<&str> = g.bench.iter().map(|&k| name(names, k)).collect();
-    lines.push(format!("Bench {}", e(&bench.join(", "))));
-    lines
+fn money(tenths: i64) -> String {
+    format!("£{:.1}m", tenths as f64 / 10.0)
 }
 
-/// The recommendation for `plan` (module docs); `title` replaces the first line's lead,
-/// `changes` (from `changes_text`) go right under it.
-pub fn recommendation_text(plan: &UserPlan, title: Option<&str>, changes: &[String]) -> String {
-    let (context, spec, plans) = (&plan.context, &plan.spec, &plan.plans);
-    let names = context.names();
-    let gw = context.gw;
-    let lead = title.map_or_else(|| format!("GW{gw} plan"), str::to_string);
-    let mut lines =
-        vec![format!("<b>{}</b> · deadline {} (UK)", e(&lead), uk_time(context.deadline))];
-    lines.extend(changes.iter().map(|c| e(c)));
-    let chips = chips_left(&plan.state, &plan.rules).join(", ");
-    lines.extend([
-        format!(
-            "Team {} · bank £{:.1}m · {} FT",
-            plan.entry_id,
-            spec.bank as f64 / 10.0,
-            spec.free_transfers
-        ),
-        format!(
-            "Chips you can play this GW: {}",
-            e(if chips.is_empty() { "none" } else { &chips })
-        ),
-        format!(
-            "xP data from {} (UK)",
-            uk_time(context.bootstrap_at.unwrap_or(context.created_at))
-        ),
-        prices_line(context),
+fn free_transfers(n: i64) -> String {
+    if n == 1 { "1 free transfer".into() } else { format!("{n} free transfers") }
+}
+
+/// "this GW" or "over the next N GWs".
+pub fn over(horizon: usize) -> String {
+    if horizon == 1 { "this GW".into() } else { format!("over the next {horizon} GWs") }
+}
+
+/// "sell A → buy B, sell C → buy D" (escaped); "no transfers" when empty.
+fn sell_buy(moves: &[(String, String)]) -> String {
+    if moves.is_empty() {
+        return "no transfers".into();
+    }
+    let text: Vec<String> =
+        moves.iter().map(|(o, i)| format!("sell {} {ARROW} buy {}", e(o), e(i))).collect();
+    text.join(", ")
+}
+
+/// `text` with its first letter in upper case.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or(String::new(), |c| c.to_uppercase().collect::<String>() + chars.as_str())
+}
+
+fn games(fixtures: &[(i64, Vec<(String, bool)>)]) -> String {
+    let per_gw: Vec<String> = fixtures
+        .iter()
+        .map(|(_, games)| {
+            if games.is_empty() {
+                return "no game".to_string();
+            }
+            let g: Vec<String> = games
+                .iter()
+                .map(|(o, home)| format!("{} ({})", e(o), if *home { "H" } else { "A" }))
+                .collect();
+            g.join(" + ")
+        })
+        .collect();
+    per_gw.join(", ")
+}
+
+/// The plan message (`/plan`, the 24-hour alert).
+pub fn render_plan(s: &PlanSummary) -> String {
+    let mut lines = vec![
+        format!("<b>GW{} plan</b> · deadline {} UK", s.gw, uk_time(s.deadline)),
         String::new(),
-    ]);
-    if plans.plans.is_empty() {
-        lines.push("The solver found no plan. The admin has been told.".into());
-        return lines.join("\n");
+    ];
+    if s.moves.is_empty() {
+        lines.push(format!(
+            "<b>This week's moves:</b> none, save your transfer ({} next GW)",
+            free_transfers(s.free_transfers_next)
+        ));
+    } else {
+        let hit = if s.hit_points > 0 {
+            format!(" (costs a {}-pt hit)", s.hit_points)
+        } else {
+            String::new()
+        };
+        lines.push(format!("<b>This week's moves</b>{hit}"));
+        for m in &s.moves {
+            lines.push(format!(
+                "Sell {} ({}) {ARROW} buy {} ({})",
+                e(&m.out_name),
+                money(m.sell_price),
+                e(&m.in_name),
+                money(m.buy_price)
+            ));
+            lines.push(format!(
+                "  {:.1} {ARROW} {:.1} pts {}",
+                m.out_points,
+                m.in_points,
+                over(s.horizon)
+            ));
+            if let Some(f) = &m.in_fixtures {
+                lines.push(format!("  {}'s next games: {}", e(&m.in_name), games(f)));
+            }
+        }
     }
-    let order = ranked(plans);
-    let best = order[0];
-    let roll = plans.roll.as_ref();
-    let hit_cost = plan.rules.hit_cost;
-    let gain =
-        best.gain_vs_roll.map_or(String::new(), |g| format!(" · {g:+.1} xP vs saving the FT"));
-    lines.push(format!("<b>Plan 1</b>{gain} (next {} GWs)", best.gws.len()));
-    for g in &best.gws {
-        lines.push(format!("GW{}: {}", g.gw, moves(g, &names, hit_cost)));
-    }
-    let first = best.first();
     lines.push(format!(
-        "Captain {} · vice {}",
-        e(name(&names, first.captain)),
-        e(name(&names, first.vice))
+        "Captain {} ({:.1} pts expected) · vice {} ({:.1})",
+        e(&s.captain.name),
+        s.captain.points,
+        e(&s.vice.name),
+        s.vice.points
     ));
-    lines.push(String::new());
-    lines.push(format!("<b>GW{gw} team</b> (plan 1)"));
-    lines.extend(lineup(first, plan, &names));
-    lines.push(String::new());
-    for (i, other) in order.iter().enumerate().skip(1) {
-        let gain = other.gain_vs_roll.map_or(String::new(), |g| format!(" ({g:+.1})"));
+    if !s.moves.is_empty() {
+        if let Some(g) = s.gain_vs_roll {
+            lines.push(format!("Gain: about {g:+.1} pts vs saving your free transfer"));
+        }
         lines.push(format!(
-            "<b>Plan {}</b>{gain}: GW{gw} {}",
-            i + 1,
-            moves(other.first(), &names, hit_cost)
-        ));
-    }
-    // Python's `roll is not p` holds for every plan: `optimize` returns fresh copies.
-    if let Some(roll) = roll {
-        lines.push(format!(
-            "<b>Save the FT</b>: GW{gw} xP {:.1} (plan 1: {:.1})",
-            roll.first().xp,
-            first.xp
+            "Afterwards: {} in the bank, {} next GW",
+            money(s.bank_after),
+            free_transfers(s.free_transfers_next)
         ));
     }
     lines.push(String::new());
-    let mut ties = vec![1];
-    ties.extend(
-        order.iter().enumerate().skip(1).filter(|(_, o)| tied(best, o)).map(|(i, _)| i + 1),
-    );
-    if ties.len() > 1 {
-        let head: Vec<String> = ties[..ties.len() - 1].iter().map(ToString::to_string).collect();
-        lines.push(format!(
-            "Plans {} and {} are within the solver's precision of each other: treat them as \
-             equally good.",
-            head.join(", "),
-            ties[ties.len() - 1]
-        ));
+    lines.push("<b>Your team</b>".into());
+    for (label, names) in &s.team {
+        lines.push(format!("{label} {}", e(&names.join(", "))));
     }
-    if let Some(roll) = roll
-        && tied(best, roll)
-    {
-        lines.push("Saving the FT is as good as plan 1 within the solver's precision.".into());
-    }
-    if !best.optimal() {
-        lines.push(format!(
-            "The solver stopped early ({}): plan 1 may not be the best.",
-            e(&best.status)
-        ));
-    }
-    lines.push("Chips are your call: the system doesn't plan them yet.".into());
-    lines.push(format!(
-        "Made transfers for GW{gw} already? FPL doesn't show them before the deadline: tell the \
-         bot with /transfer."
-    ));
-    let notes: Vec<&String> =
-        spec.notes.iter().filter(|n| !n.starts_with("transfers or a chip made for")).collect();
-    if !notes.is_empty() {
+    lines.push(format!("Bench {}", e(&s.bench.join(", "))));
+    if !s.alternatives.is_empty() || s.roll.is_some() {
         lines.push(String::new());
-        lines.push("Notes:".into());
-        lines.extend(notes.iter().map(|n| format!("· {}", e(n))));
+        lines.push("<b>Close alternatives</b>".into());
+        for a in &s.alternatives {
+            let hit = if a.hit_points > 0 {
+                format!(" (−{} pts hit)", a.hit_points)
+            } else {
+                String::new()
+            };
+            let gain = a.gain.map_or(String::new(), |g| format!(": {g:+.1} pts"));
+            let tie = if a.tied { " (just as good)" } else { "" };
+            lines.push(format!("· {}{hit}{gain}{tie}", capitalized(&sell_buy(&a.moves))));
+        }
+        if let Some((ft, tie)) = s.roll {
+            lines.push(if tie {
+                format!("· Save your transfer: just as good ({} next GW)", free_transfers(ft))
+            } else {
+                format!("· Save your transfer: {} next GW", free_transfers(ft))
+            });
+        }
     }
+    if !s.later.is_empty() {
+        let mut by_gw: Vec<(i64, Vec<(String, String)>)> = Vec::new();
+        for (gw, o, i) in &s.later {
+            match by_gw.last_mut() {
+                Some((g, moves)) if g == gw => moves.push((o.clone(), i.clone())),
+                _ => by_gw.push((*gw, vec![(o.clone(), i.clone())])),
+            }
+        }
+        let parts: Vec<String> =
+            by_gw.iter().map(|(gw, moves)| format!("GW{gw} {}", sell_buy(moves))).collect();
+        lines.push(String::new());
+        lines.push(format!("Looking ahead (may change): {}", parts.join("; ")));
+    }
+    lines.push(String::new());
+    if s.stopped_early {
+        lines.push(
+            "This plan was found under a time limit; there may be a slightly better one.".into(),
+        );
+    }
+    if let Some(at) = s.prices_fallback {
+        lines.push(format!("Couldn't reach FPL: prices from {} UK.", uk_time(at)));
+    }
+    if s.told_transfers {
+        lines.push("Includes the transfers you told me about (/transfer list).".into());
+    }
+    lines.push(
+        "Made a transfer already? FPL hides it until the deadline, so tell me with /transfer."
+            .into(),
+    );
     lines.join("\n")
+}
+
+/// `render_plan` of `plan`'s summary, or the no-plan text.
+pub fn plan_text(plan: &UserPlan) -> String {
+    match plan_summary(plan) {
+        Some(s) => render_plan(&s),
+        None => format!(
+            "<b>GW{} plan</b> · deadline {} UK\n\nI couldn't find a plan this time. The admin has been told.",
+            plan.context.gw,
+            uk_time(plan.context.deadline)
+        ),
+    }
 }
 
 /// Where the prices came from: FPL live (when) or the data's snapshot.
@@ -567,6 +597,147 @@ pub fn chip_failure_section() -> String {
 mod tests {
     use super::*;
     use crate::chip_calls::OpenChip;
+    use crate::summary::{Alternative, Move, Pick, PlanSummary};
+    use chrono::TimeZone;
+
+    fn summary() -> PlanSummary {
+        PlanSummary {
+            gw: 12,
+            deadline: chrono::Utc.with_ymd_and_hms(2026, 11, 21, 11, 0, 0).unwrap(),
+            horizon: 6,
+            moves: vec![Move {
+                out_name: "Wissa".into(),
+                in_name: "Gonzalo".into(),
+                sell_price: 69,
+                buy_price: 71,
+                out_points: 26.1,
+                in_points: 31.4,
+                in_fixtures: Some(vec![
+                    (12, vec![("BRE".into(), true)]),
+                    (13, vec![("LEE".into(), false), ("WOL".into(), true)]),
+                    (14, vec![]),
+                ]),
+            }],
+            hit_points: 0,
+            captain: Pick { name: "Haaland".into(), points: 7.8 },
+            vice: Pick { name: "Salah".into(), points: 6.9 },
+            gain_vs_roll: Some(2.44),
+            bank_after: 3,
+            free_transfers_next: 1,
+            team: vec![
+                ("GK", vec!["Raya".into()]),
+                ("DEF", vec!["Gabriel".into(), "Timber".into()]),
+                ("FWD", vec!["Haaland (C)".into(), "Gonzalo".into()]),
+            ],
+            bench: vec!["Dúbravka".into(), "Ings".into()],
+            alternatives: vec![
+                Alternative {
+                    moves: vec![("Wissa".into(), "Strand Larsen".into())],
+                    hit_points: 0,
+                    gain: Some(2.3),
+                    tied: true,
+                },
+                Alternative {
+                    moves: vec![("Mbeumo".into(), "Palmer".into()), ("Ings".into(), "Wood".into())],
+                    hit_points: 4,
+                    gain: Some(1.8),
+                    tied: false,
+                },
+            ],
+            roll: Some((2, false)),
+            later: vec![(14, "Saka".into(), "Kudus".into())],
+            stopped_early: false,
+            prices_fallback: None,
+            told_transfers: false,
+        }
+    }
+
+    #[test]
+    fn plan_text_in_full() {
+        assert_eq!(
+            render_plan(&summary()),
+            "<b>GW12 plan</b> · deadline Sat 21 Nov 11:00 UK\n\
+             \n\
+             <b>This week's moves</b>\n\
+             Sell Wissa (£6.9m) → buy Gonzalo (£7.1m)\n\
+             \x20 26.1 → 31.4 pts over the next 6 GWs\n\
+             \x20 Gonzalo's next games: BRE (H), LEE (A) + WOL (H), no game\n\
+             Captain Haaland (7.8 pts expected) · vice Salah (6.9)\n\
+             Gain: about +2.4 pts vs saving your free transfer\n\
+             Afterwards: £0.3m in the bank, 1 free transfer next GW\n\
+             \n\
+             <b>Your team</b>\n\
+             GK Raya\n\
+             DEF Gabriel, Timber\n\
+             FWD Haaland (C), Gonzalo\n\
+             Bench Dúbravka, Ings\n\
+             \n\
+             <b>Close alternatives</b>\n\
+             · Sell Wissa → buy Strand Larsen: +2.3 pts (just as good)\n\
+             · Sell Mbeumo → buy Palmer, sell Ings → buy Wood (−4 pts hit): +1.8 pts\n\
+             · Save your transfer: 2 free transfers next GW\n\
+             \n\
+             Looking ahead (may change): GW14 sell Saka → buy Kudus\n\
+             \n\
+             Made a transfer already? FPL hides it until the deadline, so tell me with /transfer."
+        );
+    }
+
+    #[test]
+    fn plan_text_variants() {
+        let mut s = summary();
+        s.hit_points = 4;
+        s.horizon = 1;
+        s.stopped_early = true;
+        s.told_transfers = true;
+        s.prices_fallback = Some(chrono::Utc.with_ymd_and_hms(2026, 11, 21, 9, 0, 0).unwrap());
+        s.roll = Some((2, true));
+        s.later.clear();
+        let text = render_plan(&s);
+        assert!(text.contains("<b>This week's moves</b> (costs a 4-pt hit)\n"), "{text}");
+        assert!(text.contains("\n  26.1 → 31.4 pts this GW\n"), "{text}");
+        assert!(text.contains("· Save your transfer: just as good (2 free transfers next GW)"));
+        assert!(!text.contains("Looking ahead"));
+        assert!(text.ends_with(
+            "This plan was found under a time limit; there may be a slightly better one.\n\
+             Couldn't reach FPL: prices from Sat 21 Nov 09:00 UK.\n\
+             Includes the transfers you told me about (/transfer list).\n\
+             Made a transfer already? FPL hides it until the deadline, so tell me with /transfer."
+        ));
+
+        let mut s = summary();
+        s.moves.clear();
+        s.roll = None;
+        s.gain_vs_roll = None;
+        s.free_transfers_next = 2;
+        let text = render_plan(&s);
+        assert!(
+            text.contains(
+                "<b>This week's moves:</b> none, save your transfer (2 free transfers next GW)\n\
+                 Captain Haaland"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("Gain:"));
+        assert!(!text.contains("Afterwards"));
+    }
+
+    #[test]
+    fn plan_text_escapes_names_and_fits_one_message() {
+        let mut s = summary();
+        s.moves[0].in_name = "A&B <x>".into();
+        let text = render_plan(&s);
+        assert!(text.contains("buy A&amp;B &lt;x&gt;"), "{text}");
+        // Worst case: 3 hits' worth of moves with long names and two alternatives.
+        let long = "Abcdefghijklmnopqrstuvwxyz-Abcdefghij";
+        s.moves = vec![s.moves[0].clone(); 5];
+        for m in &mut s.moves {
+            m.out_name = long.into();
+            m.in_name = long.into();
+        }
+        s.hit_points = 12;
+        assert!(render_plan(&s).chars().count() < MAX_MESSAGE);
+    }
 
     fn chip_calls(planner: Option<&str>, rules: Option<&str>, forced: Option<&str>) -> ChipCalls {
         ChipCalls {

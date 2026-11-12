@@ -19,7 +19,7 @@ use serde_json::Value;
 use crate::chip_calls::{ChipCalls, V6_FROM_GW_INDEX, compute_chip_calls, v6_params};
 use crate::context::{ContextStore, PlanContext, with_live_prices};
 use crate::messages::{
-    MAX_MESSAGE, changes_text, chip_failure_section, chip_section, chips_text, recommendation_text,
+    MAX_MESSAGE, changes_text, chip_failure_section, chip_section, chips_text, plan_text,
     split_message, squad_text,
 };
 use crate::planner::{
@@ -542,7 +542,7 @@ impl BotService {
         let Some(entry_id) = user.entry_id else { return Ok(reply(chat_id, REGISTER_FIRST)) };
         let Some(context) = self.context()? else { return Ok(reply(chat_id, NOT_READY)) };
         match self.make_plan(&user, &context, "plan") {
-            Ok(result) => Ok(reply(chat_id, recommendation_text(&result, None, &[]))),
+            Ok(result) => Ok(reply(chat_id, plan_text(&result))),
             Err(err) => match entry_message(&err) {
                 Some(message) => {
                     Ok(reply(chat_id, format!("Can't plan team {entry_id}: {}", e(&message))))
@@ -625,7 +625,7 @@ impl BotService {
                     context_id: Some(context.context_id.clone()),
                     plans: Some(plans_json(&result)?),
                     decision: Some(dumps(&decision_summary(&result))?),
-                    message: Some(recommendation_text(&result, None, &[])),
+                    message: Some(plan_text(&result)),
                     sent: true,
                     error: None,
                 },
@@ -827,9 +827,9 @@ impl BotService {
                 if changes.is_empty() && section.is_none() {
                     return finish(base, AlertOutcome::Silent);
                 }
-                recommendation_text(&plan, Some(&format!("GW{} update", context.gw)), &changes)
+                plan_text(&plan)
             }
-            _ => recommendation_text(&plan, None, &[]),
+            _ => plan_text(&plan),
         };
         let text = match &section {
             Some(section) => format!("{section}\n\n{text}"),

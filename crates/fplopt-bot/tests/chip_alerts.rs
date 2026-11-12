@@ -301,8 +301,7 @@ fn alert2_shows_the_section_only_when_the_chip_call_changed() {
     let (outcome, text) = alert(&service, "alert2", false);
     assert_eq!(outcome, AlertOutcome::Sent);
     let (_, rest) = split_section(&text);
-    assert!(rest.starts_with("<b>GW6 update</b>"), "{rest}");
-    assert!(!rest.contains("Transfers changed"), "{rest}");
+    assert!(rest.starts_with("<b>GW6 plan</b>"), "{rest}");
     // the two runs, the inserted alert24 row and this run's
     let kinds: Vec<String> =
         service.users.chip_calls(uid).unwrap().into_iter().map(|c| c.kind).collect();
@@ -399,8 +398,7 @@ fn alert2_without_a_logged_alert24_call_shows_the_section() {
     let (outcome, text) = alert(&service, "alert2", false);
     assert_eq!(outcome, AlertOutcome::Sent);
     let (_, rest) = split_section(&text);
-    assert!(rest.starts_with("<b>GW6 update</b>"), "{rest}");
-    assert!(!rest.contains("Transfers changed"), "{rest}");
+    assert!(rest.starts_with("<b>GW6 plan</b>"), "{rest}");
     let _ = std::fs::remove_dir_all(&state);
 }
 
@@ -416,7 +414,7 @@ fn alert2_after_a_failed_alert24_calculation_shows_the_section() {
     let (section, rest) = split_section(&text);
     assert_ne!(section, fplopt_bot::messages::chip_failure_section());
     assert!(section.contains(EVIDENCE), "{section}");
-    assert!(rest.starts_with("<b>GW6 update</b>"), "{rest}");
+    assert!(rest.starts_with("<b>GW6 plan</b>"), "{rest}");
     let calls = service.users.chip_calls(uid(&service)).unwrap();
     assert!(calls[1].error.is_none(), "{:?}", calls[1]);
     let _ = std::fs::remove_dir_all(&state);
