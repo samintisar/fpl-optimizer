@@ -586,7 +586,7 @@ impl BotService {
             &options.plans.best().scenario,
             &scenarios,
         )?;
-        Ok(reply(chat_id, chips_text(&options, 6)))
+        Ok(reply(chat_id, chips_text(&options)))
     }
 
     /// Plan the user's team on `context` (with FPL's live prices) and log it (`kind`; an entry

@@ -147,6 +147,35 @@ fn bot_session_matches_golden() {
 
     let results =
         fplopt_bot::replay::replay(&read("script.json"), &state, &golden.join("fpl")).unwrap();
+    // /chips in the new wording. Checked on the fresh replay, before any re-recording.
+    let chips: Vec<&str> = results
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r.get("replies")?.as_array()?.first()?.get(1)?.as_str())
+        .filter(|t| t.starts_with("<b>GW6 chips</b>"))
+        .collect();
+    assert!(!chips.is_empty());
+    for text in chips {
+        assert!(
+            text.contains(
+                " · for information: your /plan doesn't use them
+"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("<b>Each chip in its best week</b>"), "{text}");
+        assert!(
+            text.contains(
+                "
+Chips left: "
+            ),
+            "{text}"
+        );
+        assert!(text.contains("A chip only shows a gain if it beats saving it for later."));
+        assert!(!text.contains("solver") && !text.contains("xP"), "{text}");
+        assert!(text.chars().count() <= fplopt_bot::messages::MAX_MESSAGE);
+    }
     if std::env::var("FPLOPT_UPDATE_GOLDEN").is_ok_and(|v| v == "1") {
         // The bot's texts are Rust's own since 2026-11-11 (spec
         // docs/superpowers/specs/2026-11-11-bot-messaging-ux-design.md): re-record.

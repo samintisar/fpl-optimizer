@@ -6,14 +6,13 @@
 use std::collections::{BTreeSet, HashMap};
 
 use fplopt_optimize::GwPlan;
-use fplopt_optimize::chips::chip_value;
 use fplopt_optimize::entry::{SquadSpec, season_label};
 
 use crate::chip_calls::ChipCalls;
 use crate::context::PlanContext;
 use crate::planner::{CHIP_LABELS, ChipOptions, UserPlan, chip_label};
 use crate::summary::{PlanChange, PlanSummary, plan_summary};
-use crate::util::{escape as e, py_g, uk_time};
+use crate::util::{escape as e, uk_time};
 
 pub const MAX_MESSAGE: usize = 4096;
 const ARROW: &str = "→";
@@ -31,7 +30,8 @@ fn moves(g: &GwPlan, names: &HashMap<i64, String>, hit_cost: i64) -> String {
         .map(|t| format!("{} {ARROW} {}", name(names, t.out_key), name(names, t.in_key)))
         .collect();
     let moves = moves.join(", ");
-    let hit = if g.hits != 0 { format!(" (−{} hit)", hit_cost * g.hits) } else { String::new() };
+    let hit =
+        if g.hits != 0 { format!(" (−{} pts hit)", hit_cost * g.hits) } else { String::new() };
     e(if moves.is_empty() { "no transfers" } else { &moves }) + &hit
 }
 
@@ -206,17 +206,6 @@ pub fn plan_text(plan: &UserPlan) -> String {
     }
 }
 
-/// Where the prices came from: FPL live (when) or the data's snapshot.
-pub fn prices_line(context: &PlanContext) -> String {
-    match context.prices_at {
-        Some(at) => format!("Prices live from FPL at {} (UK)", uk_time(at)),
-        None => format!(
-            "Prices from the data's snapshot ({} UK): FPL couldn't be reached",
-            uk_time(context.bootstrap_at.unwrap_or(context.created_at))
-        ),
-    }
-}
-
 /// The re-run's message when only the chip call changed (after the chip section).
 pub const UNCHANGED: &str = "Your transfers and captain are unchanged: /plan";
 
@@ -304,146 +293,112 @@ pub fn scenario_label(label: &str) -> String {
         .join(" + ")
 }
 
-/// `/chips` (information only): the chips still unused, the best chip plan over the horizon
-/// and the solved scenarios against holding every chip.
-pub fn chips_text(options: &ChipOptions, shown: usize) -> String {
+/// `/chips` (information only, spec *`/chips`*).
+pub fn chips_text(options: &ChipOptions) -> String {
     let (context, rules, params) = (&options.context, &options.rules, &options.params);
     let gw_map = context.gw_index_map();
     let gw_of: HashMap<i64, i64> = gw_map.iter().map(|(g, i)| (*i, *g)).collect();
     let used: BTreeSet<i64> = options.state.chips_used.iter().map(|(cid, _)| *cid).collect();
     let mut windows: Vec<_> = rules.chips.iter().collect();
-    windows.sort_by_key(|w| (w.start, w.chip_id));
-    let unused: Vec<String> = windows
-        .iter()
-        .filter(|w| !used.contains(&w.chip_id) && w.stop >= context.gw_index)
-        .map(|w| {
-            format!(
-                "{} (until GW{})",
-                chip_label(&w.name),
-                gw_of.get(&w.stop).copied().unwrap_or(w.stop)
-            )
-        })
-        .collect();
+    windows.sort_by_key(|w| (w.stop, w.start, w.chip_id));
     let objectives = &options.plans.scenario_objectives;
-    let objective =
-        |label: &str| objectives.iter().rev().find(|(l, _)| l == label).map(|(_, v)| *v);
-    let base = objective("none").unwrap_or(0.0);
+    let base = objectives.iter().rev().find(|(l, _)| l == "none").map_or(0.0, |(_, v)| *v);
     let best = options.plans.best();
-    let horizon = best.gws.len();
-    let last = best.gws.last().expect("a plan has GWs").gw;
-    let unused = unused.join(", ");
-    let mut best_line =
-        format!("<b>Best over the next {horizon} GWs:</b> {}", e(&scenario_label(&best.scenario)));
-    if best.scenario != "none" {
-        best_line += &format!(", {:+.1} xP vs holding every chip", best.total_objective() - base);
-    }
+    let names = context.names();
     let mut lines = vec![
-        format!("<b>GW{} chips</b> · information only", context.gw),
-        if params.chip_value_left.is_some() {
-            "Tested on 2023-25: this planner beat no chips, but not simple rules convincingly."
-                .to_string()
+        format!("<b>GW{} chips</b> · for information: your /plan doesn't use them", context.gw),
+        if best.scenario == "none" {
+            format!("Best {}: keep your chips", over(best.gws.len()))
         } else {
-            "The chip planner isn't tested yet: weigh this against your own judgement.".to_string()
+            format!(
+                "Best {}: {} ({:+.1} pts vs keeping your chips)",
+                over(best.gws.len()),
+                e(&scenario_label(&best.scenario)),
+                best.total_objective() - base
+            )
         },
-        format!("Unused chips: {}", e(if unused.is_empty() { "none" } else { &unused })),
-        prices_line(context),
-        String::new(),
-        best_line,
     ];
-    if best.scenario != "none" && best.first().chip.is_some() {
-        let names = context.names();
-        lines.push(format!(
-            "This GW with it: {}; captain {}",
-            moves(best.first(), &names, rules.hit_cost),
-            e(name(&names, best.first().captain))
-        ));
+    let first = best.first();
+    match first.chip.as_deref() {
+        Some(chip @ ("freehit" | "wildcard")) if best.scenario != "none" => {
+            let positions: HashMap<i64, i64> =
+                context.pool.iter().map(|p| (p.player_key, p.element_type)).collect();
+            lines.push(String::new());
+            lines.push(format!("<b>Your {} team</b>", chip_label(chip)));
+            for (pos, label) in crate::summary::POSITIONS {
+                let players: Vec<&str> = first
+                    .starters
+                    .iter()
+                    .filter(|k| positions.get(k).copied() == Some(pos))
+                    .map(|&k| name(&names, k))
+                    .collect();
+                if !players.is_empty() {
+                    lines.push(format!("{label} {}", e(&players.join(", "))));
+                }
+            }
+            let bench: Vec<&str> = first.bench.iter().map(|&k| name(&names, k)).collect();
+            lines.push(format!("Bench {}", e(&bench.join(", "))));
+            lines.push(format!("Captain {}", e(name(&names, first.captain))));
+        }
+        Some(_) if best.scenario != "none" => {
+            lines.push(format!(
+                "This week with it: {}; captain {}",
+                moves(first, &names, rules.hit_cost),
+                e(name(&names, first.captain))
+            ));
+        }
+        _ => {}
     }
     if !options.singles.is_empty() {
+        let mut singles: Vec<(&str, f64)> = CHIP_LABELS
+            .iter()
+            .filter_map(|(chip, _)| options.single(chip))
+            .map(|(label, value)| (label.as_str(), value - base))
+            .collect();
+        singles.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         lines.push(String::new());
-        lines.push("Each chip on its own, in its most promising GW (xP vs no chip):".into());
-        for (chip, _) in CHIP_LABELS {
-            if let Some((label, value)) = options.single(chip) {
-                lines.push(format!("· {}: {:+.1}", e(&scenario_label(label)), value - base));
-            }
+        lines.push("<b>Each chip in its best week</b>".into());
+        for (label, gain) in singles {
+            lines.push(format!("· {}: {gain:+.1}", e(&scenario_label(label))));
         }
     }
-    // dict(scenario_objectives), sorted by objective (stable)
-    let mut unique: Vec<(String, f64)> = Vec::new();
-    for (label, value) in objectives {
-        match unique.iter_mut().find(|(l, _)| l == label) {
-            Some(slot) => slot.1 = *value,
-            None => unique.push((label.clone(), *value)),
+    // Chips left, grouped by the GW their window ends.
+    let mut groups: Vec<(i64, Vec<&str>)> = Vec::new();
+    for w in windows.iter().filter(|w| !used.contains(&w.chip_id) && w.stop >= context.gw_index) {
+        let last = gw_of.get(&w.stop).copied().unwrap_or(w.stop);
+        match groups.last_mut() {
+            Some((g, chips)) if *g == last => chips.push(chip_label(&w.name)),
+            _ => groups.push((last, vec![chip_label(&w.name)])),
         }
     }
-    let mut ranked_scenarios = unique.clone();
-    ranked_scenarios.sort_by(|a, b| (-a.1).partial_cmp(&-b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let left: Vec<String> = groups
+        .iter()
+        .map(|(last, chips)| format!("{} (until GW{last})", chips.join(", ")))
+        .collect();
     lines.push(String::new());
-    lines.push("Options the solver checked (xP vs no chip):".into());
-    for (label, value) in ranked_scenarios.iter().take(shown) {
-        lines.push(format!("· {}: {:+.1}", e(&scenario_label(label)), value - base));
-    }
-    let mut solved: BTreeSet<&str> = unique.iter().map(|(l, _)| l.as_str()).collect();
-    solved.extend(options.singles.iter().map(|(_, (l, _))| l.as_str()));
-    let unsolved: BTreeSet<&str> = options
-        .plans
-        .scenario_bounds
+    let left = if left.is_empty() { "none".to_string() } else { left.join("; ") };
+    lines.push(format!("Chips left: {}", e(&left)));
+    lines.push("A chip only shows a gain if it beats saving it for later.".into());
+    let solved: BTreeSet<&str> = objectives
         .iter()
         .map(|(l, _)| l.as_str())
-        .filter(|l| !solved.contains(l))
+        .chain(options.singles.iter().map(|(_, (l, _))| l.as_str()))
         .collect();
-    let not_optimal: BTreeSet<&str> =
-        options.plans.search.not_optimal.iter().map(|(l, _)| l.as_str()).collect();
-    let stopped = unsolved.intersection(&not_optimal).count();
-    let skipped = unsolved.len() - stopped;
-    if ranked_scenarios.len() > shown {
-        lines.push(format!("· … {} more, all lower", ranked_scenarios.len() - shown));
-    }
-    if skipped > 0 {
-        lines.push(format!(
-            "{skipped} other options were ruled out: provably no better than the best."
-        ));
-    }
+    let stopped = options
+        .plans
+        .search
+        .not_optimal
+        .iter()
+        .filter(|(l, _)| !solved.contains(l.as_str()))
+        .count();
     if stopped > 0 {
-        lines.push(format!(
-            "{stopped} option(s) not settled: the solver hit its time limit before finding a plan \
-             for them."
-        ));
+        lines.push("Some options ran out of time, so this may be incomplete.".into());
     }
-    let how = if params.chip_value_left.is_some() {
-        let last_index =
-            gw_map.get(&last).copied().unwrap_or(context.gw_index + best.gws.len() as i64 - 1);
-        let mut held = Vec::new();
-        for w in &windows {
-            if used.contains(&w.chip_id) || w.stop <= last_index || w.start > last_index + 1 {
-                continue;
-            }
-            let value = chip_value(params, &w.name, w.stop - last_index, 1, false);
-            held.push(format!("{} {value:.1}", chip_label(&w.name)));
-        }
-        let held = held.join(", ");
-        format!(
-            "How to read it: a chip still held after GW{last} counts as worth its estimated best \
-             use in the rest of its window ({} xP, from backtests); a chip whose window ends \
-             sooner is worth nothing if held. So a chip wins only if it beats holding it. The \
-             bot's plans don't play chips.",
-            e(if held.is_empty() { "none" } else { &held })
-        )
+    lines.push(if params.chip_value_left.is_some() {
+        "Tested on 2023–25: beat playing no chips, not clearly better than simple rules.".into()
     } else {
-        let values: Vec<String> = CHIP_LABELS
-            .iter()
-            .filter_map(|(chip, label)| {
-                params.chip_value.get(*chip).map(|v| format!("{label} {}", py_g(*v)))
-            })
-            .collect();
-        format!(
-            "How to read it: a chip still held after GW{last} counts as worth a guessed value ({} \
-             xP); a chip whose window ends sooner is worth nothing if held. So a chip wins only if \
-             it beats that guess. The bot's plans don't play chips.",
-            values.join(", ")
-        )
-    };
-    lines.push(String::new());
-    lines.push(how);
+        "The chip planner isn't tested yet: weigh it against your own judgement.".into()
+    });
     lines.join("\n")
 }
 
