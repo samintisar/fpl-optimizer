@@ -19,14 +19,15 @@ use serde_json::Value;
 use crate::chip_calls::{ChipCalls, V6_FROM_GW_INDEX, compute_chip_calls, v6_params};
 use crate::context::{ContextStore, PlanContext, with_live_prices};
 use crate::messages::{
-    MAX_MESSAGE, changes_text, chip_failure_section, chip_section, chips_text, plan_text,
-    split_message, squad_text,
+    MAX_MESSAGE, UNCHANGED, chip_failure_section, chip_section, chips_text, plan_text,
+    split_message, squad_text, update_text,
 };
 use crate::planner::{
     BotFpl, ChipOptions, UnknownTeam, UserPlan, chip_options, chip_params, decision_summary,
     entry_message, import_user_squad, is_not_found, live_params, plan_user, plans_json, rules_for,
 };
 use crate::store::{ChipCallRow, Record, User, UserStore, dumps, ordered_object};
+use crate::summary::plan_change;
 use crate::util::{casefold, escape as e, is_digits, py_repr_str, py_split, uk_time};
 
 pub const HELP: &str = "<b>FPL optimizer</b>: transfer plans for your FPL team, from the model that passed its 2025/26 test. You make the final call.
@@ -822,13 +823,11 @@ impl BotService {
             Ok(outcome)
         };
         let text = match (kind, &last) {
-            ("alert2", Some(last)) => {
-                let changes = changes_text(last.decision.as_ref(), &decision, &context.names());
-                if changes.is_empty() && section.is_none() {
-                    return finish(base, AlertOutcome::Silent);
-                }
-                plan_text(&plan)
-            }
+            ("alert2", Some(last)) => match plan_change(last.decision.as_ref(), &plan) {
+                None if section.is_none() => return finish(base, AlertOutcome::Silent),
+                None => UNCHANGED.to_string(),
+                Some(change) => update_text(&change),
+            },
             _ => plan_text(&plan),
         };
         let text = match &section {

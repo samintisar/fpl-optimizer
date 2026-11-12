@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::chip_calls::ChipCalls;
 use crate::context::PlanContext;
 use crate::planner::{CHIP_LABELS, ChipOptions, Decision, UserPlan, chip_label};
-use crate::summary::{PlanSummary, plan_summary};
+use crate::summary::{PlanChange, PlanSummary, plan_summary};
 use crate::util::{escape as e, py_g, uk_time};
 
 pub const MAX_MESSAGE: usize = 4096;
@@ -218,61 +218,54 @@ pub fn prices_line(context: &PlanContext) -> String {
     }
 }
 
-fn pairs(transfers: &Value) -> Vec<(i64, i64)> {
-    transfers
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .map(|p| (p[0].as_i64().unwrap_or_default(), p[1].as_i64().unwrap_or_default()))
-                .collect()
-        })
-        .unwrap_or_default()
+/// The re-run's message when only the chip call changed (after the chip section).
+pub const UNCHANGED: &str = "Your transfers and captain are unchanged: /plan";
+
+fn plain_moves(moves: &[(String, String)]) -> String {
+    if moves.is_empty() {
+        return "no transfers".into();
+    }
+    let parts: Vec<String> =
+        moves.iter().map(|(o, i)| format!("sell {}, buy {}", e(o), e(i))).collect();
+    parts.join("; ")
 }
 
-/// What changed in plan 1's decision for this GW (`planner::decision_summary`) since the last
-/// alert (`before`: its stored decision); empty if nothing did.
-pub fn changes_text(
-    before: Option<&Value>,
-    after: &Decision,
-    names: &HashMap<i64, String>,
-) -> Vec<String> {
-    let Some(before) = before else { return Vec::new() };
-    let moves = |pairs: &[(i64, i64)]| {
-        let text: Vec<String> = pairs
-            .iter()
-            .map(|&(o, i)| format!("{} {ARROW} {}", name(names, o), name(names, i)))
-            .collect();
-        if text.is_empty() { "no transfers".to_string() } else { text.join(", ") }
-    };
-    let was = pairs(&before["transfers"]);
-    let now: Vec<(i64, i64)> = after.transfers.iter().map(|p| (p[0], p[1])).collect();
-    let (mut a, mut b) = (was.clone(), now.clone());
-    a.sort();
-    b.sort();
-    let mut out = Vec::new();
-    if a != b {
-        out.push(format!("Transfers changed: was {}, now {}.", moves(&was), moves(&now)));
-    }
-    let captain = before["captain"].as_i64().unwrap_or_default();
-    if captain != after.captain {
-        out.push(format!(
-            "Captain changed: was {}, now {}.",
-            name(names, captain),
-            name(names, after.captain)
+/// The "plan changed" update (spec, *Update alert*).
+pub fn update_text(c: &PlanChange) -> String {
+    let mut lines =
+        vec![format!("<b>GW{} plan changed</b> · deadline {} UK", c.gw, uk_time(c.deadline))];
+    if c.moves_changed {
+        lines.push(format!(
+            "Now: {} (was: {})",
+            plain_moves(&c.now_moves),
+            plain_moves(&c.was_moves)
         ));
     }
-    let vice = before["vice"].as_i64().unwrap_or_default();
-    if vice != after.vice {
-        out.push(format!(
-            "Vice changed: was {}, now {}.",
-            name(names, vice),
-            name(names, after.vice)
-        ));
+    for (label, (now, was)) in [("Captain", &c.captain), ("Vice", &c.vice)] {
+        lines.push(match was {
+            Some(was) => format!("{label}: {} (was {})", e(now), e(was)),
+            None => format!("{label}: {} (unchanged)", e(now)),
+        });
     }
-    out
+    if !c.now_points.is_empty() || !c.was_points.is_empty() {
+        let list = |p: &[(String, f64)]| {
+            let parts: Vec<String> = p.iter().map(|(n, x)| format!("{} {x:.1}", e(n))).collect();
+            parts.join(", ")
+        };
+        let what = if c.horizon == 1 {
+            "pts this GW".to_string()
+        } else {
+            format!("pts over the next {} GWs", c.horizon)
+        };
+        let mut why = format!("Why ({what}): now {}", list(&c.now_points));
+        if !c.was_points.is_empty() {
+            why += &format!("; before {}", list(&c.was_points));
+        }
+        lines.push(why);
+    }
+    lines.push("Full plan and team: /plan".into());
+    lines.join("\n")
 }
-
 /// The imported squad, for /register's reply.
 pub fn squad_text(context: &PlanContext, spec: &SquadSpec, entry_id: i64) -> String {
     let names: HashMap<i64, &str> =
@@ -889,25 +882,34 @@ b",
         assert_eq!(scenario_label("wildcard@gw5+3xc@gw9"), "Wildcard GW5 + Triple Captain GW9");
     }
 
-    // Python test_changes_text.
     #[test]
-    fn changes() {
-        let names: HashMap<i64, String> = [(1, "A"), (2, "B"), (3, "C"), (4, "D"), (5, "E")]
-            .into_iter()
-            .map(|(k, v)| (k, v.to_string()))
-            .collect();
-        let before = serde_json::json!({"transfers": [[1, 2]], "captain": 3, "vice": 4});
-        let same = Decision { transfers: vec![[1, 2]], captain: 3, vice: 4 };
-        assert!(changes_text(None, &same, &names).is_empty());
-        assert!(changes_text(Some(&before), &same, &names).is_empty());
-        let after = Decision { transfers: vec![[1, 5]], captain: 4, vice: 3 };
+    fn update_text_says_what_changed() {
+        let change = crate::summary::PlanChange {
+            gw: 12,
+            deadline: chrono::Utc.with_ymd_and_hms(2026, 11, 21, 11, 0, 0).unwrap(),
+            horizon: 6,
+            was_moves: vec![("Wissa".into(), "Strand Larsen".into())],
+            now_moves: vec![("Wissa".into(), "Gonzalo".into())],
+            moves_changed: true,
+            captain: ("Haaland".into(), None),
+            vice: ("Salah".into(), Some("Saka".into())),
+            now_points: vec![("Gonzalo".into(), 31.4)],
+            was_points: vec![("Strand Larsen".into(), 30.6)],
+        };
         assert_eq!(
-            changes_text(Some(&before), &after, &names),
-            [
-                "Transfers changed: was A → B, now A → E.",
-                "Captain changed: was C, now D.",
-                "Vice changed: was D, now C."
-            ]
+            update_text(&change),
+            "<b>GW12 plan changed</b> · deadline Sat 21 Nov 11:00 UK\n\
+             Now: sell Wissa, buy Gonzalo (was: sell Wissa, buy Strand Larsen)\n\
+             Captain: Haaland (unchanged)\n\
+             Vice: Salah (was Saka)\n\
+             Why (pts over the next 6 GWs): now Gonzalo 31.4; before Strand Larsen 30.6\n\
+             Full plan and team: /plan"
         );
+        let mut c = change;
+        c.moves_changed = false;
+        c.now_points.clear();
+        c.was_points.clear();
+        let text = update_text(&c);
+        assert!(!text.contains("Now:") && !text.contains("Why"), "{text}");
     }
 }

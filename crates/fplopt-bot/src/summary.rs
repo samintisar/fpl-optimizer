@@ -239,6 +239,93 @@ pub fn plan_summary(plan: &UserPlan) -> Option<PlanSummary> {
     })
 }
 
+/// What changed in plan 1's decision since the last alert (spec, *Update alert*).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanChange {
+    pub gw: i64,
+    pub deadline: DateTime<Utc>,
+    pub horizon: usize,
+    pub was_moves: Vec<(String, String)>,
+    pub now_moves: Vec<(String, String)>,
+    pub moves_changed: bool,
+    /// (now, Some(was) if it changed)
+    pub captain: (String, Option<String>),
+    pub vice: (String, Option<String>),
+    /// Incoming players new to the plan / dropped from it, with their horizon points (players
+    /// without xP rows left out).
+    pub now_points: Vec<(String, f64)>,
+    pub was_points: Vec<(String, f64)>,
+}
+
+fn pairs(transfers: &serde_json::Value) -> Vec<(i64, i64)> {
+    transfers
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|p| (p[0].as_i64().unwrap_or_default(), p[1].as_i64().unwrap_or_default()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The change from `before` (the stored decision JSON) to `after`, or None if nothing
+/// changed (or there is no earlier decision). `points(key)`: a player's horizon points.
+pub fn change_of(
+    before: Option<&serde_json::Value>,
+    after: &crate::planner::Decision,
+    names: &HashMap<i64, String>,
+    points: &dyn Fn(i64) -> Option<f64>,
+) -> Option<PlanChange> {
+    let before = before?;
+    let was = pairs(&before["transfers"]);
+    let now: Vec<(i64, i64)> = after.transfers.iter().map(|p| (p[0], p[1])).collect();
+    let (mut a, mut b) = (was.clone(), now.clone());
+    a.sort();
+    b.sort();
+    let captain = before["captain"].as_i64().unwrap_or_default();
+    let vice = before["vice"].as_i64().unwrap_or_default();
+    let moves_changed = a != b;
+    if !moves_changed && captain == after.captain && vice == after.vice {
+        return None;
+    }
+    let named = |m: &[(i64, i64)]| -> Vec<(String, String)> {
+        m.iter().map(|&(o, i)| (name(names, o), name(names, i))).collect()
+    };
+    let ins = |m: &[(i64, i64)], other: &[(i64, i64)]| -> Vec<(String, f64)> {
+        m.iter()
+            .filter(|(_, i)| !other.iter().any(|(_, j)| j == i))
+            .filter_map(|&(_, i)| points(i).map(|p| (name(names, i), p)))
+            .collect()
+    };
+    let changed = |was: i64, now: i64| (name(names, now), (was != now).then(|| name(names, was)));
+    Some(PlanChange {
+        gw: 0,
+        deadline: DateTime::<Utc>::MIN_UTC,
+        horizon: 0,
+        was_moves: named(&was),
+        now_moves: named(&now),
+        moves_changed,
+        captain: changed(captain, after.captain),
+        vice: changed(vice, after.vice),
+        now_points: if moves_changed { ins(&now, &was) } else { Vec::new() },
+        was_points: if moves_changed { ins(&was, &now) } else { Vec::new() },
+    })
+}
+
+/// `change_of` for `plan` (its GW, deadline, horizon and xP filled in).
+pub fn plan_change(before: Option<&serde_json::Value>, plan: &UserPlan) -> Option<PlanChange> {
+    let best = *ranked(&plan.plans).first()?;
+    let gws: Vec<i64> = best.gws.iter().map(|g| g.gw).collect();
+    let decision = crate::planner::decision_summary(plan);
+    let points = |k: i64| horizon_points(&plan.context.xp, k, &gws);
+    let mut change = change_of(before, &decision, &plan.context.names(), &points)?;
+    change.gw = plan.context.gw;
+    change.deadline = plan.context.deadline;
+    change.horizon = best.gws.len();
+    Some(change)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +374,27 @@ mod tests {
                 (8, vec![("WOL".to_string(), true)]),
             ]
         );
+    }
+
+    #[test]
+    fn plan_change_compares_moves_captain_and_vice() {
+        let names: HashMap<i64, String> = [(1, "A"), (2, "B"), (3, "C"), (4, "D"), (5, "E")]
+            .into_iter()
+            .map(|(k, v)| (k, v.to_string()))
+            .collect();
+        let before = serde_json::json!({"transfers": [[1, 2]], "captain": 3, "vice": 4});
+        let same = crate::planner::Decision { transfers: vec![[1, 2]], captain: 3, vice: 4 };
+        assert!(change_of(Some(&before), &same, &names, &|_| None).is_none());
+        assert!(change_of(None, &same, &names, &|_| None).is_none());
+        let after = crate::planner::Decision { transfers: vec![[1, 5]], captain: 3, vice: 2 };
+        let points = |k: i64| Some(k as f64 * 10.0);
+        let c = change_of(Some(&before), &after, &names, &points).unwrap();
+        assert_eq!(c.was_moves, vec![("A".to_string(), "B".to_string())]);
+        assert_eq!(c.now_moves, vec![("A".to_string(), "E".to_string())]);
+        assert!(c.moves_changed);
+        assert_eq!(c.captain, ("C".to_string(), None));
+        assert_eq!(c.vice, ("B".to_string(), Some("D".to_string())));
+        assert_eq!(c.now_points, vec![("E".to_string(), 50.0)]);
+        assert_eq!(c.was_points, vec![("B".to_string(), 20.0)]);
     }
 }
