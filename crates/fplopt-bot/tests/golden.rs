@@ -157,23 +157,12 @@ fn bot_session_matches_golden() {
         .collect();
     assert!(!chips.is_empty());
     for text in chips {
-        assert!(
-            text.contains(
-                " · for information: your /plan doesn't use them
-"
-            ),
-            "{text}"
-        );
-        assert!(text.contains("<b>Each chip in its best week</b>"), "{text}");
-        assert!(
-            text.contains(
-                "
-Chips left: "
-            ),
-            "{text}"
-        );
-        assert!(text.contains("A chip only shows a gain if it beats saving it for later."));
-        assert!(!text.contains("solver") && !text.contains("xP"), "{text}");
+        assert!(text.contains("\nMy advice: "), "{text}");
+        assert!(text.contains("\n<b>Your chips</b>\n· "), "{text}");
+        assert!(text.contains(" unlocks in GW"), "{text}");
+        for jargon in ["solver", "xP", "for information", "Tested on", "best week</b>"] {
+            assert!(!text.contains(jargon), "{jargon}: {text}");
+        }
         assert!(text.chars().count() <= fplopt_bot::messages::MAX_MESSAGE);
     }
     if std::env::var("FPLOPT_UPDATE_GOLDEN").is_ok_and(|v| v == "1") {

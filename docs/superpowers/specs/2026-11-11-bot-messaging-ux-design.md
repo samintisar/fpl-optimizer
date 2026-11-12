@@ -106,50 +106,46 @@ Removed: the team ID, the "xP data from" time, the live-prices line, "Chips are 
 GW12 plan changed · deadline Sat 21 Nov 11:00 UK
 Now: sell Wissa, buy Gonzalo (was: sell Wissa, buy Strand Larsen)
 Captain: Haaland (unchanged)
-Why (pts over the next 6 GWs): now Gonzalo 31.4; before Strand Larsen 30.6
+Why: expected pts over the next 6 GWs: Gonzalo 31.4 (vs Strand Larsen 30.6 in the old plan)
 Full plan and team: /plan
 ```
 
 - "Now" and "was" show this GW's moves ("no transfers" when empty). When plan 1 takes a hit, " (−4 pts hit)" follows the "Now" moves, before "(was: …)". The "Now/was" line appears only when the moves changed.
 - The captain and vice lines show "(was X)" or "(unchanged)".
-- The "Why" line compares the new incoming players' horizon points with the earlier ones', for players still in the frame. It is left out when the moves are unchanged.
-- The "Why" line appears only when there is a newly bought player to point to (not for a dropped buy alone), and then only when the moves changed.
+- The "Why" line appears only when the moves changed and there is a newly bought player to point to; the dropped buys follow in "(vs … in the old plan)" when they are still in the frame.
 - The chip rules for `alert2` don't change (`service.rs` `chip_text`). The chip section, when shown, goes above the update. When only the chip call changed, the update is the chip section, then "Your transfers and captain are unchanged: /plan".
 - The re-run's first alert for a user this GW (no `alert24` sent) is still the full plan, not an update.
 
 ### Chip section in the 24-hour alert
 
-```
-Chip: play Bench Boost this week (+7.4 pts vs keeping it)
-  The simple rule agrees: your bench is expected to score 11.6 (it plays at 10.9+)
-Chips left: Free Hit (until GW19, best week GW16), Bench Boost (until GW19)
-```
+(Reworded 2026-11-12 after the first deploy: "simple rule", "best week" and "expires after" read as jargon.)
 
-When the simple rule disagrees, the line reads "A simpler rule would play Bench Boost (your bench is expected to score 11.6; it plays at 10.9+)".
-
-The headline:
+```
+Chip: play Bench Boost this week (about +7.4 pts vs saving it)
+  Rule of thumb agrees: your bench is expected to score 11.6 pts (it plays at 10.9+)
+Your chips: Free Hit (use by GW19, best in GW16), Bench Boost (use by GW19, playing now)
+```
 
 | Case | Headline |
 | --- | --- |
 | Keep | "Chip: keep your chips this week" |
-| Last chance | "Chip: play Free Hit now (2 chips left and 2 GWs before they expire after GW19)"; "1 chip" and "1 GW" when the count is 1 |
-| Planner plays a chip while another is forced | "  2 chips left and 2 GWs before they expire after GW19: play one each GW" (same plurals) |
+| Last chance | "Chip: play Free Hit now, or you'll lose it: 2 chips and 2 GWs left until GW19"; "1 chip" and "1 GW" when the count is 1 |
+| Planner plays a chip while another is forced | "  You have 2 chips and 2 GWs left until GW19: play one each GW" (same plurals) |
 | Free Hit or Wildcard headline | append " · your Free Hit team: /chips" (or Wildcard) |
 | Chip check failed | "Chip: couldn't check chips this time, try /chips" |
 
-The simple rule's line:
-- "The simple rule agrees: …" when it matches the headline, or "A simpler rule would play X (…)" / "A simpler rule would keep them (…)" when it doesn't.
-- The reasons: captain "your captain is expected to score 7.0 (it plays at 8.3+)"; bench as above; Free Hit "4 of your players have no game (it plays at 4+)"; Wildcard "a Wildcard gains 3.0 pts (it plays at 12.9+)"; last chance "last chance before they expire"; keep "captain expected 7.0, bench expected 11.6".
+The rule of thumb's line:
+- Agrees: "Rule of thumb agrees: <reason>"; both keep: "Rule of thumb: keep them too".
+- Disagrees: "Rule of thumb would play X: <reason>" / "Rule of thumb would keep them: <reason>".
+- Reasons: captain "your captain is expected to score 7.0 pts (it plays at 8.3+)"; bench "your bench is expected to score 11.6 pts (it plays at 10.9+)"; Free Hit "4 of your players have no game (it plays at 4+)"; Wildcard "a Wildcard would gain 3.0 pts (it plays at 12.9+)"; last chance "it's your last chance"; keep "your captain is expected to score 7.0 pts and your bench 11.6".
 
-The chip list:
-- "Chips left" notes show "expires after GW19" for an expiring chip, ", playing now" for the headline chip and ", best week GWn". The rule that hides the best week next to a keep call stays.
-- The "Evidence" line moves to `/chips`.
+"Your chips" lists the chips usable now: "use by GWn", ", playing now" for the headline chip, ", best in GWn" otherwise (hidden next to a keep call when the best GW is this one); "Your chips: none to play right now" when there are none.
 
 ### `/chips`
 
 ```
-GW12 chips · for information: your /plan doesn't use them
-Best over the next 6 GWs: Free Hit this week (+13.5 pts vs keeping your chips)
+GW12 chips
+My advice: play Free Hit this week (about +13.5 pts).
 
 Your Free Hit team
 GK …
@@ -159,26 +155,20 @@ FWD …
 Bench …
 Captain Haaland
 
-Each chip in its best week
-· Free Hit GW12: +13.5
-· Wildcard GW12: +11.5
-· Triple Captain GW12: +5.0
-· Bench Boost GW15: −1.0
-
-Chips left: Wildcard, Free Hit, Bench Boost, Triple Captain (until GW19); Wildcard, Free Hit, Bench Boost, Triple Captain (until GW38)
-A chip only shows a gain if it beats saving it for later.
-Tested on 2023–25: beat playing no chips, not clearly better than simple rules.
+Your chips
+· Wildcard: use by GW19. Best this week, about +11.5 pts vs saving it.
+· Free Hit: use by GW19. Best this week, about +13.5 pts vs saving it.
+· Bench Boost: use by GW19. Not worth playing over the next 6 GWs: even in GW15, its best week, it would cost you about 1 pt compared with saving it.
+· Triple Captain: use by GW19. Best this week, about +5.0 pts vs saving it.
+· A new set (Wildcard, Free Hit, Bench Boost, Triple Captain) unlocks in GW20.
 ```
 
-- **Best scenario with Bench Boost or Triple Captain:** "This week with it: <moves>; captain X" in place of the team.
-- **Chips left:** within each group the chips are in the order Wildcard, Free Hit, Bench Boost, Triple Captain.
-- **One-GW horizon:** "Best this GW: …" replaces "Best over the next N GWs: …".
-- **Best is no chip:** "Best over the next 6 GWs: keep your chips".
-- **Multi-chip scenarios:** they read as today's scenario labels ("Wildcard GW5 + Triple Captain GW9").
-- **Untested planner** (no `chip_value_left`): the last line reads "The chip planner isn't tested yet: weigh it against your own judgement."
-- **An option ran out of time:** "Some options ran out of time, so this may be incomplete."
-- **Removed:** the "Options the solver checked" list, the "ruled out" count and the "How to read it" paragraph.
-- **The checks list** is sorted by gain, descending.
+- **Advice line:** "My advice: keep your chips this week." when no chip helps; when the best plan plays a chip later, "My advice: keep your chips this week. Best plan over the next 6 GWs: Bench Boost in GW15, then Triple Captain in GW17 (about +3.1 pts)."
+- **Best plan with Bench Boost or Triple Captain this week:** "This week with it: <moves>; captain X" in place of the team.
+- **Your chips:** the chips usable now in the order Wildcard, Free Hit, Bench Boost, Triple Captain, each with "use by GWn" and its best single-chip week ("Best this week" / "Best in GWn", about +X pts vs saving it) or "Not worth playing …" with the cost (whole points; "this week" when the horizon is one GW). Chips of later windows read "A new set (…) unlocks in GWn".
+- **Untested planner** (no `chip_value_left`): a last line "This chip advice is rough: trust your own judgement."
+- **An option ran out of time:** "I ran out of time checking some options, so this may be incomplete."
+- **Removed:** "for information", the per-chip "best week" list with bare numbers, "A chip only shows a gain if it beats saving it for later." and the "Tested on 2023–25" line.
 
 ### Other commands
 
