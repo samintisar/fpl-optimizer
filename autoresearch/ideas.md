@@ -445,7 +445,25 @@ keepers as idea 9; `diag-start-price.txt`); keeper P(start) sharpening within th
 finishing × price (season noise dominates, 2021 0.72–0.76 in every band;
 `diag-finish-price-over.txt`).
 
+Looked at 2026-11-12, no lead: **double gameweeks** (head walk `diag-head-05d4b12`, 2017–22,
+`diag-dgw.txt`). Double-GW fixture rows are calibrated like singles: all rows h0 P(start)
+0.324 vs 0.323 / 0.324 per leg, E[minutes] 29.1 vs 29.0; regulars (p_start > 0.7) per
+player-GW xP 6.06 vs 6.03 points at h0, 5.87 vs 5.86 at h1–5; P(start both legs) under
+independence 0.746 vs 0.746 realized at h0 (0.676 vs 0.710 at h1–5, so legs aren't
+anti-correlated). Regulars' first leg starts 0.821 vs 0.852 at h0 but the sign flips by
+season (2019 both legs −8 to −13 pp, 2022 leg 2 +4 pp). Double-row bias −0.024 at h0 against
+−0.009 for singles, 9 % of rows: ≪ 1 bp of SSE. Triple-fixture rows (2019/20 restart, n 38
+at h0) carry one P(start) for all three legs, too few to matter.
+
 ## Needs the user (not the loop's to do)
+
+- **2026-11-12: no experiments tonight.** `last_checked_gw` is still 10 (bootstrap
+  2026-11-12T023050Z; next deadline GW11 2026-11-21), so no monitor. `sync.sh raw` copied 28
+  new files. The eval hash is still 2c77d376 (head baseline `db397365fe-2c77d376`), so the
+  crowd (idea 13, b3a642b) stays unscoreable, and nothing on `research` has touched the
+  calibration table, so `optimizer:v1` decision runs (idea 5) are still blocked. One new
+  diagnostic, double gameweeks (`diag-dgw.txt`): calibrated, no lead (see *Looked at*). No
+  variants spent; the ledger is unchanged: 54 scored (14 KEEP, 40 DISCARD), 5 ERROR.
 
 - **2026-11-10 (GW10 report)**: `last_checked_gw` 10, monitor done (`reports/2026-11-10-gw10.md`).
   The eval hash changed (adeb6c64 → 2c77d376) after `weekly.sh` refreshed the develop data;
