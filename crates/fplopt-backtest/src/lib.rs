@@ -11,6 +11,7 @@ pub mod eval;
 pub mod evaluate;
 pub mod forecast_prices;
 pub mod gw_score;
+pub mod info_oracle;
 pub mod jitter;
 pub mod money_value;
 pub mod night_eval;
