@@ -19,8 +19,8 @@ use serde_json::Value;
 use crate::chip_calls::{ChipCalls, V6_FROM_GW_INDEX, compute_chip_calls, v6_params};
 use crate::context::{ContextStore, PlanContext, with_live_prices};
 use crate::messages::{
-    MAX_MESSAGE, UNCHANGED, chip_failure_section, chip_section, chips_text, plan_text,
-    split_message, squad_text, update_text,
+    MAX_MESSAGE, UNCHANGED, chip_failure_section, chip_section, chips_text,
+    free_transfers as free_left, money, plan_text, split_message, squad_text, update_text,
 };
 use crate::planner::{
     BotFpl, ChipOptions, UnknownTeam, UserPlan, chip_options, chip_params, decision_summary,
@@ -28,21 +28,21 @@ use crate::planner::{
 };
 use crate::store::{ChipCallRow, Record, User, UserStore, dumps, ordered_object};
 use crate::summary::plan_change;
-use crate::util::{casefold, escape as e, is_digits, py_repr_str, py_split, uk_time};
+use crate::util::{casefold, escape as e, is_digits, py_repr_str, py_split};
 
-pub const HELP: &str = "<b>FPL optimizer</b>: transfer plans for your FPL team, from the model that passed its 2025/26 test. You make the final call.
+pub const HELP: &str = "<b>FPL optimizer</b>: transfer and captain picks for your FPL team. You make the final call.
 
-/register &lt;team ID&gt; · your FPL team (the number in your team's URL)
-/plan · plans for the next deadline
-/chips · what the (untested) chip planner would do: information only
-/transfer &lt;out&gt; -&gt; &lt;in&gt; · a transfer you already made for the next GW (FPL doesn't show it before the deadline); /transfer list, /transfer undo, /transfer clear
-/setft &lt;n&gt; · correct the free transfers for the next GW (/setft clear to undo)
-/alerts on|off · the message 24 hours before each deadline (and a re-run about 2 hours before, only if the plan changes)
+/register &lt;team ID&gt; · link your FPL team (the number in your team's web address)
+/plan · this week's moves, captain and team
+/chips · when to play your chips (for information)
+/transfer &lt;out&gt; -&gt; &lt;in&gt; · a transfer you've already made this week (FPL hides it until the deadline); /transfer list, undo, clear
+/setft &lt;n&gt; · fix the number of free transfers (/setft clear to go back to FPL's count)
+/alerts on|off · a message a day before each deadline, plus a heads-up if the plan changes
 /help · this list";
 pub const ADMIN_HELP: &str = "Admin: /allow &lt;chat id&gt;, /block &lt;chat id&gt;, /users";
-pub const PENDING: &str = "Waiting for access: the admin has been asked.";
-pub const NOT_READY: &str = "The data for the next deadline isn't ready yet (it's rebuilt after each new snapshot). Try again in a few minutes.";
-const REGISTER_FIRST: &str = "Register your team first: /register &lt;team ID&gt;";
+pub const PENDING: &str = "Thanks! The admin has been asked to let you in.";
+pub const NOT_READY: &str = "I'm still updating for the next deadline. Try again in a few minutes.";
+const REGISTER_FIRST: &str = "First link your FPL team: /register &lt;team ID&gt;";
 
 /// FPL's live prices are fetched at most this often (one bootstrap for every plan in an alert
 /// run, or a burst of commands).
@@ -111,7 +111,10 @@ fn resolve(context: &PlanContext, name: &str) -> std::result::Result<i64, String
     }
     match hits.len() {
         1 => Ok(hits[0].element_id),
-        0 => Err(format!("No player called {} this season.", py_repr_str(name))),
+        0 => Err(format!(
+            "No player called {} this season. Check the spelling as FPL writes it.",
+            py_repr_str(name)
+        )),
         _ => {
             let mut options: Vec<&str> = hits.iter().map(|p| p.web_name.as_str()).collect();
             options.sort();
@@ -303,7 +306,7 @@ impl BotService {
             user = Some(self.users.add_user(chat_id, "active")?);
         }
         Ok(match user {
-            None => Err(reply(chat_id, "Send /start first.")),
+            None => Err(reply(chat_id, "Send /start to begin.")),
             Some(u) if u.status == "pending" => Err(reply(chat_id, PENDING)),
             Some(u) if u.status == "blocked" => Err(Vec::new()),
             Some(u) => Ok(u),
@@ -410,7 +413,7 @@ impl BotService {
     pub fn unknown(&self, chat_id: i64) -> Result<Vec<Reply>> {
         Ok(match self.active(chat_id)? {
             Err(replies) => replies,
-            Ok(_) => reply(chat_id, "Unknown command. /help lists them."),
+            Ok(_) => reply(chat_id, "I don't know that command. /help lists them."),
         })
     }
 
@@ -473,42 +476,50 @@ impl BotService {
         let Some(entry_id) = entry_id else {
             return Ok(reply(
                 chat_id,
-                "Usage: /register &lt;team ID&gt;, the number in your FPL team's URL \
-                 (fantasy.premierleague.com/entry/<b>1234567</b>/event/…).",
+                "Send /register &lt;team ID&gt;. It's the number in your team's web address: \
+                 fantasy.premierleague.com/entry/<b>1234567</b>/event/…",
             ));
         };
         let Some(context) = self.context()? else {
             if let Err(err) = self.fpl.entry_history(entry_id) {
                 if is_not_found(&err) {
-                    return Ok(reply(chat_id, format!("FPL has no team with ID {entry_id}.")));
+                    return Ok(reply(
+                        chat_id,
+                        format!(
+                            "FPL has no team with ID {entry_id}. Check the number in your team's web address."
+                        ),
+                    ));
                 }
                 return Err(err);
             }
             self.users.set_entry(user.user_id, entry_id)?;
-            return Ok(reply(chat_id, format!("Registered team {entry_id}.\n{NOT_READY}")));
+            return Ok(reply(chat_id, format!("Linked team {entry_id}.\n{NOT_READY}")));
         };
         let ft = self.users.free_transfers(user.user_id, context.season, context.gw)?;
         let spec = match import_user_squad(self.fpl.as_ref(), entry_id, &context, ft, &[]) {
             Ok((spec, _, _)) => spec,
             Err(err) => {
                 if let Some(unknown) = err.downcast_ref::<UnknownTeam>() {
-                    return Ok(reply(chat_id, format!("{}.", e(&unknown.0))));
+                    return Ok(reply(
+                        chat_id,
+                        format!("{}. Check the number in your team's web address.", e(&unknown.0)),
+                    ));
                 }
                 let Some(message) = entry_message(&err) else { return Err(err) };
                 self.users.set_entry(user.user_id, entry_id)?;
                 return Ok(reply(
                     chat_id,
-                    format!(
-                        "Registered team {entry_id}, but its squad can't be planned yet: {}",
-                        e(&message)
-                    ),
+                    format!("Linked team {entry_id}, but I can't plan it yet: {}", e(&message)),
                 ));
             }
         };
         self.users.set_entry(user.user_id, entry_id)?;
         self.save_squad(&user, entry_id, &spec, &context)?;
-        let text = squad_text(&context, &spec, entry_id);
-        Ok(reply(chat_id, format!("Registered.\n\n{text}\n\n/plan for the GW{} plan.", context.gw)))
+        let text = squad_text(&context, &spec);
+        Ok(reply(
+            chat_id,
+            format!("Linked team {entry_id}.\n\n{text}\n\n/plan for this week's moves."),
+        ))
     }
 
     fn save_squad(
@@ -540,13 +551,15 @@ impl BotService {
             Ok(u) => u,
             Err(replies) => return Ok(replies),
         };
-        let Some(entry_id) = user.entry_id else { return Ok(reply(chat_id, REGISTER_FIRST)) };
+        if user.entry_id.is_none() {
+            return Ok(reply(chat_id, REGISTER_FIRST));
+        }
         let Some(context) = self.context()? else { return Ok(reply(chat_id, NOT_READY)) };
         match self.make_plan(&user, &context, "plan") {
             Ok(result) => Ok(reply(chat_id, plan_text(&result))),
             Err(err) => match entry_message(&err) {
                 Some(message) => {
-                    Ok(reply(chat_id, format!("Can't plan team {entry_id}: {}", e(&message))))
+                    Ok(reply(chat_id, format!("I couldn't plan your team: {}", e(&message))))
                 }
                 None => Err(err),
             },
@@ -570,7 +583,7 @@ impl BotService {
                 Some(message) => {
                     return Ok(reply(
                         chat_id,
-                        format!("Can't plan team {entry_id}: {}", e(&message)),
+                        format!("I couldn't plan your team: {}", e(&message)),
                     ));
                 }
                 None => return Err(err),
@@ -664,7 +677,7 @@ impl BotService {
         if lower.is_empty() || lower == "list" {
             return Ok(reply(
                 chat_id,
-                format!("GW{gw} transfers you've told me about: {}", listed(&made)),
+                format!("Transfers you've told me about for GW{gw}: {}", listed(&made)),
             ));
         }
         if lower == "undo" || lower == "clear" {
@@ -678,8 +691,8 @@ impl BotService {
         let Some((out, into)) = split_transfer(command) else {
             return Ok(reply(
                 chat_id,
-                "Usage: /transfer Wissa -&gt; Gonzalo (or /transfer Wissa Gonzalo); /transfer list, \
-                 /transfer undo, /transfer clear",
+                "Send /transfer Wissa -&gt; Gonzalo (or /transfer Wissa Gonzalo). Also /transfer list, \
+                 /transfer undo, /transfer clear.",
             ));
         };
         let mut resolved = Vec::new();
@@ -709,12 +722,15 @@ impl BotService {
         Ok(reply(
             chat_id,
             format!(
-                "Recorded for GW{gw}: {}. All GW{gw} transfers: {}. Bank £{:.1}m, {} FT left. /plan \
-                 and the alerts now plan from this squad.",
+                "Got it: {} for GW{gw}{}. {} in the bank, {} left. Your plans now start from this team.",
                 listed(&[new_move]),
-                listed(&all),
-                spec.bank as f64 / 10.0,
-                spec.free_transfers
+                if all.len() > 1 {
+                    format!(" ({} transfers this GW: {})", all.len(), listed(&all))
+                } else {
+                    String::new()
+                },
+                money(spec.bank),
+                free_left(spec.free_transfers)
             ),
         ))
     }
@@ -730,7 +746,7 @@ impl BotService {
             self.users.set_free_transfers(user.user_id, context.season, context.gw, None)?;
             return Ok(reply(
                 chat_id,
-                format!("GW{}: free transfers from the import again.", context.gw),
+                format!("GW{}: back to FPL's free transfer count.", context.gw),
             ));
         }
         let n = match args {
@@ -738,15 +754,14 @@ impl BotService {
             _ => None,
         };
         let Some(n) = n else {
-            return Ok(reply(chat_id, format!("Usage: /setft &lt;0-{cap}&gt; or /setft clear")));
+            return Ok(reply(chat_id, format!("Send /setft 0–{cap}, or /setft clear.")));
         };
         self.users.set_free_transfers(user.user_id, context.season, context.gw, Some(n))?;
         Ok(reply(
             chat_id,
             format!(
-                "GW{} (deadline {}): planning with {n} free transfers.",
-                context.gw,
-                uk_time(context.deadline)
+                "GW{}: planning with {n} free transfers. (/setft clear to go back to FPL's count)",
+                context.gw
             ),
         ))
     }
@@ -762,10 +777,20 @@ impl BotService {
         };
         let Some(choice) = choice else {
             let state = if user.alerts { "on" } else { "off" };
-            return Ok(reply(chat_id, format!("Alerts are {state}. Usage: /alerts on|off")));
+            return Ok(reply(
+                chat_id,
+                format!("Alerts are {state}. Send /alerts on or /alerts off."),
+            ));
         };
         self.users.set_alerts(user.user_id, choice == "on")?;
-        Ok(reply(chat_id, format!("Alerts {choice}.")))
+        Ok(reply(
+            chat_id,
+            if choice == "on" {
+                "Alerts on: a message a day before each deadline."
+            } else {
+                "Alerts off."
+            },
+        ))
     }
 
     // --- the deadline alerts (Python `live._alert_user`) --------------------------------------
@@ -784,9 +809,8 @@ impl BotService {
             Ok(plan) => plan,
             Err(err) => {
                 let Some(message) = entry_message(&err) else { return Err(err) };
-                let entry = user.entry_id.map_or("None".to_string(), |id| id.to_string());
                 let text =
-                    format!("Couldn't plan GW{} for team {entry}: {}", context.gw, e(&message));
+                    format!("I couldn't plan your team for GW{}: {}", context.gw, e(&message));
                 if let Err(err) = send_pieces(send, user.chat_id, &text) {
                     warn!("telling user {} about their squad failed: {err}", user.user_id);
                 }

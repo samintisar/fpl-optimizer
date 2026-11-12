@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use fplopt_optimize::GwPlan;
-use fplopt_optimize::entry::{SquadSpec, season_label};
+use fplopt_optimize::entry::SquadSpec;
 
 use crate::chip_calls::ChipCalls;
 use crate::context::PlanContext;
@@ -35,11 +35,11 @@ fn moves(g: &GwPlan, names: &HashMap<i64, String>, hit_cost: i64) -> String {
     e(if moves.is_empty() { "no transfers" } else { &moves }) + &hit
 }
 
-fn money(tenths: i64) -> String {
+pub fn money(tenths: i64) -> String {
     format!("£{:.1}m", tenths as f64 / 10.0)
 }
 
-fn free_transfers(n: i64) -> String {
+pub fn free_transfers(n: i64) -> String {
     if n == 1 { "1 free transfer".into() } else { format!("{n} free transfers") }
 }
 
@@ -256,26 +256,47 @@ pub fn update_text(c: &PlanChange) -> String {
     lines.join("\n")
 }
 
-/// The imported squad, for /register's reply.
-pub fn squad_text(context: &PlanContext, spec: &SquadSpec, entry_id: i64) -> String {
+/// The imported squad by position, bank and free transfers, chips played (/register).
+pub fn squad_text(context: &PlanContext, spec: &SquadSpec) -> String {
     let names: HashMap<i64, &str> =
         context.players.iter().map(|p| (p.element_id, p.web_name.as_str())).collect();
-    let players: Vec<String> = spec
+    let keys = context.element_keys();
+    let positions: HashMap<i64, i64> =
+        context.pool.iter().map(|p| (p.player_key, p.element_type)).collect();
+    let position = |element: i64| keys.get(&element).and_then(|k| positions.get(k)).copied();
+    let label =
+        |element: i64| names.get(&element).map_or_else(|| element.to_string(), |n| n.to_string());
+    let mut lines = Vec::new();
+    for (pos, tag) in crate::summary::POSITIONS {
+        let players: Vec<String> = spec
+            .players
+            .iter()
+            .filter(|p| position(p.element_id) == Some(pos))
+            .map(|p| label(p.element_id))
+            .collect();
+        if !players.is_empty() {
+            lines.push(format!("{tag} {}", e(&players.join(", "))));
+        }
+    }
+    let other: Vec<String> = spec
         .players
         .iter()
-        .map(|p| {
-            names.get(&p.element_id).map_or_else(|| p.element_id.to_string(), |n| n.to_string())
-        })
+        .filter(|p| position(p.element_id).is_none())
+        .map(|p| label(p.element_id))
         .collect();
-    let used: Vec<String> = spec.chips_used.iter().map(|(n, gw)| format!("{n} (GW{gw})")).collect();
+    if !other.is_empty() {
+        lines.push(format!("Others {}", e(&other.join(", "))));
+    }
+    let used: Vec<String> =
+        spec.chips_used.iter().map(|(n, gw)| format!("{} (GW{gw})", chip_label(n))).collect();
     let used = used.join(", ");
-    [
-        format!("<b>Team {entry_id}</b> before GW{} ({})", spec.gw, e(&season_label(spec.season))),
-        format!("Squad: {}", e(&players.join(", "))),
-        format!("Bank £{:.1}m · {} free transfers", spec.bank as f64 / 10.0, spec.free_transfers),
-        format!("Chips played: {}", e(if used.is_empty() { "none" } else { &used })),
-    ]
-    .join("\n")
+    lines.push(format!(
+        "{} in the bank · {}",
+        money(spec.bank),
+        free_transfers(spec.free_transfers)
+    ));
+    lines.push(format!("Chips played: {}", e(if used.is_empty() { "none" } else { &used })));
+    lines.join("\n")
 }
 
 /// `bboost@gw9+freehit@gw11` -> 'Bench Boost GW9 + Free Hit GW11'; `none` -> 'no chip'.
@@ -558,6 +579,43 @@ mod tests {
     use crate::chip_calls::OpenChip;
     use crate::summary::{Alternative, Move, Pick, PlanSummary};
     use chrono::TimeZone;
+
+    #[test]
+    fn squad_text_lists_the_squad_by_position() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rust_golden/bot/state/context");
+        let id = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().file_name();
+        let context = crate::context::read_context(&dir.join(id)).unwrap();
+        let types: HashMap<i64, i64> =
+            context.pool.iter().map(|p| (p.player_key, p.element_type)).collect();
+        let pick = |t: i64, n: usize| -> Vec<i64> {
+            context
+                .players
+                .iter()
+                .filter(|p| types.get(&p.player_key) == Some(&t))
+                .take(n)
+                .map(|p| p.element_id)
+                .collect()
+        };
+        let mut elements = pick(1, 2);
+        elements.extend(pick(4, 3));
+        let players = elements
+            .iter()
+            .map(|&element_id| fplopt_optimize::entry::SquadPlayer {
+                element_id,
+                purchase_price: 50,
+                name: String::new(),
+            })
+            .collect();
+        let mut spec = SquadSpec::new(context.season, context.gw, players, 5, 2);
+        spec.chips_used = vec![("wildcard".into(), 4)];
+        let text = squad_text(&context, &spec);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("GK "), "{text}");
+        assert!(lines[1].starts_with("FWD "), "{text}");
+        assert_eq!(lines[2], "£0.5m in the bank · 2 free transfers");
+        assert_eq!(lines[3], "Chips played: Wildcard (GW4)");
+    }
 
     fn summary() -> PlanSummary {
         PlanSummary {

@@ -447,7 +447,7 @@ fn an_entry_error_is_told_without_a_chip_search() {
     service.chip_planner = Box::new(|_, _, _, _, _| panic!("no chip search on the Told path"));
     let (outcome, text) = alert(&service, "alert24", false);
     assert_eq!(outcome, AlertOutcome::Told);
-    assert!(text.starts_with("Couldn't plan GW6"), "{text}");
+    assert!(text.starts_with("I couldn't plan your team for GW6"), "{text}");
     assert!(service.users.chip_calls(uid(&service)).unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&state);
 }

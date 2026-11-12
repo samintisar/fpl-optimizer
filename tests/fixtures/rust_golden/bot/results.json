@@ -4,7 +4,7 @@
     "replies": [
       [
         5,
-        "Send /start first."
+        "Send /start to begin."
       ]
     ]
   },
@@ -12,7 +12,7 @@
     "replies": [
       [
         5,
-        "Waiting for access: the admin has been asked."
+        "Thanks! The admin has been asked to let you in."
       ],
       [
         1000,
@@ -24,7 +24,7 @@
     "replies": [
       [
         5,
-        "Waiting for access: the admin has been asked."
+        "Thanks! The admin has been asked to let you in."
       ]
     ]
   },
@@ -32,7 +32,7 @@
     "replies": [
       [
         5,
-        "Waiting for access: the admin has been asked."
+        "Thanks! The admin has been asked to let you in."
       ]
     ]
   },
@@ -40,7 +40,7 @@
     "replies": [
       [
         6,
-        "Send /start first."
+        "Send /start to begin."
       ]
     ]
   },
@@ -48,7 +48,7 @@
     "replies": [
       [
         5,
-        "Waiting for access: the admin has been asked."
+        "Thanks! The admin has been asked to let you in."
       ]
     ]
   },
@@ -56,7 +56,7 @@
     "replies": [
       [
         1000,
-        "<b>FPL optimizer</b>: transfer plans for your FPL team, from the model that passed its 2025/26 test. You make the final call.\n\n/register &lt;team ID&gt; · your FPL team (the number in your team's URL)\n/plan · plans for the next deadline\n/chips · what the (untested) chip planner would do: information only\n/transfer &lt;out&gt; -&gt; &lt;in&gt; · a transfer you already made for the next GW (FPL doesn't show it before the deadline); /transfer list, /transfer undo, /transfer clear\n/setft &lt;n&gt; · correct the free transfers for the next GW (/setft clear to undo)\n/alerts on|off · the message 24 hours before each deadline (and a re-run about 2 hours before, only if the plan changes)\n/help · this list\n\nAdmin: /allow &lt;chat id&gt;, /block &lt;chat id&gt;, /users"
+        "<b>FPL optimizer</b>: transfer and captain picks for your FPL team. You make the final call.\n\n/register &lt;team ID&gt; · link your FPL team (the number in your team's web address)\n/plan · this week's moves, captain and team\n/chips · when to play your chips (for information)\n/transfer &lt;out&gt; -&gt; &lt;in&gt; · a transfer you've already made this week (FPL hides it until the deadline); /transfer list, undo, clear\n/setft &lt;n&gt; · fix the number of free transfers (/setft clear to go back to FPL's count)\n/alerts on|off · a message a day before each deadline, plus a heads-up if the plan changes\n/help · this list\n\nAdmin: /allow &lt;chat id&gt;, /block &lt;chat id&gt;, /users"
       ]
     ]
   },
@@ -76,7 +76,7 @@
       ],
       [
         5,
-        "You have access.\n\n<b>FPL optimizer</b>: transfer plans for your FPL team, from the model that passed its 2025/26 test. You make the final call.\n\n/register &lt;team ID&gt; · your FPL team (the number in your team's URL)\n/plan · plans for the next deadline\n/chips · what the (untested) chip planner would do: information only\n/transfer &lt;out&gt; -&gt; &lt;in&gt; · a transfer you already made for the next GW (FPL doesn't show it before the deadline); /transfer list, /transfer undo, /transfer clear\n/setft &lt;n&gt; · correct the free transfers for the next GW (/setft clear to undo)\n/alerts on|off · the message 24 hours before each deadline (and a re-run about 2 hours before, only if the plan changes)\n/help · this list"
+        "You have access.\n\n<b>FPL optimizer</b>: transfer and captain picks for your FPL team. You make the final call.\n\n/register &lt;team ID&gt; · link your FPL team (the number in your team's web address)\n/plan · this week's moves, captain and team\n/chips · when to play your chips (for information)\n/transfer &lt;out&gt; -&gt; &lt;in&gt; · a transfer you've already made this week (FPL hides it until the deadline); /transfer list, undo, clear\n/setft &lt;n&gt; · fix the number of free transfers (/setft clear to go back to FPL's count)\n/alerts on|off · a message a day before each deadline, plus a heads-up if the plan changes\n/help · this list"
       ]
     ]
   },
@@ -92,7 +92,7 @@
     "replies": [
       [
         5,
-        "<b>FPL optimizer</b>: transfer plans for your FPL team, from the model that passed its 2025/26 test. You make the final call.\n\n/register &lt;team ID&gt; · your FPL team (the number in your team's URL)\n/plan · plans for the next deadline\n/chips · what the (untested) chip planner would do: information only\n/transfer &lt;out&gt; -&gt; &lt;in&gt; · a transfer you already made for the next GW (FPL doesn't show it before the deadline); /transfer list, /transfer undo, /transfer clear\n/setft &lt;n&gt; · correct the free transfers for the next GW (/setft clear to undo)\n/alerts on|off · the message 24 hours before each deadline (and a re-run about 2 hours before, only if the plan changes)\n/help · this list"
+        "<b>FPL optimizer</b>: transfer and captain picks for your FPL team. You make the final call.\n\n/register &lt;team ID&gt; · link your FPL team (the number in your team's web address)\n/plan · this week's moves, captain and team\n/chips · when to play your chips (for information)\n/transfer &lt;out&gt; -&gt; &lt;in&gt; · a transfer you've already made this week (FPL hides it until the deadline); /transfer list, undo, clear\n/setft &lt;n&gt; · fix the number of free transfers (/setft clear to go back to FPL's count)\n/alerts on|off · a message a day before each deadline, plus a heads-up if the plan changes\n/help · this list"
       ]
     ]
   },
@@ -100,7 +100,7 @@
     "replies": [
       [
         5,
-        "Unknown command. /help lists them."
+        "I don't know that command. /help lists them."
       ]
     ]
   },
@@ -108,7 +108,7 @@
     "replies": [
       [
         5,
-        "Unknown command. /help lists them."
+        "I don't know that command. /help lists them."
       ]
     ]
   },
@@ -116,7 +116,7 @@
     "replies": [
       [
         5,
-        "Register your team first: /register &lt;team ID&gt;"
+        "First link your FPL team: /register &lt;team ID&gt;"
       ]
     ]
   },
@@ -124,7 +124,7 @@
     "replies": [
       [
         5,
-        "Register your team first: /register &lt;team ID&gt;"
+        "First link your FPL team: /register &lt;team ID&gt;"
       ]
     ]
   },
@@ -132,7 +132,7 @@
     "replies": [
       [
         5,
-        "Usage: /register &lt;team ID&gt;, the number in your FPL team's URL (fantasy.premierleague.com/entry/<b>1234567</b>/event/…)."
+        "Send /register &lt;team ID&gt;. It's the number in your team's web address: fantasy.premierleague.com/entry/<b>1234567</b>/event/…"
       ]
     ]
   },
@@ -140,7 +140,7 @@
     "replies": [
       [
         5,
-        "Usage: /register &lt;team ID&gt;, the number in your FPL team's URL (fantasy.premierleague.com/entry/<b>1234567</b>/event/…)."
+        "Send /register &lt;team ID&gt;. It's the number in your team's web address: fantasy.premierleague.com/entry/<b>1234567</b>/event/…"
       ]
     ]
   },
@@ -148,7 +148,7 @@
     "replies": [
       [
         5,
-        "Usage: /register &lt;team ID&gt;, the number in your FPL team's URL (fantasy.premierleague.com/entry/<b>1234567</b>/event/…)."
+        "Send /register &lt;team ID&gt;. It's the number in your team's web address: fantasy.premierleague.com/entry/<b>1234567</b>/event/…"
       ]
     ]
   },
@@ -156,7 +156,7 @@
     "replies": [
       [
         5,
-        "FPL has no team with ID 8."
+        "FPL has no team with ID 8. Check the number in your team's web address."
       ]
     ]
   },
@@ -164,7 +164,7 @@
     "replies": [
       [
         5,
-        "Registered.\n\n<b>Team 7</b> before GW6 (2023-24)\nSquad: P100109, P100202, P100204, P100214, P100402, P100410, P100505, P100514, P100600, P100611, P100711, P100802, P100807, P100914, P101001\nBank £0.5m · 5 free transfers\nChips played: none\n\n/plan for the GW6 plan."
+        "Linked team 7.\n\nGK P100600, P101001\nDEF P100202, P100204, P100402, P100505, P100802\nMID P100109, P100410, P100611, P100711, P100807\nFWD P100214, P100514, P100914\n£0.5m in the bank · 5 free transfers\nChips played: none\n\n/plan for this week's moves."
       ]
     ]
   },
@@ -189,7 +189,7 @@
     "replies": [
       [
         5,
-        "Usage: /setft &lt;0-5&gt; or /setft clear"
+        "Send /setft 0–5, or /setft clear."
       ]
     ]
   },
@@ -197,7 +197,7 @@
     "replies": [
       [
         5,
-        "GW6 (deadline Fri 15 Sep 18:30): planning with 2 free transfers."
+        "GW6: planning with 2 free transfers. (/setft clear to go back to FPL's count)"
       ]
     ]
   },
@@ -213,7 +213,7 @@
     "replies": [
       [
         5,
-        "GW6: free transfers from the import again."
+        "GW6: back to FPL's free transfer count."
       ]
     ]
   },
@@ -221,7 +221,7 @@
     "replies": [
       [
         5,
-        "GW6 transfers you've told me about: none"
+        "Transfers you've told me about for GW6: none"
       ]
     ]
   },
@@ -229,7 +229,7 @@
     "replies": [
       [
         5,
-        "Usage: /transfer Wissa -&gt; Gonzalo (or /transfer Wissa Gonzalo); /transfer list, /transfer undo, /transfer clear"
+        "Send /transfer Wissa -&gt; Gonzalo (or /transfer Wissa Gonzalo). Also /transfer list, /transfer undo, /transfer clear."
       ]
     ]
   },
@@ -237,7 +237,7 @@
     "replies": [
       [
         5,
-        "No player called 'Nobody' this season."
+        "No player called 'Nobody' this season. Check the spelling as FPL writes it."
       ]
     ]
   },
@@ -245,15 +245,7 @@
     "replies": [
       [
         5,
-        "Recorded for GW6: P100109 → P100311. All GW6 transfers: P100109 → P100311. Bank £3.9m, 4 FT left. /plan and the alerts now plan from this squad."
-      ]
-    ]
-  },
-  {
-    "replies": [
-      [
-        5,
-        "Can't record that transfer: P100109 isn't in the squad"
+        "Got it: P100109 → P100311 for GW6. £3.9m in the bank, 4 free transfers left. Your plans now start from this team."
       ]
     ]
   },
@@ -269,7 +261,15 @@
     "replies": [
       [
         5,
-        "GW6 transfers you've told me about: P100109 → P100311"
+        "Can't record that transfer: P100109 isn't in the squad"
+      ]
+    ]
+  },
+  {
+    "replies": [
+      [
+        5,
+        "Transfers you've told me about for GW6: P100109 → P100311"
       ]
     ]
   },
@@ -338,7 +338,7 @@
     "replies": [
       [
         5,
-        "Alerts are on. Usage: /alerts on|off"
+        "Alerts are on. Send /alerts on or /alerts off."
       ]
     ]
   },
@@ -354,7 +354,7 @@
     "replies": [
       [
         5,
-        "Alerts are off. Usage: /alerts on|off"
+        "Alerts are off. Send /alerts on or /alerts off."
       ]
     ]
   },
@@ -393,7 +393,7 @@
     "replies": [
       [
         1000,
-        "Registered team 7.\nThe data for the next deadline isn't ready yet (it's rebuilt after each new snapshot). Try again in a few minutes."
+        "Linked team 7.\nI'm still updating for the next deadline. Try again in a few minutes."
       ]
     ]
   },
@@ -401,7 +401,7 @@
     "replies": [
       [
         1000,
-        "The data for the next deadline isn't ready yet (it's rebuilt after each new snapshot). Try again in a few minutes."
+        "I'm still updating for the next deadline. Try again in a few minutes."
       ]
     ]
   }
