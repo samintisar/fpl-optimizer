@@ -191,7 +191,16 @@ pub fn build_context(
     // The as-of fixture list (newest snapshot before the deadline, else the final schedule),
     // the one the models see: not the final table, which would show later reschedules.
     let schedule = view.schedule(season)?;
-    let teams = view.table("team_dim", Some(&["team_key", "short_name"]))?;
+    // team_dim is static (every season): read through lookup, for the schedule's clubs.
+    let clubs: Vec<i64> = schedule
+        .i64("home_team_key")?
+        .iter()
+        .chain(schedule.i64("away_team_key")?)
+        .copied()
+        .collect::<std::collections::BTreeSet<i64>>()
+        .into_iter()
+        .collect();
+    let teams = view.lookup("team_dim", &clubs)?;
     let fixtures = fixture_rows(&schedule, &teams, season, gw)?;
     let xp = fplopt_models::predict(xp_model, &view)?;
     let created = Utc::now();
