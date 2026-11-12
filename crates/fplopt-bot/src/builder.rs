@@ -98,7 +98,6 @@ pub fn next_gameweek(store: &DataStore, now: DateTime<Utc>) -> Result<Option<(i6
     Ok(best.and_then(|i| Some((season[i]?, index[i]?))))
 }
 
-/// The context for the next deadline after `now` (None if the data has none).
 /// The `fixtures` frame (context docs): both sides of every scheduled game of `season` in
 /// GWs >= `gw`, sorted by (gw, team_key, fixture_key), from the as-of `schedule` and
 /// `team_dim`'s short names.
@@ -130,6 +129,7 @@ pub fn fixture_rows(schedule: &Table, teams: &Table, season: i64, gw: i64) -> Re
         .with("home", Column::Bool(rows.iter().map(|r| r.4).collect())))
 }
 
+/// The context for the next deadline after `now` (None if the data has none).
 pub fn build_context(
     store: &DataStore,
     now: DateTime<Utc>,
