@@ -1,7 +1,9 @@
-//! Telegram message texts (Python `fplopt.bot.messages`; Phase 7 plan §5): Telegram HTML
-//! (`<b>` and escaped text only), short lines for a phone. `plan_text` is the plan message
-//! (alerts and `/plan`); `split_message` cuts a text to Telegram's 4,096
-//! character limit at line breaks. The texts are Python's, byte for byte.
+//! Telegram message texts (spec docs/superpowers/specs/2026-11-11-bot-messaging-ux-design.md):
+//! Telegram HTML (`<b>` and escaped text only), short plain-FPL lines for a phone, worded
+//! from `summary`'s facts. `plan_text` is the plan (`/plan`, the 24-hour alert),
+//! `update_text` the re-run's "plan changed", `chip_section` the alerts' chip lines,
+//! `chips_text` `/chips`; `split_message` cuts a text to Telegram's 4,096 character limit at
+//! line breaks. The texts are the Rust bot's own since 2026-11-11 (no longer Python's).
 
 use std::collections::{BTreeSet, HashMap};
 

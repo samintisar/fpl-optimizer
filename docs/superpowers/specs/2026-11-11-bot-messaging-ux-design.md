@@ -46,13 +46,7 @@ Not in scope: changing any decision (plans, chips, alerts timing), the admin tex
 
 `PlanChange` (the update alert): the earlier and new first-GW moves, the earlier and new captain and vice, and the new points for any changed incoming player. Built from the stored decision, as `changes_text` is today.
 
-`ChipsSummary` (from `ChipOptions`):
-- the best scenario and its gain over keeping every chip;
-- the chip GW's team (Free Hit or Wildcard) or its moves and captain (Bench Boost or Triple Captain);
-- each chip in its best week with its gain;
-- chips left, grouped by window;
-- whether any option ran out of time;
-- whether the planner is the tested one (`chip_value_left`).
+`/chips` is worded straight from `ChipOptions` (it is the only user of those facts).
 
 The alert's chip section reads `ChipCalls` directly. It needs no new struct, only new wording.
 
@@ -63,7 +57,7 @@ General rules: short lines for a phone; "UK" once, on the deadline; no "solver",
 ### `/plan` and the 24-hour alert
 
 ```
-GW12 plan · deadline Sat 21 Nov, 11:00 UK
+GW12 plan · deadline Sat 21 Nov 11:00 UK
 
 This week's moves
 Sell Wissa (£6.9m) → buy Gonzalo (£7.1m)
@@ -107,16 +101,17 @@ Removed: the team ID, the "xP data from" time, the live-prices line, "Chips are 
 ### Update alert (about 2 h before the deadline, sent only on a change)
 
 ```
-GW12 plan changed · deadline Sat 21 Nov, 11:00 UK
+GW12 plan changed · deadline Sat 21 Nov 11:00 UK
 Now: sell Wissa, buy Gonzalo (was: sell Wissa, buy Strand Larsen)
 Captain: Haaland (unchanged)
-Why: Gonzalo now 31.4 pts over 6 GWs vs Strand Larsen 30.6
+Why (pts over the next 6 GWs): now Gonzalo 31.4; before Strand Larsen 30.6
 Full plan and team: /plan
 ```
 
 - "Now" and "was" show this GW's moves ("no transfers" when empty). The "Now/was" line appears only when the moves changed.
 - The captain and vice lines show "(was X)" or "(unchanged)".
 - The "Why" line compares the new incoming players' horizon points with the earlier ones', for players still in the frame. It is left out when the moves are unchanged.
+- The "Why" line appears only when there is a newly bought player to point to (not for a dropped buy alone), and then only when the moves changed.
 - The chip rules for `alert2` don't change (`service.rs` `chip_text`). The chip section, when shown, goes above the update. When only the chip call changed, the update is the chip section, then "Your transfers and captain are unchanged: /plan".
 - The re-run's first alert for a user this GW (no `alert24` sent) is still the full plan, not an update.
 
@@ -127,6 +122,8 @@ Chip: play Bench Boost this week (+7.4 pts vs keeping it)
   The simple rule agrees: your bench is expected to score 11.6 (it plays at 10.9+)
 Chips left: Free Hit (until GW19, best week GW16), Bench Boost (until GW19)
 ```
+
+When the simple rule disagrees, the line reads "A simpler rule would play Bench Boost (your bench is expected to score 11.6; it plays at 10.9+)".
 
 The headline:
 
@@ -149,7 +146,7 @@ The chip list:
 ### `/chips`
 
 ```
-GW12 chips · for information, the plan above doesn't use them
+GW12 chips · for information: your /plan doesn't use them
 Best over the next 6 GWs: Free Hit this week (+13.5 pts vs keeping your chips)
 
 Your Free Hit team
@@ -166,12 +163,13 @@ Each chip in its best week
 · Triple Captain GW12: +5.0
 · Bench Boost GW15: −1.0
 
-Chips left: Wildcard, Free Hit, Bench Boost, Triple Captain (until GW19), and a second set until GW38
+Chips left: Wildcard, Free Hit, Bench Boost, Triple Captain (until GW19); Wildcard, Free Hit, Bench Boost, Triple Captain (until GW38)
 A chip only shows a gain if it beats saving it for later.
 Tested on 2023–25: beat playing no chips, not clearly better than simple rules.
 ```
 
 - **Best scenario with Bench Boost or Triple Captain:** "This week with it: <moves>; captain X" in place of the team.
+- **One-GW horizon:** "Best this GW: …" replaces "Best over the next N GWs: …".
 - **Best is no chip:** "Best over the next 6 GWs: keep your chips".
 - **Multi-chip scenarios:** they read as today's scenario labels ("Wildcard GW5 + Triple Captain GW9").
 - **Untested planner** (no `chip_value_left`): the last line reads "The chip planner isn't tested yet: weigh it against your own judgement."
@@ -198,11 +196,11 @@ Tested on 2023–25: beat playing no chips, not clearly better than simple rules
 - **Register first:** "First link your FPL team: /register <team ID>".
 - **`/register`:**
   - Usage: "Send /register <team ID>. It's the number in your team's web address: fantasy.premierleague.com/entry/<b>1234567</b>/event/…".
-  - Unknown team: "FPL has no team with ID 8. Check the number in your team's web address."
+  - Unknown team: "FPL has no team with ID 8. Check the number in your team's web address." (from both paths)
   - Success: "Linked team 4570069." followed by the squad by position (the plan's team layout without C/V), "£0.5m in the bank · 2 free transfers", "Chips played: Wildcard (GW4)" and "/plan for this week's moves."
   - Can't plan the squad yet: "Linked team 4570069, but I can't plan it yet: <reason>".
 - **`/transfer`:**
-  - Recorded: "Got it: Wissa → Gonzalo for GW12. £0.3m in the bank, 0 free transfers left. Your plans now start from this team."
+  - Recorded: "Got it: Wissa → Gonzalo for GW12. £0.3m in the bank, 0 free transfers left. Your plans now start from this team." When more than one transfer is recorded for the GW, it adds "(N transfers this GW: …)" after the GW.
   - List: "Transfers you've told me about for GW12: …" (or "none").
   - Undo or clear: "Removed 1. GW12 transfers now: …".
   - Usage: "Send /transfer Wissa -> Gonzalo (or /transfer Wissa Gonzalo). Also /transfer list, /transfer undo, /transfer clear."
@@ -211,7 +209,7 @@ Tested on 2023–25: beat playing no chips, not clearly better than simple rules
 - **`/setft`:** "GW12: planning with 2 free transfers. (/setft clear to go back to FPL's count)". Clear: "GW12: back to FPL's free transfer count." Usage: "Send /setft 0–5, or /setft clear."
 - **`/alerts`:** "Alerts on: a message a day before each deadline." / "Alerts off." Usage: "Alerts are on. Send /alerts on or /alerts off."
 - **Errors:**
-  - "Can't plan team X: …" becomes "I couldn't plan your team: <reason>. Try again later; the admin has been told." The admin is told whenever the current code tells them.
+  - Plan and `/chips` errors read "I couldn't plan your team: <reason>" (problems with the squad; the admin isn't told). The alert's reads "I couldn't plan your team for GW12: <reason>".
   - Unknown command: "I don't know that command. /help lists them."
   - The generic apology stays.
 
@@ -222,7 +220,7 @@ Reasons passed through from planner errors (`EntryError` messages) are shown as 
 - **Contents:** `builder.rs` writes `fixtures.parquet` next to the other frames, with columns `gw`, `team_key`, `opponent_short_name`, `home` (bool). It covers every fixture of the context's season in GWs ≥ the planned GW, from `schedule` (and `team_dim` for short names) at the deadline's view.
 - **Doubles and blanks:** a double GW gives two rows, which read "BRE (H) + LEE (A)" as one GW. A blank gives none, which reads "no game".
 - **Loading:** `read_context` loads the frame when present. `PlanContext` gets `fixtures: Option<…>`.
-- **Python:** `meta.json` is unchanged. Python's context reader ignores unknown files, which is checked in the implementation; it must still read Rust contexts during a rollback.
+- **Python:** `meta.json` is unchanged. Python's context reader ignores unknown files, checked: `_FRAMES` in `src/fplopt/bot/context.py` lists the five frames it reads; it must still read Rust contexts during a rollback.
 
 ## Testing
 
