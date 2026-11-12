@@ -15,6 +15,7 @@ use crate::context::PlanContext;
 use crate::planner::{
     CHIP_LABELS, ChipOptions, Decision, UserPlan, chip_label, chips_left, ranked,
 };
+use crate::summary::tied;
 use crate::util::{escape as e, py_g, uk_time};
 
 pub const MAX_MESSAGE: usize = 4096;
@@ -36,13 +37,6 @@ fn moves(g: &GwPlan, names: &HashMap<i64, String>, hit_cost: i64) -> String {
     let moves = moves.join(", ");
     let hit = if g.hits != 0 { format!(" (−{} hit)", hit_cost * g.hits) } else { String::new() };
     e(if moves.is_empty() { "no transfers" } else { &moves }) + &hit
-}
-
-/// Plans whose objectives differ by less than the solver's gap: equally good as far as the
-/// solver can tell (PLAN §8 live finding).
-fn tied(a: &fplopt_optimize::Plan, b: &fplopt_optimize::Plan) -> bool {
-    let gap = a.mip_gap.max(b.mip_gap) * a.total_objective().abs();
-    (a.total_objective() - b.total_objective()).abs() <= gap
 }
 
 fn lineup(g: &GwPlan, plan: &UserPlan, names: &HashMap<i64, String>) -> Vec<String> {
