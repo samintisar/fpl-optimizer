@@ -99,7 +99,7 @@ pub fn next_gameweek(store: &DataStore, now: DateTime<Utc>) -> Result<Option<(i6
 }
 
 /// The `fixtures` frame (context docs): both sides of every scheduled game of `season` in
-/// GWs >= `gw`, sorted by (gw, team_key, fixture_key), from the as-of `schedule` and
+/// GWs >= `gw`, sorted by (gw, team_key, fixture_key), from the as-of fixture list (`View::schedule`) and
 /// `team_dim`'s short names.
 pub fn fixture_rows(schedule: &Table, teams: &Table, season: i64, gw: i64) -> Result<Table> {
     let short: std::collections::HashMap<i64, String> = teams
@@ -188,10 +188,9 @@ pub fn build_context(
     let gameweeks = Table::new()
         .with("gw", Column::I64(gameweeks.iter().map(|g| g.0).collect()))
         .with("gw_index", Column::I64(gameweeks.iter().map(|g| g.1).collect()));
-    let schedule = view.table(
-        "schedule",
-        Some(&["season", "gw", "fixture_key", "home_team_key", "away_team_key"]),
-    )?;
+    // The as-of fixture list (newest snapshot before the deadline, else the final schedule),
+    // the one the models see: not the final table, which would show later reschedules.
+    let schedule = view.schedule(season)?;
     let teams = view.table("team_dim", Some(&["team_key", "short_name"]))?;
     let fixtures = fixture_rows(&schedule, &teams, season, gw)?;
     let xp = fplopt_models::predict(xp_model, &view)?;

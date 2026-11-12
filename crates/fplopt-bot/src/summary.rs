@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use fplopt_optimize::state::selling_price;
+use fplopt_optimize::state::{Holding, selling_price};
 use fplopt_optimize::{GwPlan, Plan, XpFrame};
 
 use crate::context::Fixture;
@@ -76,7 +76,8 @@ pub struct Pick {
 }
 
 /// Another plan: its first-GW moves (out, in names), hit points, gain over rolling and
-/// whether the solver can't tell it from plan 1.
+/// whether it is as good as plan 1 (the solver can't tell them apart, or the gains read the
+/// same).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Alternative {
     pub moves: Vec<(String, String)>,
@@ -99,6 +100,8 @@ pub struct PlanSummary {
     pub gain_vs_roll: Option<f64>,
     pub bank_after: i64,
     pub free_transfers_next: i64,
+    /// The most free transfers one can bank.
+    pub ft_cap: i64,
     /// Starters by position ("GK", names with " (C)"/" (V)"), positions without starters left
     /// out.
     pub team: Vec<(&'static str, Vec<String>)>,
@@ -120,8 +123,103 @@ fn name(names: &HashMap<i64, String>, key: i64) -> String {
     names.get(&key).cloned().unwrap_or_else(|| format!("player {key}"))
 }
 
-fn moves_of(g: &GwPlan, names: &HashMap<i64, String>) -> Vec<(String, String)> {
-    g.transfers.iter().map(|t| (name(names, t.out_key), name(names, t.in_key))).collect()
+/// What the pairing of a GW's transfers needs about players: position, sale and buy price.
+/// Falls back from the pool to the squad's holdings, so a player outside the pool still has
+/// a position and a price.
+pub struct Lookup<'a> {
+    /// player_key -> (price, team_key, element_type)
+    pub pool: HashMap<i64, (i64, i64, i64)>,
+    pub holdings: &'a [Holding],
+    pub sell_on_fee: f64,
+}
+
+impl Lookup<'_> {
+    fn holding(&self, key: i64) -> Option<&Holding> {
+        self.holdings.iter().find(|h| h.player_key == key)
+    }
+
+    /// 1..=4, or 0 when neither the pool nor the squad knows him.
+    pub fn position(&self, key: i64) -> i64 {
+        match self.pool.get(&key) {
+            Some(p) => p.2,
+            None => self.holding(key).map_or(0, |h| h.element_type),
+        }
+    }
+
+    /// His price to buy: the pool's, else the squad's price (0 if unknown).
+    pub fn buy_price(&self, key: i64) -> i64 {
+        match self.pool.get(&key) {
+            Some(p) => p.0,
+            None => self.holding(key).map_or(0, |h| h.price),
+        }
+    }
+
+    /// What selling him earns: only for a player in the squad (0 otherwise).
+    pub fn sell_price(&self, key: i64) -> i64 {
+        self.holding(key).map_or(0, |h| selling_price(h, self.sell_on_fee))
+    }
+
+    /// His price to sort sales by: the sale price, else (bought earlier in the plan) the buy
+    /// price.
+    fn sort_price(&self, key: i64) -> i64 {
+        match self.holding(key) {
+            Some(h) => selling_price(h, self.sell_on_fee),
+            None => self.buy_price(key),
+        }
+    }
+}
+
+/// `g`'s transfers as (out_key, in_key), re-paired within each position: the optimizer pairs
+/// by player key, which is arbitrary, so the dearest sale goes with the dearest buy, and so on
+/// (ties by name). Positions in lineup order.
+pub fn pair_transfers(
+    g: &GwPlan,
+    lookup: &Lookup,
+    names: &HashMap<i64, String>,
+) -> Vec<(i64, i64)> {
+    let mut out = Vec::new();
+    let mut positions: Vec<i64> = g
+        .transfers
+        .iter()
+        .flat_map(|t| [lookup.position(t.out_key), lookup.position(t.in_key)])
+        .collect();
+    positions.sort_unstable();
+    positions.dedup();
+    for pos in positions {
+        let mut outs: Vec<i64> =
+            g.transfers.iter().map(|t| t.out_key).filter(|&k| lookup.position(k) == pos).collect();
+        let mut ins: Vec<i64> =
+            g.transfers.iter().map(|t| t.in_key).filter(|&k| lookup.position(k) == pos).collect();
+        outs.sort_by(|&a, &b| {
+            lookup
+                .sort_price(b)
+                .cmp(&lookup.sort_price(a))
+                .then_with(|| name(names, a).cmp(&name(names, b)))
+        });
+        ins.sort_by(|&a, &b| {
+            lookup
+                .buy_price(b)
+                .cmp(&lookup.buy_price(a))
+                .then_with(|| name(names, a).cmp(&name(names, b)))
+        });
+        out.extend(outs.into_iter().zip(ins));
+    }
+    out
+}
+
+fn moves_of(g: &GwPlan, lookup: &Lookup, names: &HashMap<i64, String>) -> Vec<(String, String)> {
+    pair_transfers(g, lookup, names)
+        .into_iter()
+        .map(|(o, i)| (name(names, o), name(names, i)))
+        .collect()
+}
+
+/// Whether two gains read the same at one decimal (both must exist).
+fn same_gain(a: Option<f64>, b: Option<f64>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => (a * 10.0).round() == (b * 10.0).round(),
+        _ => false,
+    }
 }
 
 /// Free transfers at the next GW after making `n` transfers with `ft` available (FPL's
@@ -142,31 +240,33 @@ pub fn plan_summary(plan: &UserPlan) -> Option<PlanSummary> {
     let first = best.first();
     let gws: Vec<i64> = best.gws.iter().map(|g| g.gw).collect();
     let points = |key: i64, gws: &[i64]| horizon_points(&context.xp, key, gws).unwrap_or(0.0);
-    let pool: HashMap<i64, (i64, i64, i64)> = context
-        .pool
-        .iter()
-        .map(|p| (p.player_key, (p.price, p.team_key, p.element_type)))
-        .collect();
+    let lookup = Lookup {
+        pool: context
+            .pool
+            .iter()
+            .map(|p| (p.player_key, (p.price, p.team_key, p.element_type)))
+            .collect(),
+        holdings: &plan.state.holdings,
+        sell_on_fee: plan.rules.sell_on_fee,
+    };
     let next3: Vec<i64> =
         context.gameweeks.iter().map(|g| g.0).filter(|&g| g >= first.gw).take(3).collect();
-    let moves = first
-        .transfers
-        .iter()
-        .map(|t| {
-            let sell_price = plan
-                .state
-                .holdings
-                .iter()
-                .find(|h| h.player_key == t.out_key)
-                .map_or(0, |h| selling_price(h, plan.rules.sell_on_fee));
-            let (buy_price, team_key, _) = pool.get(&t.in_key).copied().unwrap_or((0, 0, 0));
+    let moves = pair_transfers(first, &lookup, &names)
+        .into_iter()
+        .map(|(out_key, in_key)| {
+            let team_key = lookup
+                .pool
+                .get(&in_key)
+                .map(|p| p.1)
+                .or_else(|| lookup.holding(in_key).map(|h| h.team_key))
+                .unwrap_or(0);
             Move {
-                out_name: name(&names, t.out_key),
-                in_name: name(&names, t.in_key),
-                sell_price,
-                buy_price,
-                out_points: points(t.out_key, &gws),
-                in_points: points(t.in_key, &gws),
+                out_name: name(&names, out_key),
+                in_name: name(&names, in_key),
+                sell_price: lookup.sell_price(out_key),
+                buy_price: lookup.buy_price(in_key),
+                out_points: points(out_key, &gws),
+                in_points: points(in_key, &gws),
                 in_fixtures: context.fixtures.as_ref().map(|f| gw_fixtures(f, team_key, &next3)),
             }
         })
@@ -186,7 +286,7 @@ pub fn plan_summary(plan: &UserPlan) -> Option<PlanSummary> {
             let players: Vec<String> = first
                 .starters
                 .iter()
-                .filter(|k| pool.get(k).map_or(0, |p| p.2) == pos)
+                .filter(|&&k| lookup.position(k) == pos)
                 .map(|&k| format!("{}{}", name(&names, k), mark(k)))
                 .collect();
             (!players.is_empty()).then_some((label, players))
@@ -214,21 +314,24 @@ pub fn plan_summary(plan: &UserPlan) -> Option<PlanSummary> {
         gain_vs_roll: best.gain_vs_roll,
         bank_after: first.bank,
         free_transfers_next: next_free_transfers(ft, first.transfers.len() as i64, cap),
+        ft_cap: cap,
         team,
         bench: first.bench.iter().map(|&k| name(&names, k)).collect(),
         alternatives: order[1..]
             .iter()
             .map(|p| Alternative {
-                moves: moves_of(p.first(), &names),
+                moves: moves_of(p.first(), &lookup, &names),
                 hit_points: plan.rules.hit_cost * p.first().hits,
                 gain: p.gain_vs_roll,
-                tied: tied(best, p),
+                tied: tied(best, p) || same_gain(best.gain_vs_roll, p.gain_vs_roll),
             })
+            // The roll line covers "no transfers".
+            .filter(|a| roll.is_none() || !a.moves.is_empty())
             .collect(),
         roll,
         later: best.gws[1..]
             .iter()
-            .flat_map(|g| moves_of(g, &names).into_iter().map(move |(o, i)| (g.gw, o, i)))
+            .flat_map(|g| moves_of(g, &lookup, &names).into_iter().map(move |(o, i)| (g.gw, o, i)))
             .collect(),
         stopped_early: !best.optimal(),
         prices_fallback: match context.prices_at {
@@ -248,6 +351,8 @@ pub struct PlanChange {
     pub was_moves: Vec<(String, String)>,
     pub now_moves: Vec<(String, String)>,
     pub moves_changed: bool,
+    /// Points the plan's hits cost (0 without hits).
+    pub hit_points: i64,
     /// (now, Some(was) if it changed)
     pub captain: (String, Option<String>),
     pub vice: (String, Option<String>),
@@ -306,6 +411,7 @@ pub fn change_of(
         was_moves: named(&was),
         now_moves: named(&now),
         moves_changed,
+        hit_points: 0,
         captain: changed(captain, after.captain),
         vice: changed(vice, after.vice),
         now_points: if moves_changed { ins(&now, &was) } else { Vec::new() },
@@ -323,6 +429,7 @@ pub fn plan_change(before: Option<&serde_json::Value>, plan: &UserPlan) -> Optio
     change.gw = plan.context.gw;
     change.deadline = plan.context.deadline;
     change.horizon = best.gws.len();
+    change.hit_points = plan.rules.hit_cost * best.first().hits;
     Some(change)
 }
 
@@ -376,6 +483,81 @@ mod tests {
         );
     }
 
+    fn holding(key: i64, element_type: i64, purchase: i64, price: i64) -> Holding {
+        Holding { player_key: key, element_type, team_key: 1, purchase_price: purchase, price }
+    }
+
+    fn gw_with(transfers: &[(i64, i64)]) -> GwPlan {
+        GwPlan {
+            gw: 6,
+            gw_index: 6,
+            horizon: 0,
+            transfers: transfers
+                .iter()
+                .map(|&(out_key, in_key)| fplopt_optimize::state::Transfer { out_key, in_key })
+                .collect(),
+            starters: vec![],
+            bench: vec![],
+            captain: 0,
+            vice: 0,
+            chip: None,
+            xp: 0.0,
+            bench_xp: 0.0,
+            objective: 0.0,
+            hits: 0,
+            bank: 0,
+            ft: 0,
+        }
+    }
+
+    fn names_of(pairs: &[(i64, &str)]) -> HashMap<i64, String> {
+        pairs.iter().map(|&(k, n)| (k, n.to_string())).collect()
+    }
+
+    #[test]
+    fn transfers_are_paired_by_price_within_a_position() {
+        // Two midfield swaps, paired by key the cheap sale goes with the dear buy. Sales: 1
+        // sells at 12.0, 2 at 5.0; buys: 11 costs 5.5, 12 costs 13.0.
+        let holdings = vec![holding(1, 3, 120, 120), holding(2, 3, 50, 50), holding(3, 4, 80, 80)];
+        let pool = [(11, (55, 9, 3)), (12, (130, 9, 3)), (13, (90, 9, 4))].into_iter().collect();
+        let lookup = Lookup { pool, holdings: &holdings, sell_on_fee: 0.5 };
+        let names = names_of(&[(1, "A"), (2, "B"), (3, "F"), (11, "X"), (12, "Y"), (13, "G")]);
+        let g = gw_with(&[(1, 11), (2, 12), (3, 13)]);
+        assert_eq!(pair_transfers(&g, &lookup, &names), vec![(1, 12), (2, 11), (3, 13)]);
+        assert_eq!(
+            moves_of(&g, &lookup, &names),
+            vec![
+                ("A".to_string(), "Y".to_string()),
+                ("B".to_string(), "X".to_string()),
+                ("F".to_string(), "G".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn players_outside_the_pool_fall_back_to_the_squad() {
+        // Out player 2 is not in the pool (position and price from his holding); ties in price
+        // go by name.
+        let holdings = vec![holding(1, 2, 60, 60), holding(2, 2, 60, 60)];
+        let pool = [(11, (60, 9, 2)), (12, (60, 9, 2))].into_iter().collect();
+        let lookup = Lookup { pool, holdings: &holdings, sell_on_fee: 0.5 };
+        assert_eq!(lookup.position(2), 2);
+        assert_eq!(lookup.buy_price(2), 60);
+        assert_eq!(lookup.position(99), 0);
+        let names = names_of(&[(1, "B"), (2, "A"), (11, "D"), (12, "C")]);
+        let g = gw_with(&[(1, 11), (2, 12)]);
+        // Outs by name A(2), B(1); ins by name C(12), D(11).
+        assert_eq!(pair_transfers(&g, &lookup, &names), vec![(2, 12), (1, 11)]);
+    }
+
+    #[test]
+    fn same_gain_compares_the_shown_decimal() {
+        assert!(same_gain(Some(2.44), Some(2.36)));
+        assert!(!same_gain(Some(2.44), Some(2.3)));
+        assert!(!same_gain(None, None));
+        assert!(!same_gain(Some(1.0), None));
+    }
+
     #[test]
     fn plan_change_compares_moves_captain_and_vice() {
         let names: HashMap<i64, String> = [(1, "A"), (2, "B"), (3, "C"), (4, "D"), (5, "E")]
@@ -394,6 +576,7 @@ mod tests {
         assert!(c.moves_changed);
         assert_eq!(c.captain, ("C".to_string(), None));
         assert_eq!(c.vice, ("B".to_string(), Some("D".to_string())));
+        assert_eq!(c.hit_points, 0);
         assert_eq!(c.now_points, vec![("E".to_string(), 50.0)]);
         assert_eq!(c.was_points, vec![("B".to_string(), 20.0)]);
     }
