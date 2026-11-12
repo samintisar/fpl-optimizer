@@ -14,6 +14,8 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from fplopt.seasons import (
     DEVELOP_SEASONS,
     HOLDOUT_SEASONS,
@@ -219,6 +221,10 @@ def test_nprng_golden_is_current():
     assert stored == json.loads(json.dumps(nprng_golden()))
 
 
+@pytest.mark.skip(
+    reason="results.json and db.json are recorded from the Rust bot since 2026-11-11 "
+    "(FPLOPT_UPDATE_GOLDEN=1 cargo test -p fplopt-bot --test golden); its texts are its own"
+)
 def test_bot_golden_is_current(tmp_path):
     import shutil
 

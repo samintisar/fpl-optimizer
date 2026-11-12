@@ -1,6 +1,7 @@
-//! The synthetic bot golden (`tests/fixtures/rust_golden/bot/`, written by Python's
-//! `tests/bot_replay.py`): the scripted session replayed through the Rust bot must give
-//! Python's replies and alert texts byte for byte, and the same `bot.sqlite` rows (JSON
+//! The synthetic bot golden (`tests/fixtures/rust_golden/bot/`: script, state and FPL
+//! responses written by Python's `tests/bot_replay.py`; `results.json` and `db.json`
+//! recorded from this replay with `FPLOPT_UPDATE_GOLDEN=1`): the scripted session must give
+//! the recorded replies and alert texts and the same `bot.sqlite` rows (JSON
 //! columns as Python's `json.dumps` text). Covers every command, both alerts, the live prices
 //! and their fallback, `/transfer` and `/chips` (Python's tests/test_bot.py, as one session).
 
@@ -131,7 +132,7 @@ impl log::Log for StderrLog {
 }
 
 #[test]
-fn bot_session_matches_python() {
+fn bot_session_matches_golden() {
     let _ = log::set_logger(&StderrLog).map(|()| log::set_max_level(log::LevelFilter::Info));
     let root = repo();
     // Rules and chip values are read relative to the repo root, as the CLI runs.
@@ -146,11 +147,23 @@ fn bot_session_matches_python() {
 
     let results =
         fplopt_bot::replay::replay(&read("script.json"), &state, &golden.join("fpl")).unwrap();
+    if std::env::var("FPLOPT_UPDATE_GOLDEN").is_ok_and(|v| v == "1") {
+        // The bot's texts are Rust's own since 2026-11-11 (spec
+        // docs/superpowers/specs/2026-11-11-bot-messaging-ux-design.md): re-record.
+        let write = |name: &str, value: &Value| {
+            let text = serde_json::to_string_pretty(value).unwrap() + "\n";
+            std::fs::write(golden.join(name), text).unwrap();
+        };
+        write("results.json", &results);
+        write("db.json", &dump_db(&state.join("bot.sqlite")));
+        let _ = std::fs::remove_dir_all(&state);
+        return;
+    }
     let expected = read("results.json");
     let (got, want) = (results.as_array().unwrap(), expected.as_array().unwrap());
     assert_eq!(got.len(), want.len());
     for (i, (g, w)) in got.iter().zip(want).enumerate() {
-        assert_eq!(g, w, "step {i}:\nrust:   {g:#}\npython: {w:#}");
+        assert_eq!(g, w, "step {i}:\nrust:   {g:#}\ngolden: {w:#}");
     }
     let db = dump_db(&state.join("bot.sqlite"));
     let want = read("db.json");
