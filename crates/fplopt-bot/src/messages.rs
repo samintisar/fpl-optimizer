@@ -246,7 +246,8 @@ pub fn update_text(c: &PlanChange) -> String {
             None => format!("{label}: {} (unchanged)", e(now)),
         });
     }
-    if !c.now_points.is_empty() || !c.was_points.is_empty() {
+    // "Why" needs a newly bought player to point to; "before X" alone explains nothing.
+    if !c.now_points.is_empty() {
         let list = |p: &[(String, f64)]| {
             let parts: Vec<String> = p.iter().map(|(n, x)| format!("{} {x:.1}", e(n))).collect();
             parts.join(", ")
@@ -256,10 +257,7 @@ pub fn update_text(c: &PlanChange) -> String {
         } else {
             format!("pts over the next {} GWs", c.horizon)
         };
-        let mut parts = Vec::new();
-        if !c.now_points.is_empty() {
-            parts.push(format!("now {}", list(&c.now_points)));
-        }
+        let mut parts = vec![format!("now {}", list(&c.now_points))];
         if !c.was_points.is_empty() {
             parts.push(format!("before {}", list(&c.was_points)));
         }
@@ -268,6 +266,7 @@ pub fn update_text(c: &PlanChange) -> String {
     lines.push("Full plan and team: /plan".into());
     lines.join("\n")
 }
+
 /// The imported squad, for /register's reply.
 pub fn squad_text(context: &PlanContext, spec: &SquadSpec, entry_id: i64) -> String {
     let names: HashMap<i64, &str> =
@@ -907,7 +906,10 @@ b",
              Why (pts over the next 6 GWs): now Gonzalo 31.4; before Strand Larsen 30.6\n\
              Full plan and team: /plan"
         );
+        // Only a dropped buy, no new one: no "Why" line.
         let mut c = change;
+        c.now_points.clear();
+        assert!(!update_text(&c).contains("Why"));
         c.moves_changed = false;
         c.now_points.clear();
         c.was_points.clear();
