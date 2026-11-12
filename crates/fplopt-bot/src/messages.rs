@@ -41,6 +41,23 @@ pub fn money(tenths: i64) -> String {
     format!("£{:.1}m", tenths as f64 / 10.0)
 }
 
+/// A points figure with its sign at one decimal: "+1.2", "−1.0" (U+2212), "+0.0" for zero.
+pub fn signed(x: f64) -> String {
+    let digits = format!("{:.1}", x.abs());
+    if x < 0.0 && digits != "0.0" { format!("\u{2212}{digits}") } else { format!("+{digits}") }
+}
+
+/// "1 chip" / "2 chips".
+fn count(n: usize, noun: &str) -> String {
+    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
+}
+
+/// "5 free transfers next GW", with ", the most you can bank" at the cap.
+fn next_gw_transfers(n: i64, cap: i64) -> String {
+    let text = format!("{} next GW", free_transfers(n));
+    if n == cap { format!("{text}, the most you can bank") } else { text }
+}
+
 pub fn free_transfers(n: i64) -> String {
     if n == 1 { "1 free transfer".into() } else { format!("{n} free transfers") }
 }
@@ -91,12 +108,12 @@ pub fn render_plan(s: &PlanSummary) -> String {
     ];
     if s.moves.is_empty() {
         lines.push(format!(
-            "<b>This week's moves:</b> none, save your transfer ({} next GW)",
-            free_transfers(s.free_transfers_next)
+            "<b>This week's moves:</b> none, save your transfer ({})",
+            next_gw_transfers(s.free_transfers_next, s.ft_cap)
         ));
     } else {
         let hit = if s.hit_points > 0 {
-            format!(" (costs a {}-pt hit)", s.hit_points)
+            format!(" (\u{2212}{} pts hit)", s.hit_points)
         } else {
             String::new()
         };
@@ -129,7 +146,7 @@ pub fn render_plan(s: &PlanSummary) -> String {
     ));
     if !s.moves.is_empty() {
         if let Some(g) = s.gain_vs_roll {
-            lines.push(format!("Gain: about {g:+.1} pts vs saving your free transfer"));
+            lines.push(format!("Gain: about {} pts vs saving your free transfer", signed(g)));
         }
         lines.push(format!(
             "Afterwards: {} in the bank, {} next GW",
@@ -152,15 +169,16 @@ pub fn render_plan(s: &PlanSummary) -> String {
             } else {
                 String::new()
             };
-            let gain = a.gain.map_or(String::new(), |g| format!(": {g:+.1} pts"));
+            let gain = a.gain.map_or(String::new(), |g| format!(": {} pts", signed(g)));
             let tie = if a.tied { " (just as good)" } else { "" };
             lines.push(format!("· {}{hit}{gain}{tie}", capitalized(&sell_buy(&a.moves))));
         }
         if let Some((ft, tie)) = s.roll {
+            let next = next_gw_transfers(ft, s.ft_cap);
             lines.push(if tie {
-                format!("· Save your transfer: just as good ({} next GW)", free_transfers(ft))
+                format!("· Save your transfer: just as good ({next})")
             } else {
-                format!("· Save your transfer: {} next GW", free_transfers(ft))
+                format!("· Save your transfer: {next}")
             });
         }
     }
@@ -225,8 +243,13 @@ pub fn update_text(c: &PlanChange) -> String {
     let mut lines =
         vec![format!("<b>GW{} plan changed</b> · deadline {} UK", c.gw, uk_time(c.deadline))];
     if c.moves_changed {
+        let hit = if c.hit_points > 0 {
+            format!(" (\u{2212}{} pts hit)", c.hit_points)
+        } else {
+            String::new()
+        };
         lines.push(format!(
-            "Now: {} (was: {})",
+            "Now: {}{hit} (was: {})",
             plain_moves(&c.now_moves),
             plain_moves(&c.was_moves)
         ));
@@ -334,10 +357,10 @@ pub fn chips_text(options: &ChipOptions) -> String {
             format!("Best {}: keep your chips", over(best.gws.len()))
         } else {
             format!(
-                "Best {}: {} ({:+.1} pts vs keeping your chips)",
+                "Best {}: {} ({} pts vs keeping your chips)",
                 over(best.gws.len()),
                 e(&scenario_label(&best.scenario)),
-                best.total_objective() - base
+                signed(best.total_objective() - base)
             )
         },
     ];
@@ -382,7 +405,7 @@ pub fn chips_text(options: &ChipOptions) -> String {
         lines.push(String::new());
         lines.push("<b>Each chip in its best week</b>".into());
         for (label, gain) in singles {
-            lines.push(format!("· {}: {gain:+.1}", e(&scenario_label(label))));
+            lines.push(format!("· {}: {}", e(&scenario_label(label)), signed(gain)));
         }
     }
     // Chips left, grouped by the GW their window ends.
@@ -390,13 +413,22 @@ pub fn chips_text(options: &ChipOptions) -> String {
     for w in windows.iter().filter(|w| !used.contains(&w.chip_id) && w.stop >= context.gw_index) {
         let last = gw_of.get(&w.stop).copied().unwrap_or(w.stop);
         match groups.last_mut() {
-            Some((g, chips)) if *g == last => chips.push(chip_label(&w.name)),
-            _ => groups.push((last, vec![chip_label(&w.name)])),
+            Some((g, chips)) if *g == last => chips.push(w.name.as_str()),
+            _ => groups.push((last, vec![w.name.as_str()])),
         }
+    }
+    // Within a group, chips in the usual order (Wildcard, Free Hit, Bench Boost, Triple
+    // Captain).
+    let rank = |name: &str| CHIP_LABELS.iter().position(|(n, _)| *n == name).unwrap_or(usize::MAX);
+    for (_, chips) in &mut groups {
+        chips.sort_by_key(|n| rank(n));
     }
     let left: Vec<String> = groups
         .iter()
-        .map(|(last, chips)| format!("{} (until GW{last})", chips.join(", ")))
+        .map(|(last, chips)| {
+            let labels: Vec<&str> = chips.iter().map(|n| chip_label(n)).collect();
+            format!("{} (until GW{last})", labels.join(", "))
+        })
         .collect();
     lines.push(String::new());
     let left = if left.is_empty() { "none".to_string() } else { left.join("; ") };
@@ -471,13 +503,15 @@ pub fn chip_section(calls: &ChipCalls) -> String {
     let mut lines = Vec::new();
     lines.push(match (calls.planner.as_deref(), forced, window) {
         (Some(c), _, _) => format!(
-            "<b>Chip:</b> play {} this week ({:+.1} pts vs keeping it)",
+            "<b>Chip:</b> play {} this week ({} pts vs keeping it)",
             e(chip_label(c)),
-            calls.planner_gain
+            signed(calls.planner_gain)
         ),
         (None, Some(c), Some((left, gws, last))) => format!(
-            "<b>Chip:</b> play {} now ({left} chips left and {gws} GWs before they expire after GW{last})",
-            e(chip_label(c))
+            "<b>Chip:</b> play {} now ({} left and {} before they expire after GW{last})",
+            e(chip_label(c)),
+            count(left, "chip"),
+            count(gws as usize, "GW")
         ),
         (None, Some(c), None) => format!("<b>Chip:</b> play {} now, or lose it", e(chip_label(c))),
         (None, None, _) => "<b>Chip:</b> keep your chips this week".to_string(),
@@ -489,7 +523,9 @@ pub fn chip_section(calls: &ChipCalls) -> String {
         && let Some((left, gws, last)) = window
     {
         lines.push(format!(
-            "  {left} chips left and {gws} GWs before they expire after GW{last}: play one each GW"
+            "  {} left and {} before they expire after GW{last}: play one each GW",
+            count(left, "chip"),
+            count(gws as usize, "GW")
         ));
     }
     let gain = |key: &str| match calls.gains.get(key).copied().flatten() {
@@ -643,6 +679,7 @@ mod tests {
             gain_vs_roll: Some(2.44),
             bank_after: 3,
             free_transfers_next: 1,
+            ft_cap: 5,
             team: vec![
                 ("GK", vec!["Raya".into()]),
                 ("DEF", vec!["Gabriel".into(), "Timber".into()]),
@@ -713,7 +750,7 @@ mod tests {
         s.roll = Some((2, true));
         s.later.clear();
         let text = render_plan(&s);
-        assert!(text.contains("<b>This week's moves</b> (costs a 4-pt hit)\n"), "{text}");
+        assert!(text.contains("<b>This week's moves</b> (\u{2212}4 pts hit)\n"), "{text}");
         assert!(text.contains("\n  26.1 → 31.4 pts this GW\n"), "{text}");
         assert!(text.contains("· Save your transfer: just as good (2 free transfers next GW)"));
         assert!(!text.contains("Looking ahead"));
@@ -847,6 +884,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn signed_uses_a_real_minus() {
+        assert_eq!(signed(1.24), "+1.2");
+        assert_eq!(signed(-1.0), "\u{2212}1.0");
+        assert_eq!(signed(0.0), "+0.0");
+        assert_eq!(signed(-0.02), "+0.0");
+    }
+
+    #[test]
+    fn plan_text_at_the_free_transfer_cap() {
+        let mut s = summary();
+        s.free_transfers_next = 5;
+        s.roll = Some((5, false));
+        let text = render_plan(&s);
+        assert!(
+            text.contains(
+                "· Save your transfer: 5 free transfers next GW, the most you can bank\n"
+            ),
+            "{text}"
+        );
+        s.roll = Some((5, true));
+        assert!(render_plan(&s).contains(
+            "· Save your transfer: just as good (5 free transfers next GW, the most you can bank)"
+        ));
+        s.moves.clear();
+        assert!(render_plan(&s).contains(
+            "<b>This week's moves:</b> none, save your transfer (5 free transfers next GW, the most you can bank)\n"
+        ));
+        // Below the cap: no suffix.
+        s.free_transfers_next = 2;
+        assert!(!render_plan(&s).contains("most you can bank)\nCaptain"));
+    }
+
+    #[test]
+    fn chip_section_says_one_chip_and_one_gw() {
+        let mut calls = chip_calls(None, Some("freehit"), Some("freehit"));
+        calls.gw = 19;
+        calls.open.remove(1);
+        calls.open[0].expiring = true;
+        let text = chip_section(&calls);
+        assert!(
+            text.starts_with(
+                "<b>Chip:</b> play Free Hit now (1 chip left and 1 GW before they expire after GW19)"
+            ),
+            "{text}"
+        );
+        let mut calls = chip_calls(Some("bboost"), Some("freehit"), Some("freehit"));
+        calls.gw = 19;
+        calls.open.remove(1);
+        let text = chip_section(&calls);
+        assert!(
+            text.contains(
+                "\n  1 chip left and 1 GW before they expire after GW19: play one each GW\n"
+            ),
+            "{text}"
+        );
+    }
+
     // Python test_split_message.
     #[test]
     fn split() {
@@ -919,6 +1014,7 @@ b",
             was_moves: vec![("Wissa".into(), "Strand Larsen".into())],
             now_moves: vec![("Wissa".into(), "Gonzalo".into())],
             moves_changed: true,
+            hit_points: 0,
             captain: ("Haaland".into(), None),
             vice: ("Salah".into(), Some("Saka".into())),
             now_points: vec![("Gonzalo".into(), 31.4)],
@@ -932,6 +1028,16 @@ b",
              Vice: Salah (was Saka)\n\
              Why (pts over the next 6 GWs): now Gonzalo 31.4; before Strand Larsen 30.6\n\
              Full plan and team: /plan"
+        );
+        // A hit shows between the new moves and what they replace.
+        let mut hit = change.clone();
+        hit.hit_points = 4;
+        assert!(
+            update_text(&hit).contains(
+                "Now: sell Wissa, buy Gonzalo (\u{2212}4 pts hit) (was: sell Wissa, buy Strand Larsen)\n"
+            ),
+            "{}",
+            update_text(&hit)
         );
         // Only a dropped buy, no new one: no "Why" line.
         let mut c = change;

@@ -22,22 +22,22 @@ Not in scope: changing any decision (plans, chips, alerts timing), the admin tex
   2. A **wording step** (`messages.rs`) turns those structs into Telegram HTML.
 
   The plan, the update and `/chips` share the summary step. The summary step holds no text; the wording step does no arithmetic.
-- **Fixtures** come from a new `fixtures` frame in the plan context: each club's fixtures for the planned GWs, with the opponent's `team_dim.short_name` and home/away, read from `schedule` at the context's deadline view. Contexts without the frame (written before this change) still load, and their messages leave out the fixtures line.
+- **Fixtures** come from a new `fixtures` frame in the plan context: each club's fixtures for the planned GWs, with the opponent's `team_dim.short_name` and home/away, read from the as-of fixture list at the context's deadline view (the newest fixture snapshot before the deadline, else the final `schedule`: what the models see). Contexts without the frame (written before this change) still load, and their messages leave out the fixtures line.
 
 ## Summary step (`crates/fplopt-bot/src/summary.rs`)
 
 `PlanSummary` (from a `UserPlan`):
 - `gw`, `deadline`.
 - `moves`: this GW's transfers in plan 1. Each move holds:
-  - the out and in names, the selling price and the buying price;
+  - the out and in names, the selling price and the buying price. The optimizer pairs outs and ins within a position by player key, which is arbitrary, so the summary re-pairs them: within each position the dearest sale goes with the dearest buy (ties by name). The same pairing is used for the alternatives and `later`. A player missing from the pool takes his position and price from the squad;
   - each player's points summed over the plan's horizon GWs from the xP frame (undecayed);
   - the in player's next 3 fixtures (`(short_name, home)`), or none without the frame.
 - `hit_points` this GW (`hits × hit_cost`).
 - `captain` and `vice`: names and this GW's expected points.
 - `gain_vs_roll`: plan 1's existing `gain_vs_roll`.
-- `bank_after`; `free_transfers_next`: plan 1's FTs at the next GW.
+- `bank_after`; `free_transfers_next`: plan 1's FTs at the next GW; `ft_cap`: the most one can bank.
 - `team`: starters by position (C/V marked) and the bench in order.
-- `alternatives`: plans 2.. in ranked order. Each holds its first-GW moves (names), its hit points, its `gain_vs_roll` and `tied` (the existing `tied` test against plan 1).
+- `alternatives`: plans 2.. in ranked order. Each holds its first-GW moves (names), its hit points, its `gain_vs_roll` and `tied`: the existing `tied` test against plan 1, or its gain reading the same as plan 1's at one decimal. Alternatives with no transfers are dropped when a roll line is shown.
 - `roll`: when present, the roll plan's free transfers next GW and whether it is tied with plan 1.
 - `later`: plan 1's transfers in later GWs, as `(gw, out, in)`.
 - `stopped_early`: plan 1 not optimal.
@@ -85,9 +85,11 @@ Made a transfer already? FPL hides it until the deadline, so tell me with /trans
 ```
 
 The variants:
-- **A hit:** "This week's moves (costs a 4-pt hit)".
+- **A hit:** "This week's moves (−4 pts hit)".
+- **Signs:** points gains read "+2.4" and "−1.0" (a real minus, U+2212; "+0.0" for zero), in the plan, the chip section and `/chips`.
 - **No transfers:** "This week's moves: none, save your transfer (2 free transfers next GW)". The alternatives still follow.
 - **A tie with the roll plan:** "· Save your transfer: just as good (2 free transfers next GW)".
+- **At the free-transfer cap:** when the free transfers shown for next GW equal the cap, ", the most you can bank" follows them: "none, save your transfer (5 free transfers next GW, the most you can bank)", "· Save your transfer: 5 free transfers next GW, the most you can bank", "· Save your transfer: just as good (5 free transfers next GW, the most you can bank)".
 - **"Gain" line:** shown only when `gain_vs_roll` exists.
 - **"Looking ahead":** shown only when `later` is non-empty, with several moves joined by "; ".
 - **Planner stopped early:** "This plan was found under a time limit; there may be a slightly better one."
@@ -108,7 +110,7 @@ Why (pts over the next 6 GWs): now Gonzalo 31.4; before Strand Larsen 30.6
 Full plan and team: /plan
 ```
 
-- "Now" and "was" show this GW's moves ("no transfers" when empty). The "Now/was" line appears only when the moves changed.
+- "Now" and "was" show this GW's moves ("no transfers" when empty). When plan 1 takes a hit, " (−4 pts hit)" follows the "Now" moves, before "(was: …)". The "Now/was" line appears only when the moves changed.
 - The captain and vice lines show "(was X)" or "(unchanged)".
 - The "Why" line compares the new incoming players' horizon points with the earlier ones', for players still in the frame. It is left out when the moves are unchanged.
 - The "Why" line appears only when there is a newly bought player to point to (not for a dropped buy alone), and then only when the moves changed.
@@ -130,8 +132,8 @@ The headline:
 | Case | Headline |
 | --- | --- |
 | Keep | "Chip: keep your chips this week" |
-| Last chance | "Chip: play Free Hit now (2 chips left and 2 GWs before they expire after GW19)" |
-| Planner plays a chip while another is forced | "  2 chips left and 2 GWs before GW19: play one each GW" |
+| Last chance | "Chip: play Free Hit now (2 chips left and 2 GWs before they expire after GW19)"; "1 chip" and "1 GW" when the count is 1 |
+| Planner plays a chip while another is forced | "  2 chips left and 2 GWs before they expire after GW19: play one each GW" (same plurals) |
 | Free Hit or Wildcard headline | append " · your Free Hit team: /chips" (or Wildcard) |
 | Chip check failed | "Chip: couldn't check chips this time, try /chips" |
 
@@ -169,6 +171,7 @@ Tested on 2023–25: beat playing no chips, not clearly better than simple rules
 ```
 
 - **Best scenario with Bench Boost or Triple Captain:** "This week with it: <moves>; captain X" in place of the team.
+- **Chips left:** within each group the chips are in the order Wildcard, Free Hit, Bench Boost, Triple Captain.
 - **One-GW horizon:** "Best this GW: …" replaces "Best over the next N GWs: …".
 - **Best is no chip:** "Best over the next 6 GWs: keep your chips".
 - **Multi-chip scenarios:** they read as today's scenario labels ("Wildcard GW5 + Triple Captain GW9").
@@ -217,7 +220,7 @@ Reasons passed through from planner errors (`EntryError` messages) are shown as 
 
 ## Context: the `fixtures` frame
 
-- **Contents:** `builder.rs` writes `fixtures.parquet` next to the other frames, with columns `gw`, `team_key`, `opponent_short_name`, `home` (bool). It covers every fixture of the context's season in GWs ≥ the planned GW, from `schedule` (and `team_dim` for short names) at the deadline's view.
+- **Contents:** `builder.rs` writes `fixtures.parquet` next to the other frames, with columns `gw`, `team_key`, `opponent_short_name`, `home` (bool). It covers every fixture of the context's season in GWs ≥ the planned GW, from the as-of fixture list (`View::schedule`, and `team_dim` for short names) at the deadline's view.
 - **Doubles and blanks:** a double GW gives two rows, which read "BRE (H) + LEE (A)" as one GW. A blank gives none, which reads "no game".
 - **Loading:** `read_context` loads the frame when present. `PlanContext` gets `fixtures: Option<…>`.
 - **Python:** `meta.json` is unchanged. Python's context reader ignores unknown files, checked: `_FRAMES` in `src/fplopt/bot/context.py` lists the five frames it reads; it must still read Rust contexts during a rollback.

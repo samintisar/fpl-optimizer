@@ -363,15 +363,22 @@ def tie_explains(py_text: str | None, rs_text: str | None) -> str | None:
 
 
 def _without_texts(result: Any) -> Any:
-    """A step result with reply and alert texts blanked: the Rust bot's texts are its own
-    since 2026-11-11 (docs/superpowers/specs/2026-11-11-bot-messaging-ux-design.md), so the
-    gate compares who got a message, outcomes, rows and decisions."""
+    """A step result with reply and alert texts blanked, one entry per chat: the Rust bot's
+    texts are its own since 2026-11-11
+    (docs/superpowers/specs/2026-11-11-bot-messaging-ux-design.md), so the gate compares who
+    got a message, outcomes, rows and decisions."""
     if not isinstance(result, dict):
         return result
     out = dict(result)
     for key in ("replies", "texts"):
         if key in out:
-            out[key] = [[chat, None] for chat, _ in out[key]]
+            # One entry per chat, in order: a long text is split into pieces, and the two
+            # bots' texts (so their piece counts) differ.
+            chats: list[Any] = []
+            for chat, _ in out[key]:
+                if not chats or chats[-1] != chat:
+                    chats.append(chat)
+            out[key] = [[chat, None] for chat in chats]
     return out
 
 
