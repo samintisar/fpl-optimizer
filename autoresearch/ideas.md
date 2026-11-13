@@ -455,7 +455,27 @@ season (2019 both legs −8 to −13 pp, 2022 leg 2 +4 pp). Double-row bias −0
 −0.009 for singles, 9 % of rows: ≪ 1 bp of SSE. Triple-fixture rows (2019/20 restart, n 38
 at h0) carry one P(start) for all three legs, too few to matter.
 
+Looked at 2026-11-13, no lead: **international breaks** (head walk `diag-head-05d4b12`,
+2017–22, single-fixture rows, `diag-intl-break.txt`; post-break = the first GW after a
+league-wide gap of ≥ 11 days, 24 GWs). Regulars (p_start > 0.7) at h0: P(start) 0.871 vs
+0.873 realized post-break, 0.867 vs 0.877 other GWs; per-GW realized − predicted mean
++0.004 post-break vs +0.010 elsewhere (sd 0.033, z −0.77), signs mixed by season (2019–20
+−1.1 to −4.8 pp, 2017/2022 +0.1 to +5.3 pp). Rotation band 0.495 vs 0.494. E[minutes]
+within 1 minute. MSE is higher post-break (h0 4.40 vs 4.15) with bias −0.032 vs −0.004,
+i.e. points a little higher than xP across the board, not a minutes effect (no position
+cell has a consistent sign). Relevant to GW11 (first GW after the November break), but no
+model change to test.
+
 ## Needs the user (not the loop's to do)
+
+- **2026-11-13: no experiments tonight.** `last_checked_gw` is still 10 (bootstrap
+  2026-11-13T023213Z; next deadline GW11 2026-11-21), so no monitor. `sync.sh raw` copied 28
+  new files. The eval hash is still 2c77d376 (head baseline `dc88d54511-2c77d376`), so the
+  crowd (idea 13, b3a642b) stays unscoreable, and `optimizer:v1` decision runs (idea 5) are
+  still blocked by the calibration table. One new diagnostic, international breaks
+  (`diag-intl-break.txt`): calibrated, no lead (see *Looked at*). No variants spent; the
+  ledger is unchanged: 54 scored (14 KEEP, 40 DISCARD), 5 ERROR. Eighth night in a row
+  with no scored experiment (the last was `comp-decay-05`, 2026-11-05). The loop needs one of the blockers lifted to do useful work.
 
 - **2026-11-12: no experiments tonight.** `last_checked_gw` is still 10 (bootstrap
   2026-11-12T023050Z; next deadline GW11 2026-11-21), so no monitor. `sync.sh raw` copied 28
