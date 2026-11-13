@@ -11,3 +11,8 @@ rust-version = "1.99"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# Keep debug builds small: line tables still give file:line in backtraces,
+# but drop full variable/type debug info (was ~55 GB of target/debug per worktree).
+[profile.dev]
+debug = "line-tables-only"
