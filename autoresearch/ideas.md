@@ -468,6 +468,14 @@ model change to test.
 
 ## Needs the user (not the loop's to do)
 
+- **2026-11-15: no experiments tonight.** `last_checked_gw` is still 10 (bootstrap
+  2026-11-15T023213Z; next deadline GW11 2026-11-21), so no monitor. `sync.sh raw` copied 28
+  new files. Eval hash still 2c77d376 (head baseline `74288bfb6f-2c77d376`, reused), so the
+  crowd (idea 13) and `optimizer:v1` decision runs (idea 5) stay blocked. The only untried
+  settings (GBM learning rate, `min_data_in_leaf`) have no mechanism, so they weren't run as
+  knob-turning. Ledger unchanged: 54 scored (14 KEEP, 40 DISCARD), 5 ERROR. Tenth night
+  without a scored experiment; the pause suggestion of 2026-11-14 stands.
+
 - **2026-11-14: no experiments tonight.** `last_checked_gw` is still 10 (bootstrap
   2026-11-14T023213Z; next deadline GW11 2026-11-21), so no monitor. `sync.sh raw` copied 28
   new files. The eval hash is still 2c77d376 (head baseline `d6814bd5e0-2c77d376`), so the
