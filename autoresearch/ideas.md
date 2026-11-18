@@ -468,6 +468,16 @@ model change to test.
 
 ## Needs the user (not the loop's to do)
 
+- **2026-11-18: no experiments tonight.** `last_checked_gw` is still 10 (bootstrap
+  2026-11-18T023113Z; next deadline GW11 2026-11-21T11:00Z), so no monitor. `sync.sh raw`
+  copied 56 new files (two days: there is no commit or note from a 2026-11-17 run);
+  `~/fpl-live` is still at b4bbb63 (#64). Eval hash still 2c77d376 (head baseline
+  `290aff3da4-2c77d376`, mean MSE h0 4.223654, h1–5 4.667852, identical), so the crowd
+  (idea 13) and `optimizer:v1` decision runs (idea 5) stay blocked. No new diagnostic and no
+  variants spent. Ledger unchanged: 54 scored (14 KEEP, 40 DISCARD), 5 ERROR. Twelfth run
+  without a scored experiment; the pause suggestion of 2026-11-14 stands (next real work:
+  the GW11 monitor, once FPL marks GW11 checked after 2026-11-21).
+
 - **2026-11-16: no experiments tonight.** `last_checked_gw` is still 10 (bootstrap
   2026-11-16T023213Z; next deadline GW11 2026-11-21T11:00Z), so no monitor. `sync.sh raw`
   copied 28 new files; `~/fpl-live` is at b4bbb63 (#64). Eval hash still 2c77d376 (head
